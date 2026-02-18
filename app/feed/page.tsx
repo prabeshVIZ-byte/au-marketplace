@@ -11,7 +11,7 @@ type FeedRow = {
   status: string | null;
   created_at: string;
   photo_url: string | null;
-  interest_count: number;
+  interest_count: number | null;
 };
 
 export default function FeedPage() {
@@ -46,7 +46,8 @@ export default function FeedPage() {
     try {
       // --- HARD TIMEOUT so it can never hang forever ---
       const feedPromise = supabase
-        .from("v_feed_items")
+        // IMPORTANT: use the view that actually exposes photo_url + interest_count
+        .from("public_items_with_interest_count")
         .select("id,title,description,status,created_at,photo_url,interest_count")
         .order("created_at", { ascending: false });
 
@@ -228,7 +229,7 @@ export default function FeedPage() {
                 border: "1px solid #0f223f",
               }}
             >
-              {/* PHOTO (top of card) */}
+              {/* PHOTO */}
               {item.photo_url ? (
                 <img
                   src={item.photo_url}
