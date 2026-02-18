@@ -92,13 +92,7 @@ export default function CreatePage() {
     e.preventDefault();
     setMsg(null);
 
-    // Fast UI gate
-    if (!isLoggedIn) {
-      router.push("/feed");
-      return;
-    }
-
-    // Validation
+    // Basic validation
     if (!title.trim()) {
       setMsg("Title is required.");
       return;
@@ -111,29 +105,29 @@ export default function CreatePage() {
 
     setSaving(true);
 
-    // ✅ Reliable auth at submit time (fixes owner_id NULL)
-    const { data: sessionData, error: sessErr } = await supabase.auth.getSession();
+    // ✅ Most important fix:
+    // Session might be null sometimes, so use state as fallback.
+    const { data: sessionData } = await supabase.auth.getSession();
     const session = sessionData.session;
 
-    const uid = session?.user?.id ?? null;
-    const email = session?.user?.email ?? null;
+    const uid = session?.user?.id ?? userId;
+    const email = (session?.user?.email ?? userEmail)?.toLowerCase() ?? null;
 
-    if (sessErr || !uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
+    if (!uid || !email || !email.endsWith("@ashland.edu")) {
       setSaving(false);
-      setMsg("Your session expired. Please sign in again.");
+      setMsg("You’re not signed in. Please sign in again.");
       router.push("/me");
       return;
     }
 
-    // 1) Create the item row first
+    // 1) Create item row
     const { data: created, error: createErr } = await supabase
       .from("items")
       .insert([
         {
-          owner_id: uid,
+          owner_id: uid, // ✅ never null now
           title: title.trim(),
-          // Description is optional
-          description: description.trim() || null,
+          description: description.trim() || null, // ✅ optional
           status: "available",
           photo_url: null,
         },
@@ -149,14 +143,14 @@ export default function CreatePage() {
 
     const itemId = created.id as string;
 
-    // 2) If no photo, go to item page
+    // 2) No photo? go to item page
     if (!file) {
       setSaving(false);
       router.push(`/item/${itemId}`);
       return;
     }
 
-    // 3) Upload photo to Storage
+    // 3) Upload photo
     const ext = getExt(file.name);
     const filename = `${crypto.randomUUID()}.${ext}`;
     const path = `${uid}/${itemId}/${filename}`;
@@ -174,11 +168,11 @@ export default function CreatePage() {
       return;
     }
 
-    // 4) Public URL for displaying the image
+    // 4) Public URL
     const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
     const publicUrl = pub.publicUrl;
 
-    // 5) Save photo in TWO places
+    // 5) Save photo URL to items + add row to item_photos
     const [{ error: updateItemErr }, { error: insertPhotoErr }] = await Promise.all([
       supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId),
       supabase.from("item_photos").insert([
