@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -11,7 +11,7 @@ type FeedRow = {
   status: string | null;
   created_at: string;
   photo_url: string | null;
-  interest_count: number | null;
+  interest_count: number;
 };
 
 export default function FeedPage() {
@@ -29,36 +29,52 @@ export default function FeedPage() {
   const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
 
+  const isLoggedIn = useMemo(() => {
+    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  }, [userId, userEmail]);
+
+  // prevents stale responses from overwriting newer ones
+  const requestIdRef = useRef(0);
+
   async function syncAuth() {
-    const { data } = await supabase.auth.getSession();
+    const { data, error } = await supabase.auth.getSession();
+    if (error) {
+      setUserId(null);
+      setUserEmail(null);
+      return;
+    }
     const session = data.session;
     setUserId(session?.user?.id ?? null);
     setUserEmail(session?.user?.email ?? null);
   }
 
-  const isLoggedIn =
-    !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-
   async function loadFeed() {
+    const myRequestId = ++requestIdRef.current;
+
     setLoading(true);
     setErr(null);
 
     try {
-      // --- HARD TIMEOUT so it can never hang forever ---
+      // Increase timeout (6s is too aggressive for free tier sometimes)
+      const FEED_TIMEOUT_MS = 12000;
+
       const feedPromise = supabase
-        // IMPORTANT: use the view that actually exposes photo_url + interest_count
-        .from("public_items_with_interest_count")
+        .from("v_feed_items")
         .select("id,title,description,status,created_at,photo_url,interest_count")
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .limit(50);
 
       const timeoutPromise = new Promise<{ data: any; error: any }>((resolve) =>
         setTimeout(
           () => resolve({ data: null, error: { message: "Feed request timed out." } }),
-          6000
+          FEED_TIMEOUT_MS
         )
       );
 
       const { data, error } = await Promise.race([feedPromise, timeoutPromise]);
+
+      // If another request started after this one, ignore this result.
+      if (myRequestId !== requestIdRef.current) return;
 
       if (error) {
         setItems([]);
@@ -70,32 +86,37 @@ export default function FeedPage() {
       const rows = (data as FeedRow[]) || [];
       setItems(rows);
 
-      // If logged in, load which items YOU are interested in
+      // Only load "myInterested" if logged in
       const { data: sessionData } = await supabase.auth.getSession();
       const uid = sessionData.session?.user?.id ?? null;
 
-      if (uid && rows.length > 0) {
-        const ids = rows.map((r) => r.id);
+      if (!uid || rows.length === 0) {
+        setMyInterested({});
+        return;
+      }
 
-        const { data: mine, error: mineErr } = await supabase
-          .from("interests")
-          .select("item_id")
-          .in("item_id", ids);
+      const ids = rows.map((r) => r.id);
 
-        if (!mineErr) {
-          const map: Record<string, boolean> = {};
-          for (const r of mine || []) map[(r as any).item_id] = true;
-          setMyInterested(map);
-        } else {
-          setMyInterested({});
-        }
+      const { data: mine, error: mineErr } = await supabase
+        .from("interests")
+        .select("item_id")
+        .eq("user_id", uid)
+        .in("item_id", ids);
+
+      if (myRequestId !== requestIdRef.current) return;
+
+      if (!mineErr) {
+        const map: Record<string, boolean> = {};
+        for (const r of mine || []) map[(r as any).item_id] = true;
+        setMyInterested(map);
       } else {
         setMyInterested({});
       }
     } catch (e: any) {
+      if (myRequestId !== requestIdRef.current) return;
       setErr(e?.message || "Unexpected error.");
     } finally {
-      setLoading(false);
+      if (myRequestId === requestIdRef.current) setLoading(false);
     }
   }
 
@@ -133,14 +154,12 @@ export default function FeedPage() {
       return;
     }
 
-    const { error } = await supabase
-      .from("interests")
-      .insert([{ item_id: itemId, user_id: userId }]);
+    const { error } = await supabase.from("interests").insert([{ item_id: itemId, user_id: userId }]);
 
     setSavingId(null);
 
     if (error) {
-      if (error.message.toLowerCase().includes("duplicate key")) {
+      if (error.message.toLowerCase().includes("duplicate")) {
         setMyInterested((p) => ({ ...p, [itemId]: true }));
         return;
       }
@@ -157,15 +176,29 @@ export default function FeedPage() {
   }
 
   useEffect(() => {
-    syncAuth();
-    loadFeed();
+    let alive = true;
 
+    (async () => {
+      await syncAuth();
+      if (!alive) return;
+      await loadFeed();
+    })();
+
+    // Debounced reload on auth change (prevents spam)
+    let t: any = null;
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      syncAuth();
-      loadFeed();
+      if (t) clearTimeout(t);
+      t = setTimeout(async () => {
+        await syncAuth();
+        await loadFeed();
+      }, 400);
     });
 
-    return () => sub.subscription.unsubscribe();
+    return () => {
+      alive = false;
+      if (t) clearTimeout(t);
+      sub.subscription.unsubscribe();
+    };
   }, []);
 
   return (
@@ -209,13 +242,7 @@ export default function FeedPage() {
 
       <h2 style={{ marginTop: 26 }}>Public Feed</h2>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-          gap: 16,
-        }}
-      >
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
         {items.map((item) => {
           const mine = myInterested[item.id] === true;
 
@@ -229,7 +256,6 @@ export default function FeedPage() {
                 border: "1px solid #0f223f",
               }}
             >
-              {/* PHOTO */}
               {item.photo_url ? (
                 <img
                   src={item.photo_url}
@@ -277,9 +303,7 @@ export default function FeedPage() {
                 {item.description || "—"}
               </div>
 
-              <div style={{ opacity: 0.75, marginTop: 10 }}>
-                {item.interest_count || 0} interested
-              </div>
+              <div style={{ opacity: 0.75, marginTop: 10 }}>{item.interest_count || 0} interested</div>
 
               <button
                 onClick={() => router.push(`/item/${item.id}`)}
