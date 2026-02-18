@@ -33,7 +33,7 @@ export default function CreatePage() {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
 
-  // Keep auth synced + kick signed-out users
+  // Keep auth synced + kick signed-out/non-AU users
   useEffect(() => {
     let mounted = true;
 
@@ -92,13 +92,15 @@ export default function CreatePage() {
     e.preventDefault();
     setMsg(null);
 
-    if (!isLoggedIn || !userId) {
+    // UI gate (fast)
+    if (!isLoggedIn) {
       router.push("/feed");
       return;
     }
 
-    if (!title.trim() || !description.trim()) {
-      setMsg("Fill both title and description.");
+    // Validation
+    if (!title.trim()) {
+      setMsg("Title is required.");
       return;
     }
 
@@ -109,15 +111,27 @@ export default function CreatePage() {
 
     setSaving(true);
 
-    // 1) Create the item row
+    // Strong auth check at submit-time (avoids stale state)
+    const { data: userData, error: userErr } = await supabase.auth.getUser();
+    const user = userData?.user;
+
+    if (userErr || !user?.id || !user.email?.toLowerCase().endsWith("@ashland.edu")) {
+      setSaving(false);
+      setMsg("Your session expired. Please sign in again.");
+      router.push("/me");
+      return;
+    }
+
+    // 1) Create item row first (RLS requires owner_id = auth.uid())
     const { data: created, error: createErr } = await supabase
       .from("items")
       .insert([
         {
-          owner_id: userId,
+          owner_id: user.id,
           title: title.trim(),
-          description: description.trim(),
+          description: description.trim() || null,
           status: "available",
+          photo_url: null,
         },
       ])
       .select("id")
@@ -131,7 +145,7 @@ export default function CreatePage() {
 
     const itemId = created.id as string;
 
-    // 2) If no photo, redirect to detail page
+    // 2) If no photo, go to detail page
     if (!file) {
       setSaving(false);
       router.push(`/item/${itemId}`);
@@ -139,8 +153,10 @@ export default function CreatePage() {
     }
 
     // 3) Upload photo to Storage
+    // Use user folder + item folder (cleaner + supports multiple photos later)
     const ext = getExt(file.name);
-    const path = `${itemId}/${crypto.randomUUID()}.${ext}`;
+    const filename = `${crypto.randomUUID()}.${ext}`;
+    const path = `${user.id}/${itemId}/${filename}`;
 
     const { error: uploadErr } = await supabase.storage
       .from("item-photos")
@@ -153,22 +169,22 @@ export default function CreatePage() {
     if (uploadErr) {
       setSaving(false);
       setMsg(`Item posted, but photo upload failed: ${uploadErr.message}`);
+      // Still allow them to view the item
+      router.push(`/item/${itemId}`);
       return;
     }
 
-    // 4) Public URL for displaying the image
+    // 4) Public URL for displaying image
     const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
     const publicUrl = pub.publicUrl;
 
-    // 5) Save photo in TWO places:
-    //    A) items.photo_url (so feed/detail can show it immediately)
-    //    B) item_photos row (so later you can support multiple photos)
+    // 5) Save photo URL on items AND record in item_photos
     const [{ error: updateItemErr }, { error: insertPhotoErr }] = await Promise.all([
       supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId),
       supabase.from("item_photos").insert([
         {
           item_id: itemId,
-          owner_id: userId,
+          owner_id: user.id,
           photo_url: publicUrl,
           storage_path: path,
         },
@@ -179,21 +195,17 @@ export default function CreatePage() {
 
     if (updateItemErr) {
       setMsg(`Item posted, but could not save photo URL: ${updateItemErr.message}`);
-      return;
-    }
-
-    // If your item_photos table doesn't have these columns, this will error.
-    // In that case: open item_photos table and confirm column names, then rename here.
-    if (insertPhotoErr) {
-      setMsg(
-        `Item posted + photo uploaded, but item_photos insert failed: ${insertPhotoErr.message}`
-      );
-      // Still redirect to detail because the image is saved on items.photo_url
       router.push(`/item/${itemId}`);
       return;
     }
 
-    // 6) Success → go to the new item page
+    // If item_photos columns differ, this might fail — but items.photo_url is still set
+    if (insertPhotoErr) {
+      setMsg(`Item posted + photo uploaded, but photo record failed: ${insertPhotoErr.message}`);
+      router.push(`/item/${itemId}`);
+      return;
+    }
+
     router.push(`/item/${itemId}`);
   }
 
@@ -224,10 +236,13 @@ export default function CreatePage() {
 
       <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>List New Item</h1>
 
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 520 }}>
+      <form
+        onSubmit={handleSubmit}
+        style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 520 }}
+      >
         <input
           type="text"
-          placeholder="Item title"
+          placeholder="Item title (required)"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           style={{
@@ -240,7 +255,7 @@ export default function CreatePage() {
         />
 
         <textarea
-          placeholder="Description"
+          placeholder="Description (optional)"
           rows={4}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
