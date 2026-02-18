@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -29,52 +29,42 @@ export default function FeedPage() {
   const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
 
-  const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-  }, [userId, userEmail]);
-
-  // prevents stale responses from overwriting newer ones
-  const requestIdRef = useRef(0);
+  // photo modal
+  const [openImg, setOpenImg] = useState<string | null>(null);
+  const [openTitle, setOpenTitle] = useState<string>("");
 
   async function syncAuth() {
-    const { data, error } = await supabase.auth.getSession();
-    if (error) {
-      setUserId(null);
-      setUserEmail(null);
-      return;
-    }
+    const { data } = await supabase.auth.getSession();
     const session = data.session;
     setUserId(session?.user?.id ?? null);
     setUserEmail(session?.user?.email ?? null);
   }
 
-  async function loadFeed() {
-    const myRequestId = ++requestIdRef.current;
+  const isLoggedIn =
+    !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
 
+  async function loadFeed() {
     setLoading(true);
     setErr(null);
 
     try {
-      // Increase timeout (6s is too aggressive for free tier sometimes)
-      const FEED_TIMEOUT_MS = 12000;
-
       const feedPromise = supabase
         .from("v_feed_items")
         .select("id,title,description,status,created_at,photo_url,interest_count")
-        .order("created_at", { ascending: false })
-        .limit(50);
+        .order("created_at", { ascending: false });
 
       const timeoutPromise = new Promise<{ data: any; error: any }>((resolve) =>
         setTimeout(
-          () => resolve({ data: null, error: { message: "Feed request timed out." } }),
-          FEED_TIMEOUT_MS
+          () =>
+            resolve({
+              data: null,
+              error: { message: "Feed request timed out." },
+            }),
+          6000
         )
       );
 
       const { data, error } = await Promise.race([feedPromise, timeoutPromise]);
-
-      // If another request started after this one, ignore this result.
-      if (myRequestId !== requestIdRef.current) return;
 
       if (error) {
         setItems([]);
@@ -86,37 +76,32 @@ export default function FeedPage() {
       const rows = (data as FeedRow[]) || [];
       setItems(rows);
 
-      // Only load "myInterested" if logged in
+      // If logged in, load which items YOU are interested in
       const { data: sessionData } = await supabase.auth.getSession();
       const uid = sessionData.session?.user?.id ?? null;
 
-      if (!uid || rows.length === 0) {
-        setMyInterested({});
-        return;
-      }
+      if (uid && rows.length > 0) {
+        const ids = rows.map((r) => r.id);
 
-      const ids = rows.map((r) => r.id);
+        const { data: mine, error: mineErr } = await supabase
+          .from("interests")
+          .select("item_id")
+          .in("item_id", ids);
 
-      const { data: mine, error: mineErr } = await supabase
-        .from("interests")
-        .select("item_id")
-        .eq("user_id", uid)
-        .in("item_id", ids);
-
-      if (myRequestId !== requestIdRef.current) return;
-
-      if (!mineErr) {
-        const map: Record<string, boolean> = {};
-        for (const r of mine || []) map[(r as any).item_id] = true;
-        setMyInterested(map);
+        if (!mineErr) {
+          const map: Record<string, boolean> = {};
+          for (const r of mine || []) map[(r as any).item_id] = true;
+          setMyInterested(map);
+        } else {
+          setMyInterested({});
+        }
       } else {
         setMyInterested({});
       }
     } catch (e: any) {
-      if (myRequestId !== requestIdRef.current) return;
       setErr(e?.message || "Unexpected error.");
     } finally {
-      if (myRequestId === requestIdRef.current) setLoading(false);
+      setLoading(false);
     }
   }
 
@@ -154,12 +139,14 @@ export default function FeedPage() {
       return;
     }
 
-    const { error } = await supabase.from("interests").insert([{ item_id: itemId, user_id: userId }]);
+    const { error } = await supabase
+      .from("interests")
+      .insert([{ item_id: itemId, user_id: userId }]);
 
     setSavingId(null);
 
     if (error) {
-      if (error.message.toLowerCase().includes("duplicate")) {
+      if (error.message.toLowerCase().includes("duplicate key")) {
         setMyInterested((p) => ({ ...p, [itemId]: true }));
         return;
       }
@@ -176,29 +163,24 @@ export default function FeedPage() {
   }
 
   useEffect(() => {
-    let alive = true;
+    syncAuth();
+    loadFeed();
 
-    (async () => {
-      await syncAuth();
-      if (!alive) return;
-      await loadFeed();
-    })();
-
-    // Debounced reload on auth change (prevents spam)
-    let t: any = null;
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      if (t) clearTimeout(t);
-      t = setTimeout(async () => {
-        await syncAuth();
-        await loadFeed();
-      }, 400);
+      syncAuth();
+      loadFeed();
     });
 
-    return () => {
-      alive = false;
-      if (t) clearTimeout(t);
-      sub.subscription.unsubscribe();
-    };
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  // ESC closes modal
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpenImg(null);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   return (
@@ -242,7 +224,13 @@ export default function FeedPage() {
 
       <h2 style={{ marginTop: 26 }}>Public Feed</h2>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+          gap: 16,
+        }}
+      >
         {items.map((item) => {
           const mine = myInterested[item.id] === true;
 
@@ -256,20 +244,39 @@ export default function FeedPage() {
                 border: "1px solid #0f223f",
               }}
             >
+              {/* PHOTO (top of card) */}
               {item.photo_url ? (
-                <img
-                  src={item.photo_url}
-                  alt={item.title}
-                  loading="lazy"
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenImg(item.photo_url!);
+                    setOpenTitle(item.title);
+                  }}
                   style={{
+                    padding: 0,
+                    border: "none",
+                    background: "transparent",
+                    cursor: "pointer",
                     width: "100%",
-                    height: 160,
-                    objectFit: "cover",
-                    borderRadius: 12,
-                    border: "1px solid #0f223f",
                     marginBottom: 12,
                   }}
-                />
+                  aria-label="Open photo"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={item.photo_url}
+                    alt={item.title}
+                    loading="lazy"
+                    style={{
+                      width: "100%",
+                      height: 160,
+                      objectFit: "cover",
+                      borderRadius: 12,
+                      border: "1px solid #0f223f",
+                      display: "block",
+                    }}
+                  />
+                </button>
               ) : (
                 <div
                   style={{
@@ -303,7 +310,9 @@ export default function FeedPage() {
                 {item.description || "—"}
               </div>
 
-              <div style={{ opacity: 0.75, marginTop: 10 }}>{item.interest_count || 0} interested</div>
+              <div style={{ opacity: 0.75, marginTop: 10 }}>
+                {item.interest_count || 0} interested
+              </div>
 
               <button
                 onClick={() => router.push(`/item/${item.id}`)}
@@ -350,6 +359,79 @@ export default function FeedPage() {
           );
         })}
       </div>
+
+      {/* FULLSCREEN IMAGE MODAL */}
+      {openImg && (
+        <div
+          onClick={() => setOpenImg(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.75)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+            zIndex: 9999,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(1000px, 95vw)",
+              maxHeight: "90vh",
+              background: "#0b1730",
+              border: "1px solid #0f223f",
+              borderRadius: 14,
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "10px 12px",
+                borderBottom: "1px solid #0f223f",
+              }}
+            >
+              <div style={{ fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {openTitle || "Photo"}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setOpenImg(null)}
+                style={{
+                  background: "transparent",
+                  color: "white",
+                  border: "1px solid #334155",
+                  padding: "6px 10px",
+                  borderRadius: 10,
+                  cursor: "pointer",
+                  fontWeight: 900,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={openImg}
+              alt={openTitle || "Full photo"}
+              style={{
+                width: "100%",
+                height: "auto",
+                maxHeight: "80vh",
+                objectFit: "contain",
+                display: "block",
+                background: "black",
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

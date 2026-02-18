@@ -31,6 +31,10 @@ export default function ItemDetailPage() {
 
   const [saving, setSaving] = useState(false);
 
+  // photo modal
+  const [openImg, setOpenImg] = useState<string | null>(null);
+  const [openTitle, setOpenTitle] = useState<string>("");
+
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
@@ -46,7 +50,6 @@ export default function ItemDetailPage() {
     setLoading(true);
     setErr(null);
 
-    // Pull from the SAME view as /feed so you get interest_count
     const { data, error } = await supabase
       .from("v_feed_items")
       .select("id,title,description,status,created_at,photo_url,interest_count")
@@ -73,7 +76,6 @@ export default function ItemDetailPage() {
       return;
     }
 
-    // RLS should only allow the user to see their own interests.
     const { data: rows, error } = await supabase
       .from("interests")
       .select("item_id")
@@ -105,6 +107,15 @@ export default function ItemDetailPage() {
     return () => sub.subscription.unsubscribe();
   }, [id]);
 
+  // ESC closes modal
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpenImg(null);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   async function toggleInterest() {
     if (!isLoggedIn || !userId) {
       router.push("/me");
@@ -114,7 +125,6 @@ export default function ItemDetailPage() {
 
     setSaving(true);
 
-    // If already interested → delete. Else → insert.
     if (mine) {
       const { error } = await supabase
         .from("interests")
@@ -141,7 +151,6 @@ export default function ItemDetailPage() {
     setSaving(false);
 
     if (error) {
-      // If user double-clicks, unique constraint triggers
       if (error.message.toLowerCase().includes("duplicate key")) {
         setMine(true);
         return;
@@ -202,7 +211,13 @@ export default function ItemDetailPage() {
 
       {item && (
         <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "1fr", gap: 16, maxWidth: 900 }}>
-          <div
+          <button
+            type="button"
+            onClick={() => {
+              if (!item.photo_url) return;
+              setOpenImg(item.photo_url);
+              setOpenTitle(item.title);
+            }}
             style={{
               height: 320,
               borderRadius: 14,
@@ -212,19 +227,22 @@ export default function ItemDetailPage() {
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
+              padding: 0,
+              cursor: item.photo_url ? "pointer" : "default",
             }}
+            aria-label="Open photo"
           >
             {item.photo_url ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={item.photo_url}
                 alt={item.title}
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
               />
             ) : (
               <span style={{ opacity: 0.6, fontWeight: 900 }}>No photo</span>
             )}
-          </div>
+          </button>
 
           <div style={{ background: "#0b1730", borderRadius: 14, padding: 16, border: "1px solid #0f223f" }}>
             <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>{item.title}</h1>
@@ -257,6 +275,79 @@ export default function ItemDetailPage() {
             >
               {saving ? "Saving…" : isLoggedIn ? (mine ? "Uninterested" : "Interested") : "Interested (login required)"}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* FULLSCREEN IMAGE MODAL */}
+      {openImg && (
+        <div
+          onClick={() => setOpenImg(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.75)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+            zIndex: 9999,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(1000px, 95vw)",
+              maxHeight: "90vh",
+              background: "#0b1730",
+              border: "1px solid #0f223f",
+              borderRadius: 14,
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "10px 12px",
+                borderBottom: "1px solid #0f223f",
+              }}
+            >
+              <div style={{ fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {openTitle || "Photo"}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setOpenImg(null)}
+                style={{
+                  background: "transparent",
+                  color: "white",
+                  border: "1px solid #334155",
+                  padding: "6px 10px",
+                  borderRadius: 10,
+                  cursor: "pointer",
+                  fontWeight: 900,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={openImg}
+              alt={openTitle || "Full photo"}
+              style={{
+                width: "100%",
+                height: "auto",
+                maxHeight: "80vh",
+                objectFit: "contain",
+                display: "block",
+                background: "black",
+              }}
+            />
           </div>
         </div>
       )}
