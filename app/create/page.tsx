@@ -1,3 +1,4 @@
+// create page updated
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -345,7 +346,7 @@ export default function CreatePage() {
         >
           {saving ? "Posting…" : "Post Item"}
         </button>
-      </form>
+      </form>git status
     </div>
   );
 }
