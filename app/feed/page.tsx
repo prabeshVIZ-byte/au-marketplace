@@ -194,7 +194,7 @@ export default function FeedPage() {
         </div>
 
         <button
-          onClick={() => router.push("/me")}
+          onClick={() => router.push("/my-items")}
           style={{
             background: "transparent",
             padding: "10px 14px",
