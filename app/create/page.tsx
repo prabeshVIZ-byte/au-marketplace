@@ -124,14 +124,13 @@ export default function CreatePage() {
     const { data: created, error: createErr } = await supabase
       .from("items")
       .insert([
-        {
-          owner_id: uid, // ✅ never null now
-          title: title.trim(),
-          description: description.trim() || null, // ✅ optional
-          status: "available",
-          photo_url: null,
-        },
-      ])
+  {
+    title: title.trim(),
+    description: description.trim() || null,
+    status: "available",
+    photo_url: null,
+  },
+])
       .select("id")
       .single();
 
