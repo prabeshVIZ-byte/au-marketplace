@@ -1,4 +1,3 @@
-// create page updated
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -78,7 +77,7 @@ export default function CreatePage() {
     };
   }, [router]);
 
-  // preview for image
+  // Preview for image
   useEffect(() => {
     if (!file) {
       setPreviewUrl(null);
@@ -93,7 +92,7 @@ export default function CreatePage() {
     e.preventDefault();
     setMsg(null);
 
-    // UI gate (fast)
+    // Fast UI gate
     if (!isLoggedIn) {
       router.push("/feed");
       return;
@@ -112,24 +111,28 @@ export default function CreatePage() {
 
     setSaving(true);
 
-    // Strong auth check at submit-time (avoids stale state)
-    const { data: userData, error: userErr } = await supabase.auth.getUser();
-    const user = userData?.user;
+    // ✅ Reliable auth at submit time (fixes owner_id NULL)
+    const { data: sessionData, error: sessErr } = await supabase.auth.getSession();
+    const session = sessionData.session;
 
-    if (userErr || !user?.id || !user.email?.toLowerCase().endsWith("@ashland.edu")) {
+    const uid = session?.user?.id ?? null;
+    const email = session?.user?.email ?? null;
+
+    if (sessErr || !uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
       setSaving(false);
       setMsg("Your session expired. Please sign in again.");
       router.push("/me");
       return;
     }
 
-    // 1) Create item row first (RLS requires owner_id = auth.uid())
+    // 1) Create the item row first
     const { data: created, error: createErr } = await supabase
       .from("items")
       .insert([
         {
-          owner_id: user.id,
+          owner_id: uid,
           title: title.trim(),
+          // Description is optional
           description: description.trim() || null,
           status: "available",
           photo_url: null,
@@ -146,7 +149,7 @@ export default function CreatePage() {
 
     const itemId = created.id as string;
 
-    // 2) If no photo, go to detail page
+    // 2) If no photo, go to item page
     if (!file) {
       setSaving(false);
       router.push(`/item/${itemId}`);
@@ -154,38 +157,34 @@ export default function CreatePage() {
     }
 
     // 3) Upload photo to Storage
-    // Use user folder + item folder (cleaner + supports multiple photos later)
     const ext = getExt(file.name);
     const filename = `${crypto.randomUUID()}.${ext}`;
-    const path = `${user.id}/${itemId}/${filename}`;
+    const path = `${uid}/${itemId}/${filename}`;
 
-    const { error: uploadErr } = await supabase.storage
-      .from("item-photos")
-      .upload(path, file, {
-        cacheControl: "3600",
-        upsert: false,
-        contentType: file.type || undefined,
-      });
+    const { error: uploadErr } = await supabase.storage.from("item-photos").upload(path, file, {
+      cacheControl: "3600",
+      upsert: false,
+      contentType: file.type || undefined,
+    });
 
     if (uploadErr) {
       setSaving(false);
       setMsg(`Item posted, but photo upload failed: ${uploadErr.message}`);
-      // Still allow them to view the item
       router.push(`/item/${itemId}`);
       return;
     }
 
-    // 4) Public URL for displaying image
+    // 4) Public URL for displaying the image
     const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
     const publicUrl = pub.publicUrl;
 
-    // 5) Save photo URL on items AND record in item_photos
+    // 5) Save photo in TWO places
     const [{ error: updateItemErr }, { error: insertPhotoErr }] = await Promise.all([
       supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId),
       supabase.from("item_photos").insert([
         {
           item_id: itemId,
-          owner_id: user.id,
+          owner_id: uid,
           photo_url: publicUrl,
           storage_path: path,
         },
@@ -200,7 +199,6 @@ export default function CreatePage() {
       return;
     }
 
-    // If item_photos columns differ, this might fail — but items.photo_url is still set
     if (insertPhotoErr) {
       setMsg(`Item posted + photo uploaded, but photo record failed: ${insertPhotoErr.message}`);
       router.push(`/item/${itemId}`);
@@ -269,7 +267,14 @@ export default function CreatePage() {
           }}
         />
 
-        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
+        <div
+          style={{
+            border: "1px solid #0f223f",
+            borderRadius: 14,
+            padding: 14,
+            background: "#0b1730",
+          }}
+        >
           <div style={{ fontWeight: 900, marginBottom: 10 }}>Photo (optional)</div>
 
           {previewUrl ? (
@@ -346,7 +351,7 @@ export default function CreatePage() {
         >
           {saving ? "Posting…" : "Post Item"}
         </button>
-      </form>git status
+      </form>
     </div>
   );
 }
