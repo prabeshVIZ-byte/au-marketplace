@@ -32,23 +32,18 @@ export default function CreatePage() {
     return !!email && email.toLowerCase().endsWith("@ashland.edu");
   }, [email]);
 
-  // keep auth state synced for UI gating
+  // keep auth state synced for UI gating only
   useEffect(() => {
     let mounted = true;
 
     async function sync() {
       const { data } = await supabase.auth.getSession();
       if (!mounted) return;
-
-      const e = data.session?.user?.email ?? null;
-      setEmail(e);
+      setEmail(data.session?.user?.email ?? null);
     }
 
     sync();
-
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      sync();
-    });
+    const { data: sub } = supabase.auth.onAuthStateChange(() => sync());
 
     return () => {
       mounted = false;
@@ -56,7 +51,7 @@ export default function CreatePage() {
     };
   }, []);
 
-  // preview for image
+  // image preview
   useEffect(() => {
     if (!file) {
       setPreviewUrl(null);
@@ -71,14 +66,13 @@ export default function CreatePage() {
     e.preventDefault();
     setMsg(null);
 
-    // IMPORTANT: get session AT SUBMIT TIME (never trust stale state)
+    // Always check session at submit time
     const { data: s } = await supabase.auth.getSession();
     const session = s.session;
     const userEmail = session?.user?.email ?? null;
 
     if (!session || !userEmail || !userEmail.toLowerCase().endsWith("@ashland.edu")) {
-      router.push("/feed");
-      router.refresh();
+      router.push("/me");
       return;
     }
 
@@ -97,7 +91,7 @@ export default function CreatePage() {
 
     setSaving(true);
 
-    // 1) Insert item WITHOUT owner_id (DB trigger fills it)
+    // 1) Create item WITHOUT owner_id (trigger fills it)
     const { data: created, error: createErr } = await supabase
       .from("items")
       .insert([
@@ -119,14 +113,14 @@ export default function CreatePage() {
 
     const itemId = created.id as string;
 
-    // 2) No photo → done
+    // 2) No photo -> done
     if (!file) {
       setSaving(false);
       router.push(`/item/${itemId}`);
       return;
     }
 
-    // 3) Upload photo
+    // 3) Upload to Storage
     const ext = getExt(file.name);
     const path = `${itemId}/${crypto.randomUUID()}.${ext}`;
 
@@ -145,34 +139,29 @@ export default function CreatePage() {
       return;
     }
 
-    // 4) Get public URL
+    // 4) Public URL (requires bucket PUBLIC)
     const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
     const publicUrl = pub.publicUrl;
 
-    // 5) Save photo url on items + optional item_photos row
+    // 5) Save on items + optional item_photos row
     const [{ error: updateItemErr }, { error: insertPhotoErr }] = await Promise.all([
       supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId),
       supabase.from("item_photos").insert([
-        {
-          item_id: itemId,
-          photo_url: publicUrl,
-          storage_path: path,
-        },
+        { item_id: itemId, photo_url: publicUrl, storage_path: path },
       ]),
     ]);
 
     setSaving(false);
 
     if (updateItemErr) {
-      setMsg(`Item posted, but could not save photo URL: ${updateItemErr.message}`);
+      setMsg(`Photo uploaded, but items.photo_url update failed: ${updateItemErr.message}`);
+      router.push(`/item/${itemId}`);
       return;
     }
 
-    // If item_photos schema differs, this may fail — item still works because items.photo_url is set.
+    // if schema differs, ignore; items.photo_url is enough for feed
     if (insertPhotoErr) {
-      setMsg(`Item posted + photo uploaded, but item_photos insert failed: ${insertPhotoErr.message}`);
-      router.push(`/item/${itemId}`);
-      return;
+      setMsg(`Photo uploaded, but item_photos insert failed: ${insertPhotoErr.message}`);
     }
 
     router.push(`/item/${itemId}`);
@@ -266,7 +255,12 @@ export default function CreatePage() {
             </div>
           )}
 
-          <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} style={{ marginTop: 12 }} />
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            style={{ marginTop: 12 }}
+          />
 
           {file && (
             <button
