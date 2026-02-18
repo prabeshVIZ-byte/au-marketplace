@@ -205,7 +205,7 @@ export default function FeedPage() {
             fontWeight: 800,
           }}
         >
-          {isLoggedIn ? "Account" : "Request Access"}
+         {isLoggedIn ? "My listings" : "Request Access"}
         </button>
       </div>
 
@@ -315,7 +315,7 @@ export default function FeedPage() {
               </div>
 
               <button
-                onClick={() => router.push(`/item/${item.id}`)}
+                onClick={() => router.push(isLoggedIn ? "/my-items" : "/me")}
                 style={{
                   marginTop: 12,
                   width: "100%",
