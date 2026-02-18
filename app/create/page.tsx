@@ -17,8 +17,7 @@ function isImage(file: File) {
 export default function CreatePage() {
   const router = useRouter();
 
-  const [userId, setUserId] = useState<string | null>(null);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [email, setEmail] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -29,55 +28,35 @@ export default function CreatePage() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
-  const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-  }, [userId, userEmail]);
+  const isAllowed = useMemo(() => {
+    return !!email && email.toLowerCase().endsWith("@ashland.edu");
+  }, [email]);
 
-  // Keep auth synced + kick signed-out/non-AU users
+  // keep auth state synced for UI gating
   useEffect(() => {
     let mounted = true;
 
-    async function syncAuth() {
-      const { data, error } = await supabase.auth.getSession();
+    async function sync() {
+      const { data } = await supabase.auth.getSession();
       if (!mounted) return;
 
-      if (error) {
-        setUserId(null);
-        setUserEmail(null);
-        router.push("/feed");
-        router.refresh();
-        return;
-      }
-
-      const session = data.session;
-      const uid = session?.user?.id ?? null;
-      const email = session?.user?.email ?? null;
-
-      if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
-        setUserId(null);
-        setUserEmail(null);
-        router.push("/feed");
-        router.refresh();
-        return;
-      }
-
-      setUserId(uid);
-      setUserEmail(email);
+      const e = data.session?.user?.email ?? null;
+      setEmail(e);
     }
 
-    syncAuth();
+    sync();
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      syncAuth();
+      sync();
     });
 
     return () => {
       mounted = false;
       sub.subscription.unsubscribe();
     };
-  }, [router]);
+  }, []);
 
-  // Preview for image
+  // preview for image
   useEffect(() => {
     if (!file) {
       setPreviewUrl(null);
@@ -92,8 +71,21 @@ export default function CreatePage() {
     e.preventDefault();
     setMsg(null);
 
-    // Basic validation
-    if (!title.trim()) {
+    // IMPORTANT: get session AT SUBMIT TIME (never trust stale state)
+    const { data: s } = await supabase.auth.getSession();
+    const session = s.session;
+    const userEmail = session?.user?.email ?? null;
+
+    if (!session || !userEmail || !userEmail.toLowerCase().endsWith("@ashland.edu")) {
+      router.push("/feed");
+      router.refresh();
+      return;
+    }
+
+    const cleanTitle = title.trim();
+    const cleanDesc = description.trim() || null;
+
+    if (!cleanTitle) {
       setMsg("Title is required.");
       return;
     }
@@ -105,32 +97,17 @@ export default function CreatePage() {
 
     setSaving(true);
 
-    // ✅ Most important fix:
-    // Session might be null sometimes, so use state as fallback.
-    const { data: sessionData } = await supabase.auth.getSession();
-    const session = sessionData.session;
-
-    const uid = session?.user?.id ?? userId;
-    const email = (session?.user?.email ?? userEmail)?.toLowerCase() ?? null;
-
-    if (!uid || !email || !email.endsWith("@ashland.edu")) {
-      setSaving(false);
-      setMsg("You’re not signed in. Please sign in again.");
-      router.push("/me");
-      return;
-    }
-
-    // 1) Create item row
+    // 1) Insert item WITHOUT owner_id (DB trigger fills it)
     const { data: created, error: createErr } = await supabase
       .from("items")
       .insert([
-  {
-    title: title.trim(),
-    description: description.trim() || null,
-    status: "available",
-    photo_url: null,
-  },
-])
+        {
+          title: cleanTitle,
+          description: cleanDesc,
+          status: "available",
+          photo_url: null,
+        },
+      ])
       .select("id")
       .single();
 
@@ -142,7 +119,7 @@ export default function CreatePage() {
 
     const itemId = created.id as string;
 
-    // 2) No photo? go to item page
+    // 2) No photo → done
     if (!file) {
       setSaving(false);
       router.push(`/item/${itemId}`);
@@ -151,14 +128,15 @@ export default function CreatePage() {
 
     // 3) Upload photo
     const ext = getExt(file.name);
-    const filename = `${crypto.randomUUID()}.${ext}`;
-    const path = `${uid}/${itemId}/${filename}`;
+    const path = `${itemId}/${crypto.randomUUID()}.${ext}`;
 
-    const { error: uploadErr } = await supabase.storage.from("item-photos").upload(path, file, {
-      cacheControl: "3600",
-      upsert: false,
-      contentType: file.type || undefined,
-    });
+    const { error: uploadErr } = await supabase.storage
+      .from("item-photos")
+      .upload(path, file, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: file.type || undefined,
+      });
 
     if (uploadErr) {
       setSaving(false);
@@ -167,17 +145,16 @@ export default function CreatePage() {
       return;
     }
 
-    // 4) Public URL
+    // 4) Get public URL
     const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
     const publicUrl = pub.publicUrl;
 
-    // 5) Save photo URL to items + add row to item_photos
+    // 5) Save photo url on items + optional item_photos row
     const [{ error: updateItemErr }, { error: insertPhotoErr }] = await Promise.all([
       supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId),
       supabase.from("item_photos").insert([
         {
           item_id: itemId,
-          owner_id: uid,
           photo_url: publicUrl,
           storage_path: path,
         },
@@ -188,12 +165,12 @@ export default function CreatePage() {
 
     if (updateItemErr) {
       setMsg(`Item posted, but could not save photo URL: ${updateItemErr.message}`);
-      router.push(`/item/${itemId}`);
       return;
     }
 
+    // If item_photos schema differs, this may fail — item still works because items.photo_url is set.
     if (insertPhotoErr) {
-      setMsg(`Item posted + photo uploaded, but photo record failed: ${insertPhotoErr.message}`);
+      setMsg(`Item posted + photo uploaded, but item_photos insert failed: ${insertPhotoErr.message}`);
       router.push(`/item/${itemId}`);
       return;
     }
@@ -201,7 +178,7 @@ export default function CreatePage() {
     router.push(`/item/${itemId}`);
   }
 
-  if (!isLoggedIn) {
+  if (!isAllowed) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
         Checking access…
@@ -228,13 +205,10 @@ export default function CreatePage() {
 
       <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>List New Item</h1>
 
-      <form
-        onSubmit={handleSubmit}
-        style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 520 }}
-      >
+      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 520 }}>
         <input
           type="text"
-          placeholder="Item title (required)"
+          placeholder="Item title"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           style={{
@@ -260,14 +234,7 @@ export default function CreatePage() {
           }}
         />
 
-        <div
-          style={{
-            border: "1px solid #0f223f",
-            borderRadius: 14,
-            padding: 14,
-            background: "#0b1730",
-          }}
-        >
+        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
           <div style={{ fontWeight: 900, marginBottom: 10 }}>Photo (optional)</div>
 
           {previewUrl ? (
@@ -299,12 +266,7 @@ export default function CreatePage() {
             </div>
           )}
 
-          <input
-            type="file"
-            accept="image/*"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            style={{ marginTop: 12 }}
-          />
+          <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} style={{ marginTop: 12 }} />
 
           {file && (
             <button
