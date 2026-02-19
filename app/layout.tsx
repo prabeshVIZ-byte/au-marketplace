@@ -29,7 +29,9 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        {children}
+        <main style={{ paddingBottom: 88 }}>
+           {children}
+        </main>
          <BottomNav />
       </body>
     </html>
