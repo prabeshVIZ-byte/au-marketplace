@@ -1,5 +1,4 @@
 "use client";
-export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -14,6 +13,8 @@ function isImage(file: File) {
   return file.type?.startsWith("image/");
 }
 
+type ProfileRow = { full_name: string | null; user_role: string | null };
+
 export default function CreatePage() {
   const router = useRouter();
 
@@ -21,6 +22,10 @@ export default function CreatePage() {
   const [email, setEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+
+  // profile gate
+  const [profileComplete, setProfileComplete] = useState(false);
+  const [profileChecking, setProfileChecking] = useState(true);
 
   // form state
   const [title, setTitle] = useState("");
@@ -36,6 +41,29 @@ export default function CreatePage() {
     return !!email && email.toLowerCase().endsWith("@ashland.edu");
   }, [email]);
 
+  async function checkProfile(uid: string) {
+    setProfileChecking(true);
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("full_name,user_role")
+      .eq("id", uid)
+      .single();
+
+    setProfileChecking(false);
+
+    if (error) {
+      console.log("profile check error:", error.message);
+      setProfileComplete(false);
+      return;
+    }
+
+    const p = data as ProfileRow;
+    const full = (p?.full_name ?? "").trim().length > 0;
+    const roleOk = p?.user_role === "student" || p?.user_role === "faculty";
+    setProfileComplete(full && roleOk);
+  }
+
   // 1) Sync auth state
   useEffect(() => {
     let mounted = true;
@@ -47,13 +75,22 @@ export default function CreatePage() {
       if (error) console.log("getSession error:", error.message);
 
       const session = data.session;
-      setEmail(session?.user?.email ?? null);
-      setUserId(session?.user?.id ?? null);
+      const e = session?.user?.email ?? null;
+      const uid = session?.user?.id ?? null;
+
+      setEmail(e);
+      setUserId(uid);
       setAuthLoading(false);
+
+      if (uid) {
+        await checkProfile(uid);
+      } else {
+        setProfileComplete(false);
+        setProfileChecking(false);
+      }
     }
 
     sync();
-
     const { data: sub } = supabase.auth.onAuthStateChange(() => sync());
 
     return () => {
@@ -95,6 +132,14 @@ export default function CreatePage() {
       return;
     }
 
+    // Must have completed profile
+    await checkProfile(uid);
+    if (!profileComplete) {
+      setMsg("Please complete your profile (full name + Student/Faculty) before posting.");
+      router.push("/me");
+      return;
+    }
+
     // Validate fields
     const cleanTitle = title.trim();
     const cleanDesc = description.trim() || null;
@@ -112,9 +157,7 @@ export default function CreatePage() {
     setSaving(true);
 
     try {
-      // A) Create item
-      // If your DB trigger fills owner_id, we can omit it.
-      // If not, you can safely include owner_id: uid (won’t hurt if trigger exists unless it blocks).
+      // A) Create item (IMPORTANT: owner_id included)
       const { data: created, error: createErr } = await supabase
         .from("items")
         .insert([
@@ -123,7 +166,7 @@ export default function CreatePage() {
             description: cleanDesc,
             status: "available",
             photo_url: null,
-            // owner_id: uid, // uncomment ONLY if your schema requires it and no trigger fills it
+            owner_id: uid, // <-- required for RLS/ownership
           },
         ])
         .select("id")
@@ -143,7 +186,6 @@ export default function CreatePage() {
       }
 
       // C) Upload to Storage
-      // NOTE: this requires storage policy allowing authenticated upload.
       const ext = getExt(file.name);
       const path = `items/${uid}/${itemId}/${crypto.randomUUID()}.${ext}`;
 
@@ -156,22 +198,18 @@ export default function CreatePage() {
         });
 
       if (uploadErr) {
-        // item exists but photo failed
         setMsg(`Item posted, but photo upload failed: ${uploadErr.message}`);
         router.push(`/item/${itemId}`);
         router.refresh();
         return;
       }
 
-      // D) Get public URL (bucket must be PUBLIC)
+      // D) Public URL
       const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
       const publicUrl = pub.publicUrl;
 
       // E) Save to items.photo_url
-      const { error: updateErr } = await supabase
-        .from("items")
-        .update({ photo_url: publicUrl })
-        .eq("id", itemId);
+      const { error: updateErr } = await supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId);
 
       if (updateErr) {
         setMsg(`Photo uploaded, but items.photo_url update failed: ${updateErr.message}`);
@@ -180,23 +218,7 @@ export default function CreatePage() {
         return;
       }
 
-      // F) Optional: insert into item_photos (ONLY if your table has these columns)
-      // If your item_photos columns differ, comment this block out.
-      const { error: photoErr } = await supabase.from("item_photos").insert([
-        {
-          item_id: itemId,
-          photo_url: publicUrl,
-          storage_path: path,
-          // owner_id: uid, // include if your schema has it
-        },
-      ]);
-
-      if (photoErr) {
-        // Not fatal. Feed still works via items.photo_url
-        console.log("item_photos insert failed:", photoErr.message);
-      }
-
-      // G) Done
+      // Done
       router.push(`/item/${itemId}`);
       router.refresh();
     } catch (err: any) {
@@ -207,7 +229,7 @@ export default function CreatePage() {
   }
 
   // UI states
-  if (authLoading) {
+  if (authLoading || profileChecking) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
         Checking access…
@@ -236,6 +258,32 @@ export default function CreatePage() {
           }}
         >
           Go to Login
+        </button>
+      </div>
+    );
+  }
+
+  if (!profileComplete) {
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+        <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>Complete Profile</h1>
+        <p style={{ opacity: 0.85, marginTop: 0 }}>
+          Before posting, please set your <b>full name</b> and choose <b>Student/Faculty</b>.
+        </p>
+        <button
+          onClick={() => router.push("/me")}
+          style={{
+            marginTop: 16,
+            background: "#16a34a",
+            color: "white",
+            border: "none",
+            padding: "10px 14px",
+            borderRadius: 10,
+            cursor: "pointer",
+            fontWeight: 900,
+          }}
+        >
+          Go to Profile Setup
         </button>
       </div>
     );
@@ -294,6 +342,7 @@ export default function CreatePage() {
           <div style={{ fontWeight: 900, marginBottom: 10 }}>Photo (optional)</div>
 
           {previewUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
             <img
               src={previewUrl}
               alt="Preview"
