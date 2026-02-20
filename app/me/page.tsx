@@ -19,12 +19,14 @@ export default function MePage() {
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Profile fields
+  // Profile onboarding fields
   const [fullName, setFullName] = useState("");
   const [role, setRole] = useState<Role>("");
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
-  const [profileComplete, setProfileComplete] = useState(false);
+
+  const profileComplete =
+    fullName.trim().length > 0 && (role === "student" || role === "faculty");
 
   async function loadProfile(uid: string) {
     setProfileLoading(true);
@@ -39,21 +41,13 @@ export default function MePage() {
     setProfileLoading(false);
 
     if (error) {
-      // If no row yet, user must fill it
-      setFullName("");
-      setRole("");
-      setProfileComplete(false);
+      // OK if row doesn't exist yet
+      console.log("loadProfile:", error.message);
       return;
     }
 
-    const dbName = (data?.full_name ?? "").trim();
-    const dbRole = (data?.user_role ?? "") as Role;
-
-    setFullName(dbName);
-    setRole(dbRole);
-
-    const ok = dbName.length > 0 && (dbRole === "student" || dbRole === "faculty");
-    setProfileComplete(ok);
+    setFullName((data?.full_name ?? "") as string);
+    setRole(((data?.user_role ?? "") as Role) || "");
   }
 
   async function refreshUser() {
@@ -67,7 +61,6 @@ export default function MePage() {
       setFullName("");
       setRole("");
       setProfileSaved(false);
-      setProfileComplete(false);
     }
   }
 
@@ -92,7 +85,6 @@ export default function MePage() {
 
   async function handleAuth() {
     setStatus(null);
-    setProfileSaved(false);
 
     const e = email.trim().toLowerCase();
     if (!e.endsWith("@ashland.edu")) {
@@ -120,7 +112,11 @@ export default function MePage() {
       return;
     }
 
-    const { error } = await supabase.auth.signInWithPassword({ email: e, password });
+    const { error } = await supabase.auth.signInWithPassword({
+      email: e,
+      password,
+    });
+
     setSending(false);
 
     if (error) {
@@ -129,8 +125,6 @@ export default function MePage() {
     }
 
     setStatus("Signed in ✅");
-    // Stay on /me so onboarding can happen
-    await refreshUser();
     router.refresh();
   }
 
@@ -148,33 +142,35 @@ export default function MePage() {
       return;
     }
 
-    const { data, error } = await supabase.auth.getSession();
-    if (error) {
-      setStatus(error.message);
-      return;
-    }
-
+    const { data } = await supabase.auth.getSession();
     const uid = data.session?.user?.id;
     if (!uid) {
-      setStatus("Not logged in.");
+      setStatus("No session found. Please sign in again.");
       return;
     }
 
     setProfileLoading(true);
 
-    const { error: upsertErr } = await supabase
-      .from("profiles")
-      .upsert([{ id: uid, full_name: name, user_role: role }], { onConflict: "id" });
+    // Use UPSERT so it works whether row exists or not (prevents loop bugs)
+    const { error } = await supabase.from("profiles").upsert(
+      [
+        {
+          id: uid,
+          full_name: name,
+          user_role: role,
+        },
+      ],
+      { onConflict: "id" }
+    );
 
     setProfileLoading(false);
 
-    if (upsertErr) {
-      setStatus(upsertErr.message);
+    if (error) {
+      setStatus(error.message);
       return;
     }
 
     setProfileSaved(true);
-    setProfileComplete(true); // ✅ unlock ONLY after DB save
     setStatus("Profile saved ✅");
   }
 
@@ -193,7 +189,6 @@ export default function MePage() {
     setFullName("");
     setRole("");
     setProfileSaved(false);
-    setProfileComplete(false);
     setStatus("Signed out.");
 
     router.replace("/feed");
@@ -235,10 +230,9 @@ export default function MePage() {
           <div style={{ fontWeight: 900 }}>Logged in as</div>
           <div style={{ opacity: 0.85, marginTop: 6 }}>{userEmail}</div>
 
-          {/* Profile setup (always visible until complete) */}
           {!profileComplete && (
             <div style={{ marginTop: 14, border: "1px solid #334155", borderRadius: 12, padding: 14 }}>
-              <div style={{ fontWeight: 900, marginBottom: 10 }}>Complete Profile</div>
+              <div style={{ fontWeight: 900, marginBottom: 10 }}>Complete profile (required)</div>
 
               <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>Full name</label>
               <input
