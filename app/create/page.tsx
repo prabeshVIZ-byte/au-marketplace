@@ -7,18 +7,22 @@ import { supabase } from "@/lib/supabaseClient";
 
 function getExt(filename: string) {
   const parts = filename.split(".");
-  return parts.length > 1 ? parts.pop()!.toLowerCase() : "jpg";
+  return parts.length > 1 ? (parts.pop() || "jpg").toLowerCase() : "jpg";
 }
 
 function isImage(file: File) {
-  return file.type.startsWith("image/");
+  return file.type?.startsWith("image/");
 }
 
 export default function CreatePage() {
   const router = useRouter();
 
+  // auth state
   const [email, setEmail] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
+  // form state
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
@@ -32,17 +36,24 @@ export default function CreatePage() {
     return !!email && email.toLowerCase().endsWith("@ashland.edu");
   }, [email]);
 
-  // keep auth state synced for UI gating only
+  // 1) Sync auth state
   useEffect(() => {
     let mounted = true;
 
     async function sync() {
-      const { data } = await supabase.auth.getSession();
+      const { data, error } = await supabase.auth.getSession();
       if (!mounted) return;
-      setEmail(data.session?.user?.email ?? null);
+
+      if (error) console.log("getSession error:", error.message);
+
+      const session = data.session;
+      setEmail(session?.user?.email ?? null);
+      setUserId(session?.user?.id ?? null);
+      setAuthLoading(false);
     }
 
     sync();
+
     const { data: sub } = supabase.auth.onAuthStateChange(() => sync());
 
     return () => {
@@ -51,7 +62,7 @@ export default function CreatePage() {
     };
   }, []);
 
-  // image preview
+  // 2) Image preview
   useEffect(() => {
     if (!file) {
       setPreviewUrl(null);
@@ -62,25 +73,34 @@ export default function CreatePage() {
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
+  // 3) Submit handler
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setMsg(null);
 
-    // Always check session at submit time
-    const { data: s } = await supabase.auth.getSession();
-    const session = s.session;
-    const userEmail = session?.user?.email ?? null;
+    // Always re-check session at submit time
+    const { data, error } = await supabase.auth.getSession();
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
 
-    if (!session || !userEmail || !userEmail.toLowerCase().endsWith("@ashland.edu")) {
+    const session = data.session;
+    const userEmail = session?.user?.email ?? null;
+    const uid = session?.user?.id ?? null;
+
+    // Must be logged in + ashland email
+    if (!session || !userEmail || !uid || !userEmail.toLowerCase().endsWith("@ashland.edu")) {
       router.push("/me");
       return;
     }
 
+    // Validate fields
     const cleanTitle = title.trim();
     const cleanDesc = description.trim() || null;
 
-    if (!cleanTitle) {
-      setMsg("Title is required.");
+    if (cleanTitle.length < 3) {
+      setMsg("Title must be at least 3 characters.");
       return;
     }
 
@@ -91,83 +111,103 @@ export default function CreatePage() {
 
     setSaving(true);
 
-    // 1) Create item WITHOUT owner_id (trigger fills it)
-    const { data: created, error: createErr } = await supabase
-      .from("items")
-      .insert([
+    try {
+      // A) Create item
+      // If your DB trigger fills owner_id, we can omit it.
+      // If not, you can safely include owner_id: uid (won’t hurt if trigger exists unless it blocks).
+      const { data: created, error: createErr } = await supabase
+        .from("items")
+        .insert([
+          {
+            title: cleanTitle,
+            description: cleanDesc,
+            status: "available",
+            photo_url: null,
+            // owner_id: uid, // uncomment ONLY if your schema requires it and no trigger fills it
+          },
+        ])
+        .select("id")
+        .single();
+
+      if (createErr || !created?.id) {
+        throw new Error(createErr?.message || "Failed to create item.");
+      }
+
+      const itemId = created.id as string;
+
+      // B) If no photo -> go to item page
+      if (!file) {
+        router.push(`/item/${itemId}`);
+        router.refresh();
+        return;
+      }
+
+      // C) Upload to Storage
+      // NOTE: this requires storage policy allowing authenticated upload.
+      const ext = getExt(file.name);
+      const path = `items/${uid}/${itemId}/${crypto.randomUUID()}.${ext}`;
+
+      const { error: uploadErr } = await supabase.storage
+        .from("item-photos")
+        .upload(path, file, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: file.type || undefined,
+        });
+
+      if (uploadErr) {
+        // item exists but photo failed
+        setMsg(`Item posted, but photo upload failed: ${uploadErr.message}`);
+        router.push(`/item/${itemId}`);
+        router.refresh();
+        return;
+      }
+
+      // D) Get public URL (bucket must be PUBLIC)
+      const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
+      const publicUrl = pub.publicUrl;
+
+      // E) Save to items.photo_url
+      const { error: updateErr } = await supabase
+        .from("items")
+        .update({ photo_url: publicUrl })
+        .eq("id", itemId);
+
+      if (updateErr) {
+        setMsg(`Photo uploaded, but items.photo_url update failed: ${updateErr.message}`);
+        router.push(`/item/${itemId}`);
+        router.refresh();
+        return;
+      }
+
+      // F) Optional: insert into item_photos (ONLY if your table has these columns)
+      // If your item_photos columns differ, comment this block out.
+      const { error: photoErr } = await supabase.from("item_photos").insert([
         {
-          title: cleanTitle,
-          description: cleanDesc,
-          status: "available",
-          photo_url: null,
+          item_id: itemId,
+          photo_url: publicUrl,
+          storage_path: path,
+          // owner_id: uid, // include if your schema has it
         },
-      ])
-      .select("id")
-      .single();
+      ]);
 
-    if (createErr || !created?.id) {
-      setSaving(false);
-      setMsg(createErr?.message || "Failed to create item.");
-      return;
-    }
+      if (photoErr) {
+        // Not fatal. Feed still works via items.photo_url
+        console.log("item_photos insert failed:", photoErr.message);
+      }
 
-    const itemId = created.id as string;
-
-    // 2) No photo -> done
-    if (!file) {
-      setSaving(false);
+      // G) Done
       router.push(`/item/${itemId}`);
-      return;
-    }
-
-    // 3) Upload to Storage
-    const ext = getExt(file.name);
-    const path = `${itemId}/${crypto.randomUUID()}.${ext}`;
-
-    const { error: uploadErr } = await supabase.storage
-      .from("item-photos")
-      .upload(path, file, {
-        cacheControl: "3600",
-        upsert: false,
-        contentType: file.type || undefined,
-      });
-
-    if (uploadErr) {
+      router.refresh();
+    } catch (err: any) {
+      setMsg(err?.message ?? "Something went wrong.");
+    } finally {
       setSaving(false);
-      setMsg(`Item posted, but photo upload failed: ${uploadErr.message}`);
-      router.push(`/item/${itemId}`);
-      return;
     }
-
-    // 4) Public URL (requires bucket PUBLIC)
-    const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
-    const publicUrl = pub.publicUrl;
-
-    // 5) Save on items + optional item_photos row
-    const [{ error: updateItemErr }, { error: insertPhotoErr }] = await Promise.all([
-      supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId),
-      supabase.from("item_photos").insert([
-        { item_id: itemId, photo_url: publicUrl, storage_path: path },
-      ]),
-    ]);
-
-    setSaving(false);
-
-    if (updateItemErr) {
-      setMsg(`Photo uploaded, but items.photo_url update failed: ${updateItemErr.message}`);
-      router.push(`/item/${itemId}`);
-      return;
-    }
-
-    // if schema differs, ignore; items.photo_url is enough for feed
-    if (insertPhotoErr) {
-      setMsg(`Photo uploaded, but item_photos insert failed: ${insertPhotoErr.message}`);
-    }
-
-    router.push(`/item/${itemId}`);
   }
 
-  if (!isAllowed) {
+  // UI states
+  if (authLoading) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
         Checking access…
@@ -175,6 +215,33 @@ export default function CreatePage() {
     );
   }
 
+  if (!isAllowed) {
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+        <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>List New Item</h1>
+        <p style={{ opacity: 0.85, marginTop: 0 }}>
+          You must log in with your <b>@ashland.edu</b> email to post.
+        </p>
+        <button
+          onClick={() => router.push("/me")}
+          style={{
+            marginTop: 16,
+            background: "#0b0b0b",
+            color: "white",
+            border: "1px solid #333",
+            padding: "10px 14px",
+            borderRadius: 10,
+            cursor: "pointer",
+            fontWeight: 900,
+          }}
+        >
+          Go to Login
+        </button>
+      </div>
+    );
+  }
+
+  // Main form
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
       <button
@@ -255,12 +322,7 @@ export default function CreatePage() {
             </div>
           )}
 
-          <input
-            type="file"
-            accept="image/*"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            style={{ marginTop: 12 }}
-          />
+          <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} style={{ marginTop: 12 }} />
 
           {file && (
             <button
