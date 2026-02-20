@@ -271,7 +271,7 @@ export default function CreatePage() {
           Before posting, please set your <b>full name</b> and choose <b>Student/Faculty</b>.
         </p>
         <button
-          onClick={() => router.push("/me")}
+          onClick={() => router.replace("/me")}
           style={{
             marginTop: 16,
             background: "#16a34a",
