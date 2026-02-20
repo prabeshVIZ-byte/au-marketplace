@@ -1,4 +1,5 @@
 "use client";
+export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -13,8 +14,6 @@ function isImage(file: File) {
   return file.type?.startsWith("image/");
 }
 
-type ProfileRow = { full_name: string | null; user_role: string | null };
-
 export default function CreatePage() {
   const router = useRouter();
 
@@ -24,8 +23,8 @@ export default function CreatePage() {
   const [authLoading, setAuthLoading] = useState(true);
 
   // profile gate
-  const [profileComplete, setProfileComplete] = useState(false);
   const [profileChecking, setProfileChecking] = useState(true);
+  const [profileOk, setProfileOk] = useState(false);
 
   // form state
   const [title, setTitle] = useState("");
@@ -41,53 +40,48 @@ export default function CreatePage() {
     return !!email && email.toLowerCase().endsWith("@ashland.edu");
   }, [email]);
 
-  async function checkProfile(uid: string) {
-    setProfileChecking(true);
-
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("full_name,user_role")
-      .eq("id", uid)
-      .single();
-
-    setProfileChecking(false);
-
-    if (error) {
-      console.log("profile check error:", error.message);
-      setProfileComplete(false);
-      return;
-    }
-
-    const p = data as ProfileRow;
-    const full = (p?.full_name ?? "").trim().length > 0;
-    const roleOk = p?.user_role === "student" || p?.user_role === "faculty";
-    setProfileComplete(full && roleOk);
-  }
-
-  // 1) Sync auth state
+  // 1) Sync auth + check profile from DB
   useEffect(() => {
     let mounted = true;
 
     async function sync() {
+      setAuthLoading(true);
+      setProfileChecking(true);
+      setProfileOk(false);
+
       const { data, error } = await supabase.auth.getSession();
       if (!mounted) return;
 
       if (error) console.log("getSession error:", error.message);
 
       const session = data.session;
-      const e = session?.user?.email ?? null;
+      const userEmail = session?.user?.email ?? null;
       const uid = session?.user?.id ?? null;
 
-      setEmail(e);
+      setEmail(userEmail);
       setUserId(uid);
       setAuthLoading(false);
 
-      if (uid) {
-        await checkProfile(uid);
-      } else {
-        setProfileComplete(false);
+      // not logged in
+      if (!session || !uid) {
         setProfileChecking(false);
+        setProfileOk(false);
+        return;
       }
+
+      // check profile row
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("full_name,user_role")
+        .eq("id", uid)
+        .single();
+
+      const ok =
+        (prof?.full_name ?? "").trim().length > 0 &&
+        (prof?.user_role === "student" || prof?.user_role === "faculty");
+
+      setProfileOk(ok);
+      setProfileChecking(false);
     }
 
     sync();
@@ -115,7 +109,6 @@ export default function CreatePage() {
     e.preventDefault();
     setMsg(null);
 
-    // Always re-check session at submit time
     const { data, error } = await supabase.auth.getSession();
     if (error) {
       setMsg(error.message);
@@ -128,19 +121,16 @@ export default function CreatePage() {
 
     // Must be logged in + ashland email
     if (!session || !userEmail || !uid || !userEmail.toLowerCase().endsWith("@ashland.edu")) {
-      router.push("/me");
+      window.location.href = "/me";
       return;
     }
 
-    // Must have completed profile
-    await checkProfile(uid);
-    if (!profileComplete) {
-      setMsg("Please complete your profile (full name + Student/Faculty) before posting.");
-      router.push("/me");
+    // Must have profile saved in DB
+    if (!profileOk) {
+      window.location.href = "/me";
       return;
     }
 
-    // Validate fields
     const cleanTitle = title.trim();
     const cleanDesc = description.trim() || null;
 
@@ -157,7 +147,7 @@ export default function CreatePage() {
     setSaving(true);
 
     try {
-      // A) Create item (IMPORTANT: owner_id included)
+      // A) Create item
       const { data: created, error: createErr } = await supabase
         .from("items")
         .insert([
@@ -166,7 +156,6 @@ export default function CreatePage() {
             description: cleanDesc,
             status: "available",
             photo_url: null,
-            owner_id: uid, // <-- required for RLS/ownership
           },
         ])
         .select("id")
@@ -204,12 +193,15 @@ export default function CreatePage() {
         return;
       }
 
-      // D) Public URL
+      // D) Get public URL
       const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
       const publicUrl = pub.publicUrl;
 
       // E) Save to items.photo_url
-      const { error: updateErr } = await supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId);
+      const { error: updateErr } = await supabase
+        .from("items")
+        .update({ photo_url: publicUrl })
+        .eq("id", itemId);
 
       if (updateErr) {
         setMsg(`Photo uploaded, but items.photo_url update failed: ${updateErr.message}`);
@@ -218,7 +210,11 @@ export default function CreatePage() {
         return;
       }
 
-      // Done
+      // Optional: insert into item_photos (ignore failure)
+      await supabase.from("item_photos").insert([
+        { item_id: itemId, photo_url: publicUrl, storage_path: path },
+      ]);
+
       router.push(`/item/${itemId}`);
       router.refresh();
     } catch (err: any) {
@@ -229,7 +225,7 @@ export default function CreatePage() {
   }
 
   // UI states
-  if (authLoading || profileChecking) {
+  if (authLoading) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
         Checking access…
@@ -245,7 +241,7 @@ export default function CreatePage() {
           You must log in with your <b>@ashland.edu</b> email to post.
         </p>
         <button
-          onClick={() => router.push("/me")}
+          onClick={() => (window.location.href = "/me")}
           style={{
             marginTop: 16,
             background: "#0b0b0b",
@@ -263,15 +259,24 @@ export default function CreatePage() {
     );
   }
 
-  if (!profileComplete) {
+  if (profileChecking) {
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+        Checking profile…
+      </div>
+    );
+  }
+
+  if (!profileOk) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
         <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>Complete Profile</h1>
         <p style={{ opacity: 0.85, marginTop: 0 }}>
           Before posting, please set your <b>full name</b> and choose <b>Student/Faculty</b>.
         </p>
+
         <button
-          onClick={() => router.replace("/me")}
+          onClick={() => (window.location.href = "/me")}
           style={{
             marginTop: 16,
             background: "#16a34a",
@@ -342,7 +347,6 @@ export default function CreatePage() {
           <div style={{ fontWeight: 900, marginBottom: 10 }}>Photo (optional)</div>
 
           {previewUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
             <img
               src={previewUrl}
               alt="Preview"
@@ -371,7 +375,12 @@ export default function CreatePage() {
             </div>
           )}
 
-          <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} style={{ marginTop: 12 }} />
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            style={{ marginTop: 12 }}
+          />
 
           {file && (
             <button
