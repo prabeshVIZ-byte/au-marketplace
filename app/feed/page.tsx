@@ -44,66 +44,34 @@ export default function FeedPage() {
     !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
 
   async function loadFeed() {
-    setLoading(true);
-    setErr(null);
+  setLoading(true);
+  setErr(null);
 
-    try {
-      const feedPromise = supabase
-        .from("v_feed_items")
-        .select("id,title,description,status,created_at,photo_url,interest_count")
-        .order("created_at", { ascending: false });
+  try {
+    const { data, error } = await supabase
+      .from("v_feed_items")
+      .select("id,title,description,status,created_at,photo_url,interest_count")
+      .order("created_at", { ascending: false });
 
-      const timeoutPromise = new Promise<{ data: any; error: any }>((resolve) =>
-        setTimeout(
-          () =>
-            resolve({
-              data: null,
-              error: { message: "Feed request timed out." },
-            }),
-          6000
-        )
-      );
+    console.log("feed result:", { data, error });
 
-      const { data, error } = await Promise.race([feedPromise, timeoutPromise]);
-
-      if (error) {
-        setItems([]);
-        setMyInterested({});
-        setErr(error.message || "Unknown error loading feed.");
-        return;
-      }
-
-      const rows = (data as FeedRow[]) || [];
-      setItems(rows);
-
-      // If logged in, load which items YOU are interested in
-      const { data: sessionData } = await supabase.auth.getSession();
-      const uid = sessionData.session?.user?.id ?? null;
-
-      if (uid && rows.length > 0) {
-        const ids = rows.map((r) => r.id);
-
-        const { data: mine, error: mineErr } = await supabase
-          .from("interests")
-          .select("item_id")
-          .in("item_id", ids);
-
-        if (!mineErr) {
-          const map: Record<string, boolean> = {};
-          for (const r of mine || []) map[(r as any).item_id] = true;
-          setMyInterested(map);
-        } else {
-          setMyInterested({});
-        }
-      } else {
-        setMyInterested({});
-      }
-    } catch (e: any) {
-      setErr(e?.message || "Unexpected error.");
-    } finally {
-      setLoading(false);
+    if (error) {
+      setItems([]);
+      setMyInterested({});
+      setErr(error.message || "Error loading feed.");
+      return;
     }
+
+    const rows = (data as FeedRow[]) || [];
+    setItems(rows);
+    setMyInterested({});
+  } catch (e: any) {
+    console.error("feed exception:", e);
+    setErr(e?.message || "Unexpected error.");
+  } finally {
+    setLoading(false);
   }
+}
 
   async function toggleInterest(itemId: string) {
     if (!isLoggedIn || !userId) {
