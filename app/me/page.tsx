@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
+type Role = "student" | "faculty" | "";
+
 export default function MePage() {
   const router = useRouter();
 
@@ -17,9 +19,50 @@ export default function MePage() {
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  // Profile onboarding fields
+  const [fullName, setFullName] = useState("");
+  const [role, setRole] = useState<Role>("");
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileSaved, setProfileSaved] = useState(false);
+
+  const profileComplete = fullName.trim().length > 0 && (role === "student" || role === "faculty");
+
+  async function loadProfile(uid: string) {
+    setProfileLoading(true);
+    setProfileSaved(false);
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("full_name,user_role")
+      .eq("id", uid)
+      .single();
+
+    setProfileLoading(false);
+
+    if (error) {
+      // If profiles row doesn't exist yet, that's okay — user will fill it in and we can update/create later.
+      console.error("loadProfile error:", error);
+      return;
+    }
+
+    setFullName((data?.full_name ?? "") as string);
+    setRole(((data?.user_role ?? "") as Role) || "");
+  }
+
   async function refreshUser() {
     const { data } = await supabase.auth.getUser();
-    setUserEmail(data.user?.email ?? null);
+    const e = data.user?.email ?? null;
+    setUserEmail(e);
+
+    // If logged in, load profile fields
+    if (data.user?.id) {
+      await loadProfile(data.user.id);
+    } else {
+      // reset profile state when logged out
+      setFullName("");
+      setRole("");
+      setProfileSaved(false);
+    }
   }
 
   useEffect(() => {
@@ -87,9 +130,47 @@ export default function MePage() {
     }
 
     setStatus("Signed in ✅");
-    router.replace("/feed");
+    // Stay on /me so we can finish onboarding
     router.refresh();
   }
+
+  async function saveProfile() {
+  setStatus(null);
+  setProfileSaved(false);
+
+  const name = fullName.trim();
+  if (!name) {
+    setStatus("Please enter your full name.");
+    return;
+  }
+  if (role !== "student" && role !== "faculty") {
+    setStatus("Please choose Student or Faculty.");
+    return;
+  }
+
+  const { data } = await supabase.auth.getSession();
+  const uid = data.session?.user?.id;
+  if (!uid) return;
+
+  setProfileLoading(true);
+
+  const { error } = await supabase
+    .from("profiles")
+    .upsert(
+      { id: uid, full_name: name, user_role: role },
+      { onConflict: "id" }
+    );
+
+  setProfileLoading(false);
+
+  if (error) {
+    setStatus(error.message);
+    return;
+  }
+
+  setProfileSaved(true);
+  setStatus("Profile saved ✅");
+}
 
   async function signOut() {
     setStatus(null);
@@ -103,6 +184,9 @@ export default function MePage() {
     setUserEmail(null);
     setEmail("");
     setPassword("");
+    setFullName("");
+    setRole("");
+    setProfileSaved(false);
     setStatus("Signed out.");
 
     router.replace("/feed");
@@ -140,21 +224,112 @@ export default function MePage() {
       </p>
 
       {userEmail ? (
-        <div style={{ marginTop: 16, border: "1px solid #0f223f", borderRadius: 14, padding: 16, background: "#0b1730" }}>
+        <div
+          style={{
+            marginTop: 16,
+            border: "1px solid #0f223f",
+            borderRadius: 14,
+            padding: 16,
+            background: "#0b1730",
+          }}
+        >
           <div style={{ fontWeight: 900 }}>Logged in as</div>
           <div style={{ opacity: 0.85, marginTop: 6 }}>{userEmail}</div>
+
+          {/* Onboarding gate */}
+          {!profileComplete && (
+            <div style={{ marginTop: 14, border: "1px solid #334155", borderRadius: 12, padding: 14 }}>
+              <div style={{ fontWeight: 900, marginBottom: 10 }}>Before you post</div>
+
+              <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>Full name</label>
+              <input
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                placeholder="e.g., Prabesh Sunar"
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid #334155",
+                  background: "black",
+                  color: "white",
+                  marginBottom: 12,
+                }}
+              />
+
+              <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>You are</label>
+              <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+                <button
+                  type="button"
+                  onClick={() => setRole("student")}
+                  style={{
+                    flex: 1,
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid #334155",
+                    background: role === "student" ? "#052e16" : "transparent",
+                    color: "white",
+                    fontWeight: 900,
+                    cursor: "pointer",
+                  }}
+                >
+                  Student
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRole("faculty")}
+                  style={{
+                    flex: 1,
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid #334155",
+                    background: role === "faculty" ? "#052e16" : "transparent",
+                    color: "white",
+                    fontWeight: 900,
+                    cursor: "pointer",
+                  }}
+                >
+                  Faculty
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={saveProfile}
+                disabled={profileLoading}
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid #334155",
+                  background: profileLoading ? "#1f2937" : "#16a34a",
+                  color: "white",
+                  fontWeight: 900,
+                  cursor: profileLoading ? "not-allowed" : "pointer",
+                  opacity: profileLoading ? 0.85 : 1,
+                }}
+              >
+                {profileLoading ? "Saving..." : "Save profile"}
+              </button>
+
+              {profileSaved && <div style={{ marginTop: 10, opacity: 0.85 }}>Saved ✅</div>}
+            </div>
+          )}
 
           <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
             <button
               onClick={() => router.push("/create")}
+              disabled={!profileComplete}
+              title={!profileComplete ? "Complete your profile first" : "Post an item"}
               style={{
-                background: "#16a34a",
+                background: !profileComplete ? "#14532d" : "#16a34a",
                 padding: "10px 14px",
                 borderRadius: 10,
                 border: "none",
                 color: "white",
-                cursor: "pointer",
+                cursor: !profileComplete ? "not-allowed" : "pointer",
                 fontWeight: 900,
+                opacity: !profileComplete ? 0.6 : 1,
               }}
             >
               Post an item
