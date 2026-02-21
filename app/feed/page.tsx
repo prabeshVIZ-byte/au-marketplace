@@ -8,9 +8,11 @@ type FeedRow = {
   id: string;
   title: string;
   description: string | null;
+  category: string | null;
   status: string | null;
   created_at: string;
   photo_url: string | null;
+  expires_at: string | null;
   interest_count: number;
 };
 
@@ -50,7 +52,7 @@ export default function FeedPage() {
   try {
     const { data, error } = await supabase
       .from("v_feed_items")
-      .select("id,title,description,status,created_at,photo_url,interest_count")
+      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count")
       .order("created_at", { ascending: false });
 
     console.log("feed result:", { data, error });
@@ -264,7 +266,9 @@ export default function FeedPage() {
               )}
 
               <div style={{ fontSize: 18, fontWeight: 900 }}>{item.title}</div>
-
+              <div style={{ opacity: 0.8, marginTop: 6 }}>
+              {item.category ? `Category: ${item.category}` : ""}
+             </div>
               <div
                 style={{
                   opacity: 0.75,
@@ -283,7 +287,7 @@ export default function FeedPage() {
               </div>
 
               <button
-                onClick={() => router.push(isLoggedIn ? "/my-items" : "/me")}
+                onClick={() => router.push(`/item/${item.id}`)}
                 style={{
                   marginTop: 12,
                   width: "100%",
