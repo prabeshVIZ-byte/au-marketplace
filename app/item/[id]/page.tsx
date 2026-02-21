@@ -1,39 +1,67 @@
 "use client";
+export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter, useParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 type ItemRow = {
   id: string;
   title: string;
   description: string | null;
-  status: string | null;
-  created_at: string;
+  category: string | null;
+  pickup_location: string | null;
+  is_anonymous: boolean | null;
+  expires_at: string | null;
   photo_url: string | null;
-  interest_count: number;
+  status: string | null;
+  owner_id: string | null; // IMPORTANT: change if your schema uses different name
 };
+
+type SellerProfile = {
+  full_name: string | null;
+  user_role: string | null;
+};
+
+function formatExpiry(expiresAt: string | null) {
+  if (!expiresAt) return "Until I cancel";
+
+  const end = new Date(expiresAt);
+  if (Number.isNaN(end.getTime())) return "Until I cancel";
+
+  const now = new Date();
+  const ms = end.getTime() - now.getTime();
+  if (ms <= 0) return "Expired";
+
+  const oneDay = 24 * 60 * 60 * 1000;
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+  const dayDiff = Math.round((startOfEnd - startOfToday) / oneDay);
+
+  if (dayDiff === 0) return "Today";
+  if (dayDiff === 1) return "Tomorrow";
+  if (dayDiff < 7) return `in ${dayDiff} days`;
+
+  return end.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
 
 export default function ItemDetailPage() {
   const router = useRouter();
   const params = useParams();
-  const id = params?.id as string;
+  const itemId = (params?.id as string) || "";
 
-  const [item, setItem] = useState<ItemRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // auth + user interest state
+  const [item, setItem] = useState<ItemRow | null>(null);
+  const [seller, setSeller] = useState<SellerProfile | null>(null);
+
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [mine, setMine] = useState(false);
 
+  const [interestCount, setInterestCount] = useState(0);
+  const [mineInterested, setMineInterested] = useState(false);
   const [saving, setSaving] = useState(false);
-
-  // photo modal
-  const [openImg, setOpenImg] = useState<string | null>(null);
-  const [openTitle, setOpenTitle] = useState<string>("");
 
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
@@ -47,307 +75,267 @@ export default function ItemDetailPage() {
   }
 
   async function loadItem() {
+    if (!itemId) return;
     setLoading(true);
     setErr(null);
 
-    const { data, error } = await supabase
-      .from("v_feed_items")
-      .select("id,title,description,status,created_at,photo_url,interest_count")
-      .eq("id", id)
-      .single();
+    try {
+      // 1) fetch item
+      const { data: it, error: itErr } = await supabase
+        .from("items")
+        .select("id,title,description,category,pickup_location,is_anonymous,expires_at,photo_url,status,owner_id")
+        .eq("id", itemId)
+        .single();
 
-    if (error) {
-      setErr(error.message);
+      if (itErr) throw new Error(itErr.message);
+      setItem(it as ItemRow);
+
+      // 2) fetch interest count
+      const { count, error: cntErr } = await supabase
+        .from("interests")
+        .select("*", { count: "exact", head: true })
+        .eq("item_id", itemId);
+
+      if (!cntErr) setInterestCount(count ?? 0);
+
+      // 3) if logged in, check if I am interested
+      const { data: s } = await supabase.auth.getSession();
+      const uid = s.session?.user?.id ?? null;
+
+      if (uid) {
+        const { data: mine, error: mineErr } = await supabase
+          .from("interests")
+          .select("item_id")
+          .eq("item_id", itemId)
+          .eq("user_id", uid)
+          .maybeSingle();
+
+        if (!mineErr) setMineInterested(!!mine);
+      } else {
+        setMineInterested(false);
+      }
+
+      // 4) fetch seller profile (only if NOT anonymous and owner_id exists)
+      const ownerId = (it as any)?.owner_id ?? null;
+      const anon = !!(it as any)?.is_anonymous;
+
+      if (!anon && ownerId) {
+        const { data: prof, error: pErr } = await supabase
+          .from("profiles")
+          .select("full_name,user_role")
+          .eq("id", ownerId)
+          .single();
+
+        if (!pErr) setSeller(prof as SellerProfile);
+        else setSeller(null);
+      } else {
+        setSeller(null);
+      }
+    } catch (e: any) {
+      setErr(e?.message || "Failed to load item.");
       setItem(null);
+      setSeller(null);
+    } finally {
       setLoading(false);
-      return;
     }
-
-    setItem((data as ItemRow) || null);
-    setLoading(false);
   }
-
-  async function loadMine() {
-    const { data } = await supabase.auth.getSession();
-    const uid = data.session?.user?.id ?? null;
-
-    if (!uid) {
-      setMine(false);
-      return;
-    }
-
-    const { data: rows, error } = await supabase
-      .from("interests")
-      .select("item_id")
-      .eq("item_id", id)
-      .limit(1);
-
-    if (error) {
-      setMine(false);
-      return;
-    }
-
-    setMine((rows?.length ?? 0) > 0);
-  }
-
-  useEffect(() => {
-    if (!id) return;
-
-    (async () => {
-      await syncAuth();
-      await loadItem();
-      await loadMine();
-    })();
-
-    const { data: sub } = supabase.auth.onAuthStateChange(async () => {
-      await syncAuth();
-      await loadMine();
-    });
-
-    return () => sub.subscription.unsubscribe();
-  }, [id]);
-
-  // ESC closes modal
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpenImg(null);
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
 
   async function toggleInterest() {
+    if (!item) return;
+
     if (!isLoggedIn || !userId) {
       router.push("/me");
       return;
     }
-    if (!item) return;
 
     setSaving(true);
 
-    if (mine) {
-      const { error } = await supabase
-        .from("interests")
-        .delete()
-        .eq("item_id", item.id)
-        .eq("user_id", userId);
+    try {
+      if (mineInterested) {
+        const { error } = await supabase
+          .from("interests")
+          .delete()
+          .eq("item_id", item.id)
+          .eq("user_id", userId);
 
+        if (error) throw new Error(error.message);
+
+        setMineInterested(false);
+        setInterestCount((c) => Math.max(0, c - 1));
+      } else {
+        const { error } = await supabase
+          .from("interests")
+          .insert([{ item_id: item.id, user_id: userId }]);
+
+        if (error) {
+          // ignore duplicates
+          if (!error.message.toLowerCase().includes("duplicate")) throw new Error(error.message);
+        }
+
+        setMineInterested(true);
+        setInterestCount((c) => c + 1);
+      }
+    } catch (e: any) {
+      alert(e?.message || "Could not update interest.");
+    } finally {
       setSaving(false);
-
-      if (error) {
-        alert(error.message);
-        return;
-      }
-
-      setMine(false);
-      setItem((prev) =>
-        prev ? { ...prev, interest_count: Math.max(0, (prev.interest_count || 0) - 1) } : prev
-      );
-      return;
     }
-
-    const { error } = await supabase.from("interests").insert([{ item_id: item.id, user_id: userId }]);
-
-    setSaving(false);
-
-    if (error) {
-      if (error.message.toLowerCase().includes("duplicate key")) {
-        setMine(true);
-        return;
-      }
-      alert(error.message);
-      return;
-    }
-
-    setMine(true);
-    setItem((prev) => (prev ? { ...prev, interest_count: (prev.interest_count || 0) + 1 } : prev));
   }
+
+  useEffect(() => {
+    syncAuth();
+    loadItem();
+
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      syncAuth();
+      loadItem();
+    });
+
+    return () => sub.subscription.unsubscribe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemId]);
+
+  const expiryText = formatExpiry(item?.expires_at ?? null);
+  const showSellerName = item && !item.is_anonymous && seller?.full_name;
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-        <Link
-          href="/feed"
-          style={{
-            border: "1px solid #334155",
-            padding: "10px 12px",
-            borderRadius: 12,
-            color: "white",
-            textDecoration: "none",
-            fontWeight: 800,
-          }}
-        >
-          ← Back to feed
-        </Link>
+      <button
+        onClick={() => router.push("/feed")}
+        style={{
+          marginBottom: 16,
+          background: "transparent",
+          color: "white",
+          border: "1px solid #333",
+          padding: "8px 12px",
+          borderRadius: 10,
+          cursor: "pointer",
+        }}
+      >
+        ← Back to feed
+      </button>
 
-        <button
-          onClick={() => router.push("/me")}
-          style={{
-            border: "1px solid #334155",
-            background: "transparent",
-            color: "white",
-            padding: "10px 12px",
-            borderRadius: 12,
-            cursor: "pointer",
-            fontWeight: 800,
-          }}
-        >
-          {isLoggedIn ? "Account" : "Request Access"}
-        </button>
-      </div>
+      {err && <p style={{ color: "#f87171" }}>{err}</p>}
+      {loading && <p style={{ opacity: 0.85 }}>Loading…</p>}
 
-      <div style={{ marginTop: 10, opacity: 0.8 }}>
-        {isLoggedIn ? (
-          <span>
-            Logged in as <b>{userEmail}</b>
-          </span>
-        ) : (
-          <span>Not logged in — browse only.</span>
-        )}
-      </div>
+      {!loading && item && (
+        <div style={{ maxWidth: 820 }}>
+          <h1 style={{ fontSize: 34, fontWeight: 900, margin: 0 }}>{item.title}</h1>
 
-      {err && <p style={{ color: "#f87171", marginTop: 14 }}>{err}</p>}
-      {loading && <p style={{ marginTop: 14, opacity: 0.8 }}>Loading…</p>}
-
-      {item && (
-        <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "1fr", gap: 16, maxWidth: 900 }}>
-          <button
-            type="button"
-            onClick={() => {
-              if (!item.photo_url) return;
-              setOpenImg(item.photo_url);
-              setOpenTitle(item.title);
-            }}
-            style={{
-              height: 320,
-              borderRadius: 14,
-              overflow: "hidden",
-              background: "#020617",
-              border: "1px solid #0f223f",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: 0,
-              cursor: item.photo_url ? "pointer" : "default",
-            }}
-            aria-label="Open photo"
-          >
-            {item.photo_url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={item.photo_url}
-                alt={item.title}
-                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-              />
-            ) : (
-              <span style={{ opacity: 0.6, fontWeight: 900 }}>No photo</span>
+          {/* Meta */}
+          <div style={{ marginTop: 10, opacity: 0.9 }}>
+            {item.category && (
+              <div style={{ marginTop: 6 }}>
+                Category: <b>{item.category}</b>
+              </div>
             )}
-          </button>
 
-          <div style={{ background: "#0b1730", borderRadius: 14, padding: 16, border: "1px solid #0f223f" }}>
-            <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>{item.title}</h1>
+            {item.pickup_location && (
+              <div style={{ marginTop: 6 }}>
+                Pickup location: <b>{item.pickup_location}</b>
+              </div>
+            )}
 
-            <div style={{ marginTop: 10, opacity: 0.75 }}>{item.description || "—"}</div>
-
-            <div style={{ marginTop: 14, opacity: 0.8, fontWeight: 800 }}>
-              {item.interest_count || 0} interested
+            <div style={{ marginTop: 6 }}>
+              Available until:{" "}
+              <b style={{ color: expiryText === "Expired" ? "#f87171" : "white" }}>{expiryText}</b>
             </div>
 
-            <div style={{ marginTop: 10, opacity: 0.7 }}>
-              Posted: {new Date(item.created_at).toLocaleString()}
+            <div style={{ marginTop: 6 }}>
+              Seller:{" "}
+              <b>
+                {item.is_anonymous ? "Anonymous" : showSellerName ? seller!.full_name : "Ashland user"}
+              </b>
+              {!item.is_anonymous && seller?.user_role ? (
+                <span style={{ opacity: 0.8 }}> ({seller.user_role})</span>
+              ) : null}
             </div>
 
+            <div style={{ marginTop: 6 }}>
+              Interested: <b>{interestCount}</b>
+            </div>
+          </div>
+
+          {/* Photo */}
+          {item.photo_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={item.photo_url}
+              alt={item.title}
+              style={{
+                marginTop: 14,
+                width: "100%",
+                maxWidth: 820,
+                height: 420,
+                objectFit: "cover",
+                borderRadius: 14,
+                border: "1px solid #0f223f",
+              }}
+            />
+          ) : (
+            <div
+              style={{
+                marginTop: 14,
+                width: "100%",
+                maxWidth: 820,
+                height: 240,
+                borderRadius: 14,
+                border: "1px dashed #334155",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#94a3b8",
+              }}
+            >
+              No photo
+            </div>
+          )}
+
+          {/* Description */}
+          <div style={{ marginTop: 14, background: "#0b1730", border: "1px solid #0f223f", borderRadius: 14, padding: 14 }}>
+            <div style={{ fontWeight: 900, marginBottom: 8 }}>Description</div>
+            <div style={{ opacity: 0.9, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{item.description || "—"}</div>
+          </div>
+
+          {/* Actions */}
+          <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button
               onClick={toggleInterest}
               disabled={saving}
               style={{
-                marginTop: 14,
-                width: "100%",
+                background: isLoggedIn ? (mineInterested ? "#1f2937" : "#052e16") : "transparent",
                 border: "1px solid #334155",
-                background: isLoggedIn ? (mine ? "#1f2937" : "#052e16") : "transparent",
                 color: "white",
-                padding: "12px 14px",
-                borderRadius: 12,
+                padding: "10px 14px",
+                borderRadius: 10,
                 cursor: saving ? "not-allowed" : "pointer",
                 fontWeight: 900,
-                opacity: saving ? 0.7 : 1,
+                opacity: saving ? 0.75 : 1,
               }}
             >
-              {saving ? "Saving…" : isLoggedIn ? (mine ? "Uninterested" : "Interested") : "Interested (login required)"}
+              {saving
+                ? "Saving…"
+                : isLoggedIn
+                ? mineInterested
+                  ? "Uninterested"
+                  : "Interested"
+                : "Interested (login required)"}
             </button>
-          </div>
-        </div>
-      )}
 
-      {/* FULLSCREEN IMAGE MODAL */}
-      {openImg && (
-        <div
-          onClick={() => setOpenImg(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.75)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 20,
-            zIndex: 9999,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(1000px, 95vw)",
-              maxHeight: "90vh",
-              background: "#0b1730",
-              border: "1px solid #0f223f",
-              borderRadius: 14,
-              overflow: "hidden",
-            }}
-          >
-            <div
+            <button
+              onClick={() => router.push("/me")}
               style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "10px 12px",
-                borderBottom: "1px solid #0f223f",
+                background: "transparent",
+                border: "1px solid #334155",
+                color: "white",
+                padding: "10px 14px",
+                borderRadius: 10,
+                cursor: "pointer",
+                fontWeight: 900,
               }}
             >
-              <div style={{ fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {openTitle || "Photo"}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setOpenImg(null)}
-                style={{
-                  background: "transparent",
-                  color: "white",
-                  border: "1px solid #334155",
-                  padding: "6px 10px",
-                  borderRadius: 10,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
-              >
-                ✕
-              </button>
-            </div>
-
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={openImg}
-              alt={openTitle || "Full photo"}
-              style={{
-                width: "100%",
-                height: "auto",
-                maxHeight: "80vh",
-                objectFit: "contain",
-                display: "block",
-                background: "black",
-              }}
-            />
+              Account
+            </button>
           </div>
         </div>
       )}
