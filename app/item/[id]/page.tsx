@@ -294,7 +294,11 @@ export default function ItemDetailPage() {
           {/* Description */}
           <div style={{ marginTop: 14, background: "#0b1730", border: "1px solid #0f223f", borderRadius: 14, padding: 14 }}>
             <div style={{ fontWeight: 900, marginBottom: 8 }}>Description</div>
-            <div style={{ opacity: 0.9, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{item.description || "—"}</div>
+            <div style={{ opacity: 0.9, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+  {item.description && item.description.trim().toLowerCase() !== "until i cancel"
+    ? item.description
+    : "—"}
+</div>
           </div>
 
           {/* Actions */}
