@@ -8,11 +8,11 @@ type FeedRow = {
   id: string;
   title: string;
   description: string | null;
-  category: string | null;
+  category: string | null;      // ✅ add
   status: string | null;
   created_at: string;
   photo_url: string | null;
-  expires_at: string | null;
+  expires_at: string | null;    // ✅ add
   interest_count: number;
 };
 
