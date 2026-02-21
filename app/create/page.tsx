@@ -1,9 +1,23 @@
 "use client";
 export const dynamic = "force-dynamic";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+
+type Category =
+  | "clothing"
+  | "sports_equipment"
+  | "stationary"
+  | "ride"
+  | "books"
+  | "notes"
+  | "art"
+  | "other";
+
+type PickupLocation = "College Quad" | "Safety Service Office" | "Dining Hall";
+
+type ExpireChoice = "7" | "14" | "30" | "never";
 
 function getExt(filename: string) {
   const parts = filename.split(".");
@@ -14,37 +28,31 @@ function isImage(file: File) {
   return file.type?.startsWith("image/");
 }
 
-type Category =
-  | ""
-  | "clothing"
-  | "sport_equipment"
-  | "stationary"
-  | "ride"
-  | "books"
-  | "notes"
-  | "art"
-  | "others";
-
 export default function CreatePage() {
   const router = useRouter();
 
-  // auth state
+  // auth + profile gating
+  const [authLoading, setAuthLoading] = useState(true);
   const [email, setEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
 
-  // profile gate
-  const [profileOk, setProfileOk] = useState(false);
   const [profileLoading, setProfileLoading] = useState(true);
+  const [profileComplete, setProfileComplete] = useState(false);
 
-  // form state
+  // form
   const [title, setTitle] = useState("");
-  const [category, setCategory] = useState<Category>("");
   const [description, setDescription] = useState("");
 
+  const [category, setCategory] = useState<Category>("books");
+  const [pickupLocation, setPickupLocation] = useState<PickupLocation>("College Quad");
+  const [isAnonymous, setIsAnonymous] = useState(false);
+  const [expireChoice, setExpireChoice] = useState<ExpireChoice>("7");
+
+  // photo
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
+  // submit
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -56,9 +64,11 @@ export default function CreatePage() {
   useEffect(() => {
     let mounted = true;
 
-    async function sync() {
-      const { data } = await supabase.auth.getSession();
+    async function syncAuth() {
+      const { data, error } = await supabase.auth.getSession();
       if (!mounted) return;
+
+      if (error) console.log("getSession error:", error.message);
 
       const session = data.session;
       setEmail(session?.user?.email ?? null);
@@ -66,8 +76,12 @@ export default function CreatePage() {
       setAuthLoading(false);
     }
 
-    sync();
-    const { data: sub } = supabase.auth.onAuthStateChange(() => sync());
+    syncAuth();
+
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      syncAuth();
+      // profile check will run after auth changes too (below effect)
+    });
 
     return () => {
       mounted = false;
@@ -75,48 +89,46 @@ export default function CreatePage() {
     };
   }, []);
 
-  // 2) Check profile is complete (full_name + user_role)
+  // 2) Check profile completion (full_name + user_role) for logged-in users
   useEffect(() => {
-    let alive = true;
+    let mounted = true;
 
     async function checkProfile() {
       setProfileLoading(true);
+      setProfileComplete(false);
 
-      const { data } = await supabase.auth.getSession();
-      const uid = data.session?.user?.id;
-
-      if (!uid) {
-        if (!alive) return;
-        setProfileOk(false);
+      if (!userId) {
         setProfileLoading(false);
         return;
       }
 
-      const { data: prof, error } = await supabase
+      const { data, error } = await supabase
         .from("profiles")
         .select("full_name,user_role")
-        .eq("id", uid)
+        .eq("id", userId)
         .single();
 
-      if (!alive) return;
+      if (!mounted) return;
 
       if (error) {
-        setProfileOk(false);
+        // If profile row doesn't exist or blocked by RLS, treat as incomplete
+        console.log("profile check error:", error.message);
+        setProfileComplete(false);
         setProfileLoading(false);
         return;
       }
 
-      const ok =
-        !!(prof?.full_name && String(prof.full_name).trim().length > 0) &&
-        (prof?.user_role === "student" || prof?.user_role === "faculty");
+      const fullNameOk = (data?.full_name ?? "").trim().length > 0;
+      const roleOk = data?.user_role === "student" || data?.user_role === "faculty";
 
-      setProfileOk(ok);
+      setProfileComplete(fullNameOk && roleOk);
       setProfileLoading(false);
     }
 
     checkProfile();
+
     return () => {
-      alive = false;
+      mounted = false;
     };
   }, [userId]);
 
@@ -135,7 +147,13 @@ export default function CreatePage() {
     e.preventDefault();
     setMsg(null);
 
-    const { data } = await supabase.auth.getSession();
+    // re-check session at submit time
+    const { data, error } = await supabase.auth.getSession();
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
     const session = data.session;
     const userEmail = session?.user?.email ?? null;
     const uid = session?.user?.id ?? null;
@@ -145,11 +163,13 @@ export default function CreatePage() {
       return;
     }
 
-    if (!profileOk) {
+    // Require profile completion
+    if (!profileComplete) {
       router.push("/me");
       return;
     }
 
+    // validate
     const cleanTitle = title.trim();
     const cleanDesc = description.trim() || null;
 
@@ -158,28 +178,35 @@ export default function CreatePage() {
       return;
     }
 
-    if (!category) {
-      setMsg("Please choose a category.");
-      return;
-    }
-
     if (file && !isImage(file)) {
       setMsg("Please upload an image file (jpg/png/webp).");
       return;
     }
 
+    // compute expires_at
+    const expiresAt =
+      expireChoice === "never"
+        ? null
+        : new Date(Date.now() + Number(expireChoice) * 24 * 60 * 60 * 1000).toISOString();
+
     setSaving(true);
 
     try {
+      // A) Create item row (NO photo yet)
       const { data: created, error: createErr } = await supabase
         .from("items")
         .insert([
           {
             title: cleanTitle,
             description: cleanDesc,
-            category: category,
             status: "available",
             photo_url: null,
+
+            // ✅ new fields
+            category,
+            pickup_location: pickupLocation,
+            is_anonymous: isAnonymous,
+            expires_at: expiresAt,
           },
         ])
         .select("id")
@@ -191,22 +218,22 @@ export default function CreatePage() {
 
       const itemId = created.id as string;
 
+      // B) If no photo, go to item page
       if (!file) {
         router.push(`/item/${itemId}`);
         router.refresh();
         return;
       }
 
+      // C) Upload photo to Storage
       const ext = getExt(file.name);
       const path = `items/${uid}/${itemId}/${crypto.randomUUID()}.${ext}`;
 
-      const { error: uploadErr } = await supabase.storage
-        .from("item-photos")
-        .upload(path, file, {
-          cacheControl: "3600",
-          upsert: false,
-          contentType: file.type || undefined,
-        });
+      const { error: uploadErr } = await supabase.storage.from("item-photos").upload(path, file, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: file.type || undefined,
+      });
 
       if (uploadErr) {
         setMsg(`Item posted, but photo upload failed: ${uploadErr.message}`);
@@ -215,13 +242,12 @@ export default function CreatePage() {
         return;
       }
 
+      // D) Get public URL (bucket must be public)
       const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
       const publicUrl = pub.publicUrl;
 
-      const { error: updateErr } = await supabase
-        .from("items")
-        .update({ photo_url: publicUrl })
-        .eq("id", itemId);
+      // E) Save URL to items.photo_url
+      const { error: updateErr } = await supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId);
 
       if (updateErr) {
         setMsg(`Photo uploaded, but items.photo_url update failed: ${updateErr.message}`);
@@ -230,7 +256,8 @@ export default function CreatePage() {
         return;
       }
 
-      // Optional row for item_photos (safe to ignore error)
+      // F) Optional: item_photos table insert (only if your columns exist)
+      // If your item_photos schema differs, delete this block.
       const { error: photoErr } = await supabase.from("item_photos").insert([
         {
           item_id: itemId,
@@ -241,6 +268,7 @@ export default function CreatePage() {
 
       if (photoErr) console.log("item_photos insert failed:", photoErr.message);
 
+      // done
       router.push(`/item/${itemId}`);
       router.refresh();
     } catch (err: any) {
@@ -250,15 +278,18 @@ export default function CreatePage() {
     }
   }
 
+  // ===== UI =====
+
   if (authLoading || profileLoading) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        Checking access…
+        Loading…
       </div>
     );
   }
 
-  if (!isAllowed) {
+  // Not logged in / not allowed
+  if (!isAllowed || !userId) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
         <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>List New Item</h1>
@@ -278,19 +309,21 @@ export default function CreatePage() {
             fontWeight: 900,
           }}
         >
-          Go to Login
+          Go to Account
         </button>
       </div>
     );
   }
 
-  if (!profileOk) {
+  // Profile incomplete gate
+  if (!profileComplete) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>Complete Profile</h1>
+        <h1 style={{ fontSize: 34, fontWeight: 900, marginBottom: 10 }}>Complete Profile</h1>
         <p style={{ opacity: 0.85, marginTop: 0 }}>
           Before posting, please set your <b>full name</b> and choose <b>Student/Faculty</b>.
         </p>
+
         <button
           onClick={() => router.push("/me")}
           style={{
@@ -302,6 +335,7 @@ export default function CreatePage() {
             borderRadius: 12,
             cursor: "pointer",
             fontWeight: 900,
+            width: "fit-content",
           }}
         >
           Go to Profile Setup
@@ -310,6 +344,7 @@ export default function CreatePage() {
     );
   }
 
+  // Main form
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
       <button
@@ -344,28 +379,6 @@ export default function CreatePage() {
           }}
         />
 
-        <select
-          value={category}
-          onChange={(e) => setCategory(e.target.value as Category)}
-          style={{
-            padding: 10,
-            borderRadius: 10,
-            border: "1px solid #333",
-            background: "#111",
-            color: "white",
-          }}
-        >
-          <option value="">Select category</option>
-          <option value="clothing">Clothing</option>
-          <option value="sport_equipment">Sport equipment</option>
-          <option value="stationary">Stationary item</option>
-          <option value="ride">Ride</option>
-          <option value="books">Books</option>
-          <option value="notes">Notes</option>
-          <option value="art">Art pieces</option>
-          <option value="others">Others</option>
-        </select>
-
         <textarea
           placeholder="Description (optional)"
           rows={4}
@@ -380,6 +393,109 @@ export default function CreatePage() {
           }}
         />
 
+        {/* Category */}
+        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
+          <div style={{ fontWeight: 900, marginBottom: 10 }}>Category</div>
+          <select
+            value={category}
+            onChange={(e) => setCategory(e.target.value as Category)}
+            style={{
+              width: "100%",
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #334155",
+              background: "black",
+              color: "white",
+            }}
+          >
+            <option value="clothing">Clothing</option>
+            <option value="sports_equipment">Sports equipment</option>
+            <option value="stationary">Stationary item</option>
+            <option value="ride">Ride</option>
+            <option value="books">Books</option>
+            <option value="notes">Notes</option>
+            <option value="art">Art pieces</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+
+        {/* Pickup location */}
+        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
+          <div style={{ fontWeight: 900, marginBottom: 10 }}>Pickup location (safe spot)</div>
+          <select
+            value={pickupLocation}
+            onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
+            style={{
+              width: "100%",
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #334155",
+              background: "black",
+              color: "white",
+            }}
+          >
+            <option value="College Quad">College Quad</option>
+            <option value="Safety Service Office">Safety Service Office</option>
+            <option value="Dining Hall">Dining Hall</option>
+          </select>
+        </div>
+
+        {/* Anonymous toggle */}
+        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
+          <div style={{ fontWeight: 900, marginBottom: 10 }}>Post anonymously</div>
+
+          <button
+            type="button"
+            onClick={() => setIsAnonymous((v) => !v)}
+            style={{
+              width: "100%",
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1px solid #334155",
+              background: isAnonymous ? "#052e16" : "transparent",
+              color: "white",
+              fontWeight: 900,
+              cursor: "pointer",
+            }}
+          >
+            {isAnonymous ? "Anonymous: ON" : "Anonymous: OFF"}
+          </button>
+
+          <div style={{ opacity: 0.75, marginTop: 8 }}>
+            {isAnonymous ? "Your name will be hidden from the public feed." : "Your name can be shown later (when we add it)."}
+          </div>
+        </div>
+
+        {/* Expires */}
+        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
+          <div style={{ fontWeight: 900, marginBottom: 10 }}>How long should this post stay up?</div>
+
+          <select
+            value={expireChoice}
+            onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
+            style={{
+              width: "100%",
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #334155",
+              background: "black",
+              color: "white",
+            }}
+          >
+            <option value="7">7 days</option>
+            <option value="14">14 days</option>
+            <option value="30">30 days</option>
+            <option value="never">Until I cancel</option>
+          </select>
+
+          <div style={{ opacity: 0.75, marginTop: 8 }}>
+            {expireChoice === "never"
+              ? "This post will stay up until you cancel it."
+              : `This post will expire in ${expireChoice} days.`}
+          </div>
+        </div>
+
+        {/* Photo */}
         <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
           <div style={{ fontWeight: 900, marginBottom: 10 }}>Photo (optional)</div>
 
