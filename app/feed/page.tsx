@@ -299,12 +299,11 @@ export default function FeedPage() {
                 </div>
               )}
 
-              <div style={{ opacity: 0.85, marginTop: 6 }}>
-                Available until:{" "}
-                <span style={{ fontWeight: 800, color: expiryText === "Expired" ? "#f87171" : "white" }}>
-                  {expiryText}
-                </span>
-              </div>
+              <div style={{ opacity: 0.75, marginTop: 6 }}>
+  {item.expires_at
+    ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}`
+    : "Contributor will de-list themselves"}
+</div>
 
               <div
                 style={{

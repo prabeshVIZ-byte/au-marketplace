@@ -236,10 +236,11 @@ export default function ItemDetailPage() {
               </div>
             )}
 
-            <div style={{ marginTop: 6 }}>
-              Available until:{" "}
-              <b style={{ color: expiryText === "Expired" ? "#f87171" : "white" }}>{expiryText}</b>
-            </div>
+           <div style={{ opacity: 0.85, marginTop: 10 }}>
+  {item.expires_at
+    ? `Available until: ${new Date(item.expires_at).toLocaleString()}`
+    : "Contributor will de-list themselves"}
+</div>
 
             <div style={{ marginTop: 6 }}>
               Seller:{" "}
