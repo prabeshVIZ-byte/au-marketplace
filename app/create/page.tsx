@@ -7,16 +7,21 @@ import { supabase } from "@/lib/supabaseClient";
 
 type Category =
   | "clothing"
-  | "sports_equipment"
-  | "stationary"
+  | "sport equipment"
+  | "stationary item"
   | "ride"
   | "books"
   | "notes"
-  | "art"
-  | "other";
+  | "art pieces"
+  | "others"
+  | "electronics"
+  | "furniture"
+  | "health & beauty"
+  | "home & kitchen"
+  | "jeweleries"
+  | "musical instruments";
 
 type PickupLocation = "College Quad" | "Safety Service Office" | "Dining Hall";
-
 type ExpireChoice = "7" | "14" | "30" | "never";
 
 function getExt(filename: string) {
@@ -80,7 +85,6 @@ export default function CreatePage() {
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
       syncAuth();
-      // profile check will run after auth changes too (below effect)
     });
 
     return () => {
@@ -89,7 +93,7 @@ export default function CreatePage() {
     };
   }, []);
 
-  // 2) Check profile completion (full_name + user_role) for logged-in users
+  // 2) Check profile completion
   useEffect(() => {
     let mounted = true;
 
@@ -111,7 +115,6 @@ export default function CreatePage() {
       if (!mounted) return;
 
       if (error) {
-        // If profile row doesn't exist or blocked by RLS, treat as incomplete
         console.log("profile check error:", error.message);
         setProfileComplete(false);
         setProfileLoading(false);
@@ -147,7 +150,6 @@ export default function CreatePage() {
     e.preventDefault();
     setMsg(null);
 
-    // re-check session at submit time
     const { data, error } = await supabase.auth.getSession();
     if (error) {
       setMsg(error.message);
@@ -163,13 +165,11 @@ export default function CreatePage() {
       return;
     }
 
-    // Require profile completion
     if (!profileComplete) {
       router.push("/me");
       return;
     }
 
-    // validate
     const cleanTitle = title.trim();
     const cleanDesc = description.trim() || null;
 
@@ -183,7 +183,6 @@ export default function CreatePage() {
       return;
     }
 
-    // compute expires_at
     const expiresAt =
       expireChoice === "never"
         ? null
@@ -192,7 +191,7 @@ export default function CreatePage() {
     setSaving(true);
 
     try {
-      // A) Create item row (NO photo yet)
+      // IMPORTANT: category MUST match DB constraint strings exactly
       const { data: created, error: createErr } = await supabase
         .from("items")
         .insert([
@@ -201,9 +200,7 @@ export default function CreatePage() {
             description: cleanDesc,
             status: "available",
             photo_url: null,
-
-            // ✅ new fields
-            category,
+            category: category,
             pickup_location: pickupLocation,
             is_anonymous: isAnonymous,
             expires_at: expiresAt,
@@ -218,14 +215,12 @@ export default function CreatePage() {
 
       const itemId = created.id as string;
 
-      // B) If no photo, go to item page
       if (!file) {
         router.push(`/item/${itemId}`);
         router.refresh();
         return;
       }
 
-      // C) Upload photo to Storage
       const ext = getExt(file.name);
       const path = `items/${uid}/${itemId}/${crypto.randomUUID()}.${ext}`;
 
@@ -242,11 +237,9 @@ export default function CreatePage() {
         return;
       }
 
-      // D) Get public URL (bucket must be public)
       const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
       const publicUrl = pub.publicUrl;
 
-      // E) Save URL to items.photo_url
       const { error: updateErr } = await supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId);
 
       if (updateErr) {
@@ -256,8 +249,7 @@ export default function CreatePage() {
         return;
       }
 
-      // F) Optional: item_photos table insert (only if your columns exist)
-      // If your item_photos schema differs, delete this block.
+      // Optional
       const { error: photoErr } = await supabase.from("item_photos").insert([
         {
           item_id: itemId,
@@ -265,10 +257,8 @@ export default function CreatePage() {
           storage_path: path,
         },
       ]);
-
       if (photoErr) console.log("item_photos insert failed:", photoErr.message);
 
-      // done
       router.push(`/item/${itemId}`);
       router.refresh();
     } catch (err: any) {
@@ -288,7 +278,6 @@ export default function CreatePage() {
     );
   }
 
-  // Not logged in / not allowed
   if (!isAllowed || !userId) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -315,7 +304,6 @@ export default function CreatePage() {
     );
   }
 
-  // Profile incomplete gate
   if (!profileComplete) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -344,7 +332,6 @@ export default function CreatePage() {
     );
   }
 
-  // Main form
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
       <button
@@ -408,14 +395,21 @@ export default function CreatePage() {
               color: "white",
             }}
           >
+            <option value="electronics">Electronics</option>
+            <option value="furniture">Furniture</option>
+            <option value="health & beauty">Health & Beauty</option>
+            <option value="home & kitchen">Home & Kitchen</option>
+            <option value="jeweleries">Jeweleries</option>
+            <option value="musical instruments">Musical Instruments</option>
+
             <option value="clothing">Clothing</option>
-            <option value="sports_equipment">Sports equipment</option>
-            <option value="stationary">Stationary item</option>
+            <option value="sport equipment">Sport equipment</option>
+            <option value="stationary item">Stationary item</option>
             <option value="ride">Ride</option>
             <option value="books">Books</option>
             <option value="notes">Notes</option>
-            <option value="art">Art pieces</option>
-            <option value="other">Other</option>
+            <option value="art pieces">Art pieces</option>
+            <option value="others">Others</option>
           </select>
         </div>
 
@@ -529,12 +523,7 @@ export default function CreatePage() {
             </div>
           )}
 
-          <input
-            type="file"
-            accept="image/*"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            style={{ marginTop: 12 }}
-          />
+          <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} style={{ marginTop: 12 }} />
 
           {file && (
             <button

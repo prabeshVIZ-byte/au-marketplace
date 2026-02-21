@@ -8,13 +8,40 @@ type FeedRow = {
   id: string;
   title: string;
   description: string | null;
-  category: string | null;      // ✅ add
+  category: string | null;
   status: string | null;
   created_at: string;
   photo_url: string | null;
-  expires_at: string | null;    // ✅ add
+  expires_at: string | null;
   interest_count: number;
 };
+
+function formatExpiry(expiresAt: string | null) {
+  if (!expiresAt) return "Until I cancel";
+
+  const end = new Date(expiresAt);
+  if (Number.isNaN(end.getTime())) return "Until I cancel";
+
+  const now = new Date();
+  const ms = end.getTime() - now.getTime();
+
+  // Already expired
+  if (ms <= 0) return "Expired";
+
+  const oneDay = 24 * 60 * 60 * 1000;
+
+  // Compare by calendar day (not exact hours)
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+  const dayDiff = Math.round((startOfEnd - startOfToday) / oneDay);
+
+  if (dayDiff === 0) return "Today";
+  if (dayDiff === 1) return "Tomorrow";
+  if (dayDiff < 7) return `in ${dayDiff} days`;
+
+  // For longer, show a normal date
+  return end.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
 
 export default function FeedPage() {
   const router = useRouter();
@@ -46,34 +73,32 @@ export default function FeedPage() {
     !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
 
   async function loadFeed() {
-  setLoading(true);
-  setErr(null);
+    setLoading(true);
+    setErr(null);
 
-  try {
-    const { data, error } = await supabase
-      .from("v_feed_items")
-      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count")
-      .order("created_at", { ascending: false });
+    try {
+      const { data, error } = await supabase
+        .from("v_feed_items")
+        .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count")
+        .order("created_at", { ascending: false });
 
-    console.log("feed result:", { data, error });
+      if (error) {
+        setItems([]);
+        setMyInterested({});
+        setErr(error.message || "Error loading feed.");
+        return;
+      }
 
-    if (error) {
-      setItems([]);
+      const rows = (data as FeedRow[]) || [];
+      setItems(rows);
       setMyInterested({});
-      setErr(error.message || "Error loading feed.");
-      return;
+    } catch (e: any) {
+      console.error("feed exception:", e);
+      setErr(e?.message || "Unexpected error.");
+    } finally {
+      setLoading(false);
     }
-
-    const rows = (data as FeedRow[]) || [];
-    setItems(rows);
-    setMyInterested({});
-  } catch (e: any) {
-    console.error("feed exception:", e);
-    setErr(e?.message || "Unexpected error.");
-  } finally {
-    setLoading(false);
   }
-}
 
   async function toggleInterest(itemId: string) {
     if (!isLoggedIn || !userId) {
@@ -175,7 +200,7 @@ export default function FeedPage() {
             fontWeight: 800,
           }}
         >
-         {isLoggedIn ? "My listings" : "Request Access"}
+          {isLoggedIn ? "My listings" : "Request Access"}
         </button>
       </div>
 
@@ -203,6 +228,7 @@ export default function FeedPage() {
       >
         {items.map((item) => {
           const mine = myInterested[item.id] === true;
+          const expiryText = formatExpiry(item.expires_at);
 
           return (
             <div
@@ -214,7 +240,7 @@ export default function FeedPage() {
                 border: "1px solid #0f223f",
               }}
             >
-              {/* PHOTO (top of card) */}
+              {/* PHOTO */}
               {item.photo_url ? (
                 <button
                   type="button"
@@ -266,13 +292,24 @@ export default function FeedPage() {
               )}
 
               <div style={{ fontSize: 18, fontWeight: 900 }}>{item.title}</div>
-              <div style={{ opacity: 0.8, marginTop: 6 }}>
-              {item.category ? `Category: ${item.category}` : ""}
-             </div>
+
+              {item.category && (
+                <div style={{ opacity: 0.85, marginTop: 6 }}>
+                  Category: <span style={{ fontWeight: 800 }}>{item.category}</span>
+                </div>
+              )}
+
+              <div style={{ opacity: 0.85, marginTop: 6 }}>
+                Available until:{" "}
+                <span style={{ fontWeight: 800, color: expiryText === "Expired" ? "#f87171" : "white" }}>
+                  {expiryText}
+                </span>
+              </div>
+
               <div
                 style={{
                   opacity: 0.75,
-                  marginTop: 6,
+                  marginTop: 8,
                   display: "-webkit-box",
                   WebkitLineClamp: 2,
                   WebkitBoxOrient: "vertical",
