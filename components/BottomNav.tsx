@@ -36,7 +36,7 @@ export default function BottomNav() {
           backdropFilter: "blur(10px)",
           WebkitBackdropFilter: "blur(10px)",
           padding: "10px 12px",
-          pointerEvents: "auto",
+          pointerEvents: "none",
         }}
       >
         <div
