@@ -13,22 +13,27 @@ export default function BottomNav() {
     { href: "/me", label: "Account", icon: "👤" },
   ];
 
+  const NAV_HEIGHT = 88; // ✅ limits clickable overlay area
+
   return (
     <div
-      // wrapper prevents weird layout shifts + keeps it truly fixed
       style={{
         position: "fixed",
         left: 0,
         right: 0,
         bottom: 0,
         zIndex: 9999,
-        pointerEvents: "none", // IMPORTANT: only the inner nav receives clicks
+        height: NAV_HEIGHT, // ✅ only this tall
+        pointerEvents: "none", // ✅ only inner footer is clickable
       }}
     >
       <footer
         style={{
           pointerEvents: "auto",
+          height: "100%", // ✅ match wrapper height
           width: "100%",
+          display: "flex",
+          alignItems: "center",
           background: "rgba(2,6,23,0.92)",
           borderTop: "1px solid #0f223f",
           backdropFilter: "blur(10px)",
@@ -41,6 +46,7 @@ export default function BottomNav() {
           style={{
             maxWidth: 760,
             margin: "0 auto",
+            width: "100%",
             display: "grid",
             gridTemplateColumns: "repeat(4, 1fr)",
             gap: 10,

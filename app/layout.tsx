@@ -23,7 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
         {/* nav is ~56 + padding, so give content room */}
-        <main style={{ paddingBottom: 120 }}>{children}</main>
+        <main style={{ paddingBottom: 90 }}>{children}</main>
         <BottomNav />
       </body>
     </html>
