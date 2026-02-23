@@ -5,6 +5,9 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
+/* =======================
+   TYPES
+======================= */
 type Category =
   | "clothing"
   | "sport equipment"
@@ -24,6 +27,9 @@ type Category =
 type PickupLocation = "College Quad" | "Safety Service Office" | "Dining Hall";
 type ExpireChoice = "7" | "14" | "30" | "never";
 
+/* =======================
+   HELPERS
+======================= */
 function getExt(filename: string) {
   const parts = filename.split(".");
   return parts.length > 1 ? (parts.pop() || "jpg").toLowerCase() : "jpg";
@@ -33,31 +39,34 @@ function isImage(file: File) {
   return file.type?.startsWith("image/");
 }
 
+/* =======================
+   PAGE
+======================= */
 export default function CreatePage() {
   const router = useRouter();
 
-  // auth + profile gating
+  /* AUTH STATE */
   const [authLoading, setAuthLoading] = useState(true);
-  const [email, setEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [email, setEmail] = useState<string | null>(null);
 
+  /* PROFILE STATE */
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileComplete, setProfileComplete] = useState(false);
 
-  // form
+  /* FORM STATE */
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
   const [category, setCategory] = useState<Category>("books");
-  const [pickupLocation, setPickupLocation] = useState<PickupLocation>("College Quad");
+  const [pickupLocation, setPickupLocation] =
+    useState<PickupLocation>("College Quad");
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [expireChoice, setExpireChoice] = useState<ExpireChoice>("7");
 
-  // photo
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
-  // submit
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -65,19 +74,18 @@ export default function CreatePage() {
     return !!email && email.toLowerCase().endsWith("@ashland.edu");
   }, [email]);
 
-  // 1) Sync auth
+  /* =======================
+     AUTH SYNC
+  ======================= */
   useEffect(() => {
     let mounted = true;
 
     async function syncAuth() {
-      const { data, error } = await supabase.auth.getSession();
+      const { data } = await supabase.auth.getSession();
       if (!mounted) return;
 
-      if (error) console.log("getSession error:", error.message);
-
-      const session = data.session;
-      setEmail(session?.user?.email ?? null);
-      setUserId(session?.user?.id ?? null);
+      setUserId(data.session?.user?.id ?? null);
+      setEmail(data.session?.user?.email ?? null);
       setAuthLoading(false);
     }
 
@@ -93,114 +101,103 @@ export default function CreatePage() {
     };
   }, []);
 
-  // 2) Check profile completion
+  /* =======================
+     PROFILE CHECK (quiet)
+  ======================= */
   useEffect(() => {
     let mounted = true;
 
     async function checkProfile() {
-      setProfileLoading(true);
-      setProfileComplete(false);
-
       if (!userId) {
         setProfileLoading(false);
         return;
       }
 
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from("profiles")
         .select("full_name,user_role")
         .eq("id", userId)
-        .single();
+        .maybeSingle();
 
       if (!mounted) return;
 
-      if (error) {
-        console.log("profile check error:", error.message);
-        setProfileComplete(false);
-        setProfileLoading(false);
-        return;
-      }
-
       const fullNameOk = (data?.full_name ?? "").trim().length > 0;
-      const roleOk = data?.user_role === "student" || data?.user_role === "faculty";
+      const roleOk =
+        data?.user_role === "student" || data?.user_role === "faculty";
 
       setProfileComplete(fullNameOk && roleOk);
       setProfileLoading(false);
     }
 
     checkProfile();
-
     return () => {
       mounted = false;
     };
   }, [userId]);
 
-  // 3) Image preview
+  /* =======================
+     IMAGE PREVIEW
+  ======================= */
   useEffect(() => {
     if (!file) {
       setPreviewUrl(null);
       return;
     }
+
     const url = URL.createObjectURL(file);
     setPreviewUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
+  /* =======================
+     SUBMIT
+  ======================= */
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setMsg(null);
 
-    const { data, error } = await supabase.auth.getSession();
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
-
+    const { data } = await supabase.auth.getSession();
     const session = data.session;
-    const userEmail = session?.user?.email ?? null;
-    const uid = session?.user?.id ?? null;
 
-    if (!session || !userEmail || !uid || !userEmail.toLowerCase().endsWith("@ashland.edu")) {
+    if (!session || !session.user.email?.endsWith("@ashland.edu")) {
       router.push("/me");
       return;
     }
 
+    // 🚨 ONLY BLOCK HERE
     if (!profileComplete) {
       router.push("/me");
       return;
     }
 
-    const cleanTitle = title.trim();
-    const cleanDesc = description.trim() || null;
-
-    if (cleanTitle.length < 3) {
+    if (title.trim().length < 3) {
       setMsg("Title must be at least 3 characters.");
       return;
     }
 
     if (file && !isImage(file)) {
-      setMsg("Please upload an image file (jpg/png/webp).");
+      setMsg("Please upload a valid image.");
       return;
     }
-
-    const expiresAt =
-      expireChoice === "never"
-        ? null
-        : new Date(Date.now() + Number(expireChoice) * 24 * 60 * 60 * 1000).toISOString();
 
     setSaving(true);
 
     try {
-      // IMPORTANT: category MUST match DB constraint strings exactly
-      const { data: created, error: createErr } = await supabase
+      const expiresAt =
+        expireChoice === "never"
+          ? null
+          : new Date(
+              Date.now() + Number(expireChoice) * 24 * 60 * 60 * 1000
+            ).toISOString();
+
+      const { data: created, error } = await supabase
         .from("items")
         .insert([
           {
-            title: cleanTitle,
-            description: cleanDesc,
+            title: title.trim(),
+            description: description.trim() || null,
             status: "available",
-            photo_url: null,
-            category: category,
+            category,
             pickup_location: pickupLocation,
             is_anonymous: isAnonymous,
             expires_at: expiresAt,
@@ -209,55 +206,30 @@ export default function CreatePage() {
         .select("id")
         .single();
 
-      if (createErr || !created?.id) {
-        throw new Error(createErr?.message || "Failed to create item.");
+      if (error || !created?.id) throw error;
+
+      const itemId = created.id;
+
+      /* PHOTO UPLOAD */
+      if (file) {
+        const ext = getExt(file.name);
+        const path = `items/${userId}/${itemId}/${crypto.randomUUID()}.${ext}`;
+
+        const { error: uploadErr } = await supabase.storage
+          .from("item-photos")
+          .upload(path, file);
+
+        if (!uploadErr) {
+          const { data: pub } = supabase.storage
+            .from("item-photos")
+            .getPublicUrl(path);
+
+          await supabase
+            .from("items")
+            .update({ photo_url: pub.publicUrl })
+            .eq("id", itemId);
+        }
       }
-
-      const itemId = created.id as string;
-
-      if (!file) {
-        router.push(`/item/${itemId}`);
-        router.refresh();
-        return;
-      }
-
-      const ext = getExt(file.name);
-      const path = `items/${uid}/${itemId}/${crypto.randomUUID()}.${ext}`;
-
-      const { error: uploadErr } = await supabase.storage.from("item-photos").upload(path, file, {
-        cacheControl: "3600",
-        upsert: false,
-        contentType: file.type || undefined,
-      });
-
-      if (uploadErr) {
-        setMsg(`Item posted, but photo upload failed: ${uploadErr.message}`);
-        router.push(`/item/${itemId}`);
-        router.refresh();
-        return;
-      }
-
-      const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
-      const publicUrl = pub.publicUrl;
-
-      const { error: updateErr } = await supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId);
-
-      if (updateErr) {
-        setMsg(`Photo uploaded, but items.photo_url update failed: ${updateErr.message}`);
-        router.push(`/item/${itemId}`);
-        router.refresh();
-        return;
-      }
-
-      // Optional
-      const { error: photoErr } = await supabase.from("item_photos").insert([
-        {
-          item_id: itemId,
-          photo_url: publicUrl,
-          storage_path: path,
-        },
-      ]);
-      if (photoErr) console.log("item_photos insert failed:", photoErr.message);
 
       router.push(`/item/${itemId}`);
       router.refresh();
@@ -268,301 +240,56 @@ export default function CreatePage() {
     }
   }
 
-  // ===== UI =====
+  /* =======================
+     UI
+  ======================= */
 
   if (authLoading || profileLoading) {
-    return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        Loading…
-      </div>
-    );
+    return <div style={{ padding: 24 }}>Loading…</div>;
   }
 
   if (!isAllowed || !userId) {
     return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>List New Item</h1>
-        <p style={{ opacity: 0.85, marginTop: 0 }}>
-          You must log in with your <b>@ashland.edu</b> email to post.
-        </p>
-        <button
-          onClick={() => router.push("/me")}
-          style={{
-            marginTop: 16,
-            background: "#0b0b0b",
-            color: "white",
-            border: "1px solid #333",
-            padding: "10px 14px",
-            borderRadius: 10,
-            cursor: "pointer",
-            fontWeight: 900,
-          }}
-        >
+      <div style={{ padding: 24 }}>
+        <h1>List New Item</h1>
+        <p>You must log in with @ashland.edu</p>
+        <button onClick={() => router.push("/me")}>
           Go to Account
         </button>
       </div>
     );
   }
 
-  if (!profileComplete) {
-    return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        <h1 style={{ fontSize: 34, fontWeight: 900, marginBottom: 10 }}>Complete Profile</h1>
-        <p style={{ opacity: 0.85, marginTop: 0 }}>
-          Before posting, please set your <b>full name</b> and choose <b>Student/Faculty</b>.
-        </p>
-
-        <button
-          onClick={() => router.push("/me")}
-          style={{
-            marginTop: 16,
-            background: "#16a34a",
-            color: "white",
-            border: "none",
-            padding: "12px 16px",
-            borderRadius: 12,
-            cursor: "pointer",
-            fontWeight: 900,
-            width: "fit-content",
-          }}
-        >
-          Go to Profile Setup
-        </button>
-      </div>
-    );
-  }
-
   return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-      <button
-        onClick={() => router.push("/feed")}
-        style={{
-          marginBottom: 16,
-          background: "transparent",
-          color: "white",
-          border: "1px solid #333",
-          padding: "8px 12px",
-          borderRadius: 10,
-          cursor: "pointer",
-        }}
-      >
-        ← Back to feed
-      </button>
+    <div style={{ padding: 24, maxWidth: 520 }}>
+      <h1 style={{ fontSize: 28, fontWeight: 900 }}>
+        List New Item
+      </h1>
 
-      <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>List New Item</h1>
+      {!profileComplete && (
+        <div style={{ marginBottom: 16, color: "#facc15" }}>
+          ⚠️ Complete your profile before posting.
+        </div>
+      )}
 
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 520 }}>
+      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <input
-          type="text"
           placeholder="Item title"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          style={{
-            padding: 10,
-            borderRadius: 10,
-            border: "1px solid #333",
-            background: "#111",
-            color: "white",
-          }}
         />
 
         <textarea
-          placeholder="Description (optional)"
-          rows={4}
+          placeholder="Description"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          style={{
-            padding: 10,
-            borderRadius: 10,
-            border: "1px solid #333",
-            background: "#111",
-            color: "white",
-          }}
         />
 
-        {/* Category */}
-        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>Category</div>
-          <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value as Category)}
-            style={{
-              width: "100%",
-              padding: 10,
-              borderRadius: 10,
-              border: "1px solid #334155",
-              background: "black",
-              color: "white",
-            }}
-          >
-            <option value="electronics">Electronics</option>
-            <option value="furniture">Furniture</option>
-            <option value="health & beauty">Health & Beauty</option>
-            <option value="home & kitchen">Home & Kitchen</option>
-            <option value="jeweleries">Jeweleries</option>
-            <option value="musical instruments">Musical Instruments</option>
-
-            <option value="clothing">Clothing</option>
-            <option value="sport equipment">Sport equipment</option>
-            <option value="stationary item">Stationary item</option>
-            <option value="ride">Ride</option>
-            <option value="books">Books</option>
-            <option value="notes">Notes</option>
-            <option value="art pieces">Art pieces</option>
-            <option value="others">Others</option>
-          </select>
-        </div>
-
-        {/* Pickup location */}
-        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>Pickup location (safe spot)</div>
-          <select
-            value={pickupLocation}
-            onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
-            style={{
-              width: "100%",
-              padding: 10,
-              borderRadius: 10,
-              border: "1px solid #334155",
-              background: "black",
-              color: "white",
-            }}
-          >
-            <option value="College Quad">College Quad</option>
-            <option value="Safety Service Office">Safety Service Office</option>
-            <option value="Dining Hall">Dining Hall</option>
-          </select>
-        </div>
-
-        {/* Anonymous toggle */}
-        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>Post anonymously</div>
-
-          <button
-            type="button"
-            onClick={() => setIsAnonymous((v) => !v)}
-            style={{
-              width: "100%",
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid #334155",
-              background: isAnonymous ? "#052e16" : "transparent",
-              color: "white",
-              fontWeight: 900,
-              cursor: "pointer",
-            }}
-          >
-            {isAnonymous ? "Anonymous: ON" : "Anonymous: OFF"}
-          </button>
-
-          <div style={{ opacity: 0.75, marginTop: 8 }}>
-            {isAnonymous ? "Your name will be hidden from the public feed." : "Your name can be shown later (when we add it)."}
-          </div>
-        </div>
-
-        {/* Expires */}
-        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>How long should this post stay up?</div>
-
-          <select
-            value={expireChoice}
-            onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
-            style={{
-              width: "100%",
-              padding: 10,
-              borderRadius: 10,
-              border: "1px solid #334155",
-              background: "black",
-              color: "white",
-            }}
-          >
-            <option value="7">7 days</option>
-            <option value="14">14 days</option>
-            <option value="30">30 days</option>
-            <option value="never">Until I cancel</option>
-          </select>
-
-          <div style={{ opacity: 0.75, marginTop: 8 }}>
-            {expireChoice === "never"
-              ? "This post will stay up until you cancel it."
-              : `This post will expire in ${expireChoice} days.`}
-          </div>
-        </div>
-
-        {/* Photo */}
-        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>Photo (optional)</div>
-
-          {previewUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={previewUrl}
-              alt="Preview"
-              style={{
-                width: "100%",
-                height: 240,
-                objectFit: "cover",
-                borderRadius: 12,
-                border: "1px solid #0f223f",
-              }}
-            />
-          ) : (
-            <div
-              style={{
-                width: "100%",
-                height: 240,
-                borderRadius: 12,
-                border: "1px dashed #334155",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "#94a3b8",
-              }}
-            >
-              No photo selected
-            </div>
-          )}
-
-          <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} style={{ marginTop: 12 }} />
-
-          {file && (
-            <button
-              type="button"
-              onClick={() => setFile(null)}
-              style={{
-                marginTop: 10,
-                background: "transparent",
-                color: "white",
-                border: "1px solid #334155",
-                padding: "8px 12px",
-                borderRadius: 10,
-                cursor: "pointer",
-                fontWeight: 800,
-              }}
-            >
-              Remove photo
-            </button>
-          )}
-        </div>
-
-        {msg && <p style={{ color: "#f87171", margin: 0 }}>{msg}</p>}
-
-        <button
-          type="submit"
-          disabled={saving}
-          style={{
-            background: saving ? "#14532d" : "#16a34a",
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "none",
-            color: "white",
-            cursor: saving ? "not-allowed" : "pointer",
-            opacity: saving ? 0.7 : 1,
-            fontWeight: 900,
-          }}
-        >
+        <button type="submit" disabled={saving}>
           {saving ? "Posting…" : "Post Item"}
         </button>
+
+        {msg && <p style={{ color: "red" }}>{msg}</p>}
       </form>
     </div>
   );
