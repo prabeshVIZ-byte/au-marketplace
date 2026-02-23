@@ -1,10 +1,30 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 type Role = "student" | "faculty" | "";
+
+type AcceptedInterest = {
+  id: string;
+  item_id: string;
+  status: string;
+  accepted_expires_at: string | null;
+};
+
+function formatTimeLeft(expiresAt: string | null) {
+  if (!expiresAt) return null;
+  const end = new Date(expiresAt).getTime();
+  const now = Date.now();
+  const ms = end - now;
+  if (ms <= 0) return "Expired";
+
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
 
 export default function MePage() {
   const router = useRouter();
@@ -14,6 +34,7 @@ export default function MePage() {
   const [password, setPassword] = useState("");
 
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
 
   const [sending, setSending] = useState(false);
@@ -25,8 +46,14 @@ export default function MePage() {
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
 
+  // ✅ Step 10: buyer notification + confirm
+  const [accepted, setAccepted] = useState<AcceptedInterest | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
   const profileComplete =
     fullName.trim().length > 0 && (role === "student" || role === "faculty");
+
+  const timeLeft = useMemo(() => formatTimeLeft(accepted?.accepted_expires_at ?? null), [accepted?.accepted_expires_at]);
 
   async function loadProfile(uid: string) {
     setProfileLoading(true);
@@ -41,7 +68,6 @@ export default function MePage() {
     setProfileLoading(false);
 
     if (error) {
-      // OK if row doesn't exist yet
       console.log("loadProfile:", error.message);
       return;
     }
@@ -50,17 +76,50 @@ export default function MePage() {
     setRole(((data?.user_role ?? "") as Role) || "");
   }
 
+  async function loadAcceptedInterest(uid: string) {
+    // Find if THIS user has an accepted interest (selected by a seller)
+    const { data, error } = await supabase
+      .from("interests")
+      .select("id,item_id,status,accepted_expires_at")
+      .eq("user_id", uid)
+      .eq("status", "accepted")
+      .order("accepted_at", { ascending: false })
+      .maybeSingle();
+
+    if (error) {
+      console.log("loadAcceptedInterest:", error.message);
+      setAccepted(null);
+      return;
+    }
+
+    if (data) {
+      setAccepted({
+        id: (data as any).id,
+        item_id: (data as any).item_id,
+        status: (data as any).status,
+        accepted_expires_at: (data as any).accepted_expires_at,
+      });
+    } else {
+      setAccepted(null);
+    }
+  }
+
   async function refreshUser() {
     const { data } = await supabase.auth.getUser();
     const e = data.user?.email ?? null;
-    setUserEmail(e);
+    const uid = data.user?.id ?? null;
 
-    if (data.user?.id) {
-      await loadProfile(data.user.id);
+    setUserEmail(e);
+    setUserId(uid);
+
+    if (uid) {
+      await loadProfile(uid);
+      await loadAcceptedInterest(uid); // ✅ notification
     } else {
       setFullName("");
       setRole("");
       setProfileSaved(false);
+      setAccepted(null);
     }
   }
 
@@ -77,9 +136,15 @@ export default function MePage() {
       refreshUser();
     });
 
+    // re-render countdown every second (only affects display)
+    const t = setInterval(() => {
+      setAccepted((prev) => (prev ? { ...prev } : prev));
+    }, 1000);
+
     return () => {
       alive = false;
       sub.subscription.unsubscribe();
+      clearInterval(t);
     };
   }, []);
 
@@ -151,7 +216,6 @@ export default function MePage() {
 
     setProfileLoading(true);
 
-    // Use UPSERT so it works whether row exists or not (prevents loop bugs)
     const { error } = await supabase.from("profiles").upsert(
       [
         {
@@ -174,6 +238,34 @@ export default function MePage() {
     setStatus("Profile saved ✅");
   }
 
+  async function confirmPickup() {
+    if (!accepted) return;
+
+    // prevent confirming after expiry
+    if (timeLeft === "Expired") {
+      setStatus("This selection expired. Ask the seller to select you again.");
+      return;
+    }
+
+    setStatus(null);
+    setConfirming(true);
+
+    const { error } = await supabase.rpc("confirm_interest", {
+      p_interest_id: accepted.id,
+    });
+
+    setConfirming(false);
+
+    if (error) {
+      setStatus(error.message);
+      return;
+    }
+
+    setStatus("Confirmed ✅ Item is now reserved for you.");
+    setAccepted(null);
+    router.refresh();
+  }
+
   async function signOut() {
     setStatus(null);
 
@@ -184,11 +276,13 @@ export default function MePage() {
     }
 
     setUserEmail(null);
+    setUserId(null);
     setEmail("");
     setPassword("");
     setFullName("");
     setRole("");
     setProfileSaved(false);
+    setAccepted(null);
     setStatus("Signed out.");
 
     router.replace("/feed");
@@ -229,6 +323,46 @@ export default function MePage() {
         <div style={{ marginTop: 16, border: "1px solid #0f223f", borderRadius: 14, padding: 16, background: "#0b1730" }}>
           <div style={{ fontWeight: 900 }}>Logged in as</div>
           <div style={{ opacity: 0.85, marginTop: 6 }}>{userEmail}</div>
+
+          {/* ✅ Buyer notification card */}
+          {accepted && (
+            <div
+              style={{
+                marginTop: 14,
+                border: "1px solid #14532d",
+                borderRadius: 14,
+                padding: 14,
+                background: "#052e16",
+              }}
+            >
+              <div style={{ fontWeight: 900 }}>🎉 You were selected!</div>
+              <div style={{ opacity: 0.9, marginTop: 6 }}>
+                Confirm within: <b>{timeLeft ?? "—"}</b>
+              </div>
+              <div style={{ opacity: 0.75, marginTop: 6, fontSize: 12 }}>
+                Item ID: {accepted.item_id.slice(0, 8)}…
+              </div>
+
+              <button
+                onClick={confirmPickup}
+                disabled={confirming || timeLeft === "Expired"}
+                style={{
+                  marginTop: 10,
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "none",
+                  background: confirming ? "#14532d" : "#16a34a",
+                  color: "white",
+                  fontWeight: 900,
+                  cursor: confirming ? "not-allowed" : "pointer",
+                  opacity: confirming ? 0.85 : 1,
+                }}
+              >
+                {confirming ? "Confirming..." : "Confirm pickup"}
+              </button>
+            </div>
+          )}
 
           {!profileComplete && (
             <div style={{ marginTop: 14, border: "1px solid #334155", borderRadius: 12, padding: 14 }}>
