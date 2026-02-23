@@ -31,14 +31,14 @@ function formatTimeLeft(expiresAt: string | null) {
 export default function MePage() {
   const router = useRouter();
 
-  // auth
+  // auth UI
   const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [email, setEmail] = useState("");
+  const [emailInput, setEmailInput] = useState("");
   const [password, setPassword] = useState("");
 
+  // session
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
-
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
 
@@ -46,13 +46,13 @@ export default function MePage() {
   const [fullName, setFullName] = useState("");
   const [role, setRole] = useState<Role>("");
   const [profileSaving, setProfileSaving] = useState(false);
-  const [profileSaved, setProfileSaved] = useState(false);
+  const [profileLoadedOnce, setProfileLoadedOnce] = useState(false);
 
-  // accepted selection
+  // accepted (buyer selection)
   const [accepted, setAccepted] = useState<AcceptedInterest | null>(null);
   const [confirming, setConfirming] = useState(false);
 
-  // UI status
+  // status
   const [status, setStatus] = useState<UiStatus>(null);
 
   const profileComplete = useMemo(() => {
@@ -64,27 +64,26 @@ export default function MePage() {
     [accepted?.accepted_expires_at]
   );
 
-  const statusColor = status?.type === "error" ? "#f87171" : status?.type === "success" ? "#4ade80" : "#93c5fd";
+  const statusColor =
+    status?.type === "error" ? "#f87171" : status?.type === "success" ? "#4ade80" : "#93c5fd";
 
   function safeClick(e: React.MouseEvent) {
-    // This is the “nav can’t steal my clicks” shield.
     e.preventDefault();
     e.stopPropagation();
   }
 
   async function loadProfile(uid: string) {
-    setProfileSaved(false);
-
     const { data, error } = await supabase
       .from("profiles")
-      .select("full_name,user_role")
+      .select("full_name,user_role,email")
       .eq("id", uid)
       .maybeSingle();
 
+    setProfileLoadedOnce(true);
+
     if (error) {
       console.log("loadProfile:", error.message);
-      // don’t throw UI into red panic; just show info
-      setStatus({ text: "Could not load profile yet.", type: "info" });
+      setStatus({ text: `Profile load failed: ${error.message}`, type: "error" });
       return;
     }
 
@@ -133,8 +132,8 @@ export default function MePage() {
     } else {
       setFullName("");
       setRole("");
-      setProfileSaved(false);
       setAccepted(null);
+      setProfileLoadedOnce(false);
     }
   }
 
@@ -164,9 +163,8 @@ export default function MePage() {
 
   async function handleAuth() {
     setStatus(null);
-    setProfileSaved(false);
 
-    const e = email.trim().toLowerCase();
+    const e = emailInput.trim().toLowerCase();
     if (!e.endsWith("@ashland.edu")) {
       setStatus({ text: "Use your @ashland.edu email.", type: "error" });
       return;
@@ -205,7 +203,6 @@ export default function MePage() {
 
   async function saveProfile() {
     setStatus(null);
-    setProfileSaved(false);
 
     const name = fullName.trim();
     if (!name) {
@@ -217,8 +214,15 @@ export default function MePage() {
       return;
     }
 
-    const { data } = await supabase.auth.getSession();
-    const uid = data.session?.user?.id;
+    const { data: sess, error: sessErr } = await supabase.auth.getSession();
+    if (sessErr) {
+      setStatus({ text: sessErr.message, type: "error" });
+      return;
+    }
+
+    const uid = sess.session?.user?.id;
+    const email = sess.session?.user?.email;
+
     if (!uid) {
       setStatus({ text: "No session found. Please sign in again.", type: "error" });
       return;
@@ -226,21 +230,21 @@ export default function MePage() {
 
     setProfileSaving(true);
 
-    const { error } = await supabase.from("profiles").upsert(
-      [{ id: uid, full_name: name, user_role: role }],
-      { onConflict: "id" }
-    );
+    const { error } = await supabase
+      .from("profiles")
+      .upsert(
+        [{ id: uid, email: email ?? null, full_name: name, user_role: role }],
+        { onConflict: "id" }
+      );
 
     setProfileSaving(false);
 
     if (error) {
-      // If this happens after we fix navigation, it’s RLS.
       setStatus({ text: `Profile save failed: ${error.message}`, type: "error" });
       return;
     }
 
     await loadProfile(uid);
-    setProfileSaved(true);
     setStatus({ text: "Profile saved ✅", type: "success" });
   }
 
@@ -282,14 +286,12 @@ export default function MePage() {
 
     setUserEmail(null);
     setUserId(null);
-    setEmail("");
+    setEmailInput("");
     setPassword("");
     setFullName("");
     setRole("");
-    setProfileSaved(false);
     setAccepted(null);
-
-    setStatus({ text: "Signed out.", type: "info" });
+    setProfileLoadedOnce(false);
 
     router.replace("/feed");
     router.refresh();
@@ -304,10 +306,7 @@ export default function MePage() {
   }
 
   return (
-    <div
-      // paddingBottom prevents any fixed bottom nav from blocking/stealing clicks
-      style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 100, maxWidth: 520 }}
-    >
+    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120, maxWidth: 520 }}>
       <button
         type="button"
         onClick={() => router.push("/feed")}
@@ -329,63 +328,25 @@ export default function MePage() {
         Login is restricted to <b>@ashland.edu</b>.
       </p>
 
+      {/* SIGNED IN */}
       {userEmail ? (
         <div style={{ marginTop: 16, border: "1px solid #0f223f", borderRadius: 14, padding: 16, background: "#0b1730" }}>
           <div style={{ fontWeight: 900 }}>Logged in as</div>
           <div style={{ opacity: 0.85, marginTop: 6 }}>{userEmail}</div>
 
-          {accepted && (
-            <div
-              style={{
-                marginTop: 14,
-                border: "1px solid #14532d",
-                borderRadius: 14,
-                padding: 14,
-                background: "#052e16",
-              }}
-            >
-              <div style={{ fontWeight: 900 }}>🎉 You were selected!</div>
-              <div style={{ opacity: 0.9, marginTop: 6 }}>
-                Confirm within: <b>{timeLeft ?? "—"}</b>
-              </div>
-              <div style={{ opacity: 0.75, marginTop: 6, fontSize: 12 }}>
-                Item ID: {accepted.item_id.slice(0, 8)}…
-              </div>
-
-              <button
-                type="button"
-                onClick={(e) => {
-                  safeClick(e);
-                  confirmPickup();
-                }}
-                disabled={confirming || timeLeft === "Expired"}
-                style={{
-                  marginTop: 10,
-                  width: "100%",
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "none",
-                  background: confirming ? "#14532d" : "#16a34a",
-                  color: "white",
-                  fontWeight: 900,
-                  cursor: confirming ? "not-allowed" : "pointer",
-                  opacity: confirming ? 0.85 : 1,
-                }}
-              >
-                {confirming ? "Confirming..." : "Confirm pickup"}
-              </button>
-            </div>
-          )}
-
+          {/* PROFILE REQUIRED */}
           {!profileComplete && (
             <div style={{ marginTop: 14, border: "1px solid #334155", borderRadius: 12, padding: 14 }}>
-              <div style={{ fontWeight: 900, marginBottom: 10 }}>Complete profile (required)</div>
+              <div style={{ fontWeight: 900, marginBottom: 10 }}>
+                Complete profile (required)
+                {!profileLoadedOnce && <span style={{ marginLeft: 8, opacity: 0.7, fontSize: 12 }}>loading…</span>}
+              </div>
 
               <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>Full name</label>
               <input
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
-                placeholder="e.g., Prabesh Sunar"
+                placeholder="e.g., Tom Sudow"
                 style={{
                   width: "100%",
                   padding: "10px 12px",
@@ -461,11 +422,46 @@ export default function MePage() {
               >
                 {profileSaving ? "Saving..." : "Save profile"}
               </button>
-
-              {profileSaved && <div style={{ marginTop: 10, opacity: 0.85 }}>Saved ✅</div>}
             </div>
           )}
 
+          {/* ACCEPTED */}
+          {accepted && (
+            <div style={{ marginTop: 14, border: "1px solid #14532d", borderRadius: 14, padding: 14, background: "#052e16" }}>
+              <div style={{ fontWeight: 900 }}>🎉 You were selected!</div>
+              <div style={{ opacity: 0.9, marginTop: 6 }}>
+                Confirm within: <b>{timeLeft ?? "—"}</b>
+              </div>
+              <div style={{ opacity: 0.75, marginTop: 6, fontSize: 12 }}>
+                Item ID: {accepted.item_id.slice(0, 8)}…
+              </div>
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  safeClick(e);
+                  confirmPickup();
+                }}
+                disabled={confirming || timeLeft === "Expired"}
+                style={{
+                  marginTop: 10,
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "none",
+                  background: confirming ? "#14532d" : "#16a34a",
+                  color: "white",
+                  fontWeight: 900,
+                  cursor: confirming ? "not-allowed" : "pointer",
+                  opacity: confirming ? 0.85 : 1,
+                }}
+              >
+                {confirming ? "Confirming..." : "Confirm pickup"}
+              </button>
+            </div>
+          )}
+
+          {/* ACTIONS */}
           <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
             <button
               type="button"
@@ -510,6 +506,7 @@ export default function MePage() {
           </div>
         </div>
       ) : (
+        // LOGGED OUT
         <div style={{ marginTop: 16 }}>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
             <button
@@ -548,8 +545,8 @@ export default function MePage() {
           </div>
 
           <input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            value={emailInput}
+            onChange={(e) => setEmailInput(e.target.value)}
             placeholder="you@ashland.edu"
             style={{
               width: "100%",
