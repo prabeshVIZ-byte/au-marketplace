@@ -1,5 +1,7 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
@@ -7,6 +9,25 @@ import { supabase } from "@/lib/supabaseClient";
 type Role = "student" | "faculty" | "";
 type StatusType = "error" | "success" | "info";
 type UiStatus = { text: string; type: StatusType } | null;
+
+type AcceptedInterest = {
+  id: string;
+  item_id: string;
+  status: string;
+  accepted_expires_at: string | null;
+};
+
+function formatTimeLeft(expiresAt: string | null) {
+  if (!expiresAt) return null;
+  const end = new Date(expiresAt).getTime();
+  const now = Date.now();
+  const ms = end - now;
+  if (ms <= 0) return "Expired";
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
 
 export default function MePage() {
   const router = useRouter();
@@ -31,8 +52,16 @@ export default function MePage() {
   const [dbProfileComplete, setDbProfileComplete] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
 
+  // accepted interest + buyer notification
+  const [accepted, setAccepted] = useState<AcceptedInterest | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
   // status
   const [status, setStatus] = useState<UiStatus>(null);
+
+  const isLoggedIn = useMemo(() => {
+    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  }, [userId, userEmail]);
 
   const draftComplete = useMemo(() => {
     return fullName.trim().length > 0 && (role === "student" || role === "faculty");
@@ -40,6 +69,11 @@ export default function MePage() {
 
   const statusColor =
     status?.type === "error" ? "#f87171" : status?.type === "success" ? "#4ade80" : "#93c5fd";
+
+  const timeLeft = useMemo(
+    () => formatTimeLeft(accepted?.accepted_expires_at ?? null),
+    [accepted?.accepted_expires_at]
+  );
 
   async function loadProfile(uid: string) {
     setProfileLoading(true);
@@ -62,7 +96,6 @@ export default function MePage() {
     const dbName = (data?.full_name ?? "").trim();
     const dbRole = (data?.user_role ?? "") as Role;
 
-    // hydrate inputs from DB
     setFullName(dbName);
     setRole(dbRole || "");
 
@@ -70,22 +103,51 @@ export default function MePage() {
     setDbProfileComplete(complete);
   }
 
-  async function refreshUser() {
-    const { data, error } = await supabase.auth.getUser();
-    if (error) console.log("getUser:", error.message);
+  async function loadAcceptedInterest(uid: string) {
+    const { data, error } = await supabase
+      .from("interests")
+      .select("id,item_id,status,accepted_expires_at")
+      .eq("user_id", uid)
+      .eq("status", "accepted")
+      .order("accepted_at", { ascending: false })
+      .maybeSingle();
 
-    const e = data.user?.email ?? null;
-    const uid = data.user?.id ?? null;
+    if (error) {
+      console.log("loadAcceptedInterest:", error.message);
+      setAccepted(null);
+      return;
+    }
+
+    if (data) {
+      setAccepted({
+        id: (data as any).id,
+        item_id: (data as any).item_id,
+        status: (data as any).status,
+        accepted_expires_at: (data as any).accepted_expires_at,
+      });
+    } else {
+      setAccepted(null);
+    }
+  }
+
+  async function refreshUser() {
+    const { data } = await supabase.auth.getSession();
+    const session = data.session;
+
+    const e = session?.user?.email ?? null;
+    const uid = session?.user?.id ?? null;
 
     setUserEmail(e);
     setUserId(uid);
 
     if (uid) {
       await loadProfile(uid);
+      await loadAcceptedInterest(uid);
     } else {
       setFullName("");
       setRole("");
       setDbProfileComplete(false);
+      setAccepted(null);
     }
   }
 
@@ -102,11 +164,26 @@ export default function MePage() {
       refreshUser();
     });
 
+    // live buyer notification (accepted/confirmed updates)
+    const ch = supabase
+      .channel("buyer-interest-status")
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "interests" }, (payload) => {
+        const uid = userId;
+        const row = payload.new as any;
+        if (!uid) return;
+        if (row?.user_id !== uid) return;
+        // refresh accepted card immediately
+        refreshUser();
+      })
+      .subscribe();
+
     return () => {
       alive = false;
       sub.subscription.unsubscribe();
+      supabase.removeChannel(ch);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
 
   async function handleAuth() {
     setStatus(null);
@@ -189,6 +266,33 @@ export default function MePage() {
     setStatus({ text: "Profile saved ✅", type: "success" });
   }
 
+  async function confirmPickup() {
+    if (!accepted) return;
+
+    if (timeLeft === "Expired") {
+      setStatus({ text: "This selection expired. Ask the seller to select you again.", type: "error" });
+      return;
+    }
+
+    setStatus(null);
+    setConfirming(true);
+
+    const { error } = await supabase.rpc("confirm_interest", {
+      p_interest_id: accepted.id,
+    });
+
+    setConfirming(false);
+
+    if (error) {
+      setStatus({ text: error.message, type: "error" });
+      return;
+    }
+
+    setStatus({ text: "Confirmed ✅ Item is now reserved for you.", type: "success" });
+    setAccepted(null);
+    router.refresh();
+  }
+
   async function signOut() {
     setStatus(null);
 
@@ -205,30 +309,18 @@ export default function MePage() {
     setFullName("");
     setRole("");
     setDbProfileComplete(false);
+    setAccepted(null);
 
     router.replace("/feed");
     router.refresh();
   }
 
   if (loading) {
-    return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        Loading…
-      </div>
-    );
+    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Loading…</div>;
   }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "black",
-        color: "white",
-        padding: 24,
-        paddingBottom: 120,
-        maxWidth: 520,
-      }}
-    >
+    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120, maxWidth: 520 }}>
       <button
         type="button"
         onClick={() => router.push("/feed")}
@@ -245,7 +337,7 @@ export default function MePage() {
         ← Back to feed
       </button>
 
-      <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Request Access</h1>
+      <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Account</h1>
       <p style={{ opacity: 0.8, marginTop: 8 }}>
         Login is restricted to <b>@ashland.edu</b>.
       </p>
@@ -256,6 +348,38 @@ export default function MePage() {
           <div style={{ fontWeight: 900 }}>Logged in as</div>
           <div style={{ opacity: 0.85, marginTop: 6 }}>{userEmail}</div>
 
+          {/* BUYER NOTIFICATION */}
+          {accepted && (
+            <div style={{ marginTop: 14, border: "1px solid #14532d", borderRadius: 14, padding: 14, background: "#052e16" }}>
+              <div style={{ fontWeight: 900 }}>🎉 You were selected!</div>
+              <div style={{ opacity: 0.9, marginTop: 6 }}>
+                Confirm within: <b>{timeLeft ?? "—"}</b>
+              </div>
+              <div style={{ opacity: 0.75, marginTop: 6, fontSize: 12 }}>Item ID: {accepted.item_id.slice(0, 8)}…</div>
+
+              <button
+                type="button"
+                onClick={confirmPickup}
+                disabled={confirming || timeLeft === "Expired"}
+                style={{
+                  marginTop: 10,
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "none",
+                  background: confirming ? "#14532d" : "#16a34a",
+                  color: "white",
+                  fontWeight: 900,
+                  cursor: confirming ? "not-allowed" : "pointer",
+                  opacity: confirming ? 0.85 : 1,
+                }}
+              >
+                {confirming ? "Confirming..." : "Confirm pickup"}
+              </button>
+            </div>
+          )}
+
+          {/* PROFILE REQUIRED */}
           {!dbProfileComplete && (
             <div style={{ marginTop: 14, border: "1px solid #334155", borderRadius: 12, padding: 14 }}>
               <div style={{ fontWeight: 900, marginBottom: 10 }}>
@@ -466,6 +590,11 @@ export default function MePage() {
       )}
 
       {status && <p style={{ marginTop: 14, color: statusColor }}>{status.text}</p>}
+      {isLoggedIn && (
+        <div style={{ marginTop: 10, opacity: 0.6, fontSize: 12 }}>
+          Tip: keep this tab open — if a seller accepts you, this page updates automatically.
+        </div>
+      )}
     </div>
   );
 }

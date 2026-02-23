@@ -14,6 +14,8 @@ type MyItem = {
   status: string | null;
   created_at: string;
   photo_url: string | null;
+  pending_count: number;
+  total_interest: number;
 };
 
 export default function MyItemsPage() {
@@ -51,10 +53,11 @@ export default function MyItemsPage() {
       return;
     }
 
+    // ✅ uses v_my_items (create this view in Supabase SQL editor)
     const { data, error } = await supabase
-      .from("items")
-      .select("id,title,description,status,created_at,photo_url")
-      .eq("owner_id", uid)
+      .from("v_my_items")
+      .select("id,title,description,status,created_at,photo_url,pending_count,total_interest")
+      .eq("owner_id", uid) // include owner_id in the view; if you didn't, remove this line
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -98,12 +101,31 @@ export default function MyItemsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ✅ realtime: if any interest is created/updated, refresh list (badge updates)
+  useEffect(() => {
+    if (!userId) return;
+
+    const ch = supabase
+      .channel(`seller-interest-${userId}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "interests" }, () => {
+        loadMyItems();
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "interests" }, () => {
+        loadMyItems();
+      })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "interests" }, () => {
+        loadMyItems();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(ch);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+
   if (!isLoggedIn) {
-    return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        Checking access…
-      </div>
-    );
+    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Checking access…</div>;
   }
 
   return (
@@ -147,9 +169,7 @@ export default function MyItemsPage() {
       {err && <p style={{ color: "#f87171" }}>{err}</p>}
       {loading && <p style={{ opacity: 0.8 }}>Loading…</p>}
 
-      {!loading && items.length === 0 && (
-        <p style={{ opacity: 0.8, marginTop: 10 }}>You haven’t listed anything yet.</p>
-      )}
+      {!loading && items.length === 0 && <p style={{ opacity: 0.8, marginTop: 10 }}>You haven’t listed anything yet.</p>}
 
       <div
         style={{
@@ -201,13 +221,36 @@ export default function MyItemsPage() {
               </div>
             )}
 
-            <div style={{ fontSize: 18, fontWeight: 900 }}>{item.title}</div>
-            <div style={{ opacity: 0.75, marginTop: 6 }}>
-              {item.description || "—"}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div style={{ fontSize: 18, fontWeight: 900 }}>{item.title}</div>
+
+              {item.pending_count > 0 && (
+                <div
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 999,
+                    border: "1px solid #14532d",
+                    background: "#052e16",
+                    fontWeight: 900,
+                    fontSize: 12,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {item.pending_count} new
+                </div>
+              )}
             </div>
+
+            <div style={{ opacity: 0.75, marginTop: 6 }}>{item.description || "—"}</div>
 
             <div style={{ opacity: 0.75, marginTop: 10 }}>
               Status: <b>{item.status || "—"}</b>
+            </div>
+
+            <div style={{ opacity: 0.75, marginTop: 6 }}>
+              Interested: <b>{item.total_interest ?? 0}</b>
+              {" · "}
+              Pending: <b>{item.pending_count ?? 0}</b>
             </div>
 
             <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
@@ -224,7 +267,7 @@ export default function MyItemsPage() {
                   fontWeight: 900,
                 }}
               >
-                Edit
+                Manage requests
               </button>
 
               <button
