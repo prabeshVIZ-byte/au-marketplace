@@ -9,10 +9,12 @@ type Item = {
   id: string;
   title: string;
   description: string | null;
-  status: string | null;
+  status: string | null; // available | reserved | claimed
   created_at: string;
   owner_id: string;
   reserved_interest_id: string | null;
+  reserved_at?: string | null;
+  claimed_at?: string | null;
 };
 
 type InterestRow = {
@@ -33,7 +35,6 @@ type InterestRow = {
 type ProfileRow = {
   id: string;
   full_name: string | null;
-  email: string | null; // if you don't have email in profiles, this will just stay null
 };
 
 function formatTimeLeft(expiresAt: string | null) {
@@ -62,29 +63,33 @@ export default function ManageItemPage() {
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
-  const activeAccepted = useMemo(() => {
-    return interests.find((x) => x.status === "accepted");
-  }, [interests]);
+  const [busyAcceptId, setBusyAcceptId] = useState<string | null>(null);
+  const [busyPickup, setBusyPickup] = useState(false);
 
-  async function loadOne() {
+  const activeAccepted = useMemo(() => interests.find((x) => x.status === "accepted"), [interests]);
+  const activeReserved = useMemo(() => interests.find((x) => x.status === "reserved"), [interests]);
+
+  const itemStatus = item?.status ?? "available";
+
+  async function loadAll() {
     if (!id) return;
 
     setLoading(true);
     setErr(null);
 
     try {
-      const { data, error } = await supabase
+      // item
+      const { data: it, error: itErr } = await supabase
         .from("items")
-        .select("id,title,description,status,created_at,owner_id,reserved_interest_id")
+        .select("id,title,description,status,created_at,owner_id,reserved_interest_id,reserved_at,claimed_at")
         .eq("id", id)
         .single();
 
-      if (error) throw new Error(error.message);
-      setItem((data as Item) || null);
+      if (itErr) throw new Error(itErr.message);
+      setItem((it as Item) || null);
 
-      // load interests for this item (owner can see via RLS policy we created)
+      // interests
       const { data: ints, error: iErr } = await supabase
         .from("interests")
         .select(
@@ -98,18 +103,23 @@ export default function ManageItemPage() {
       const list = (ints as InterestRow[]) || [];
       setInterests(list);
 
-      // OPTIONAL: try to load profiles for display names
+      // profiles (only full_name)
       const uniqueUserIds = Array.from(new Set(list.map((x) => x.user_id)));
       if (uniqueUserIds.length > 0) {
-        // if your profiles table does NOT have email, it's okay; we'll just show full_name or id
-        const { data: profs } = await supabase
+        const { data: profs, error: pErr } = await supabase
           .from("profiles")
-          .select("id,full_name,email")
+          .select("id,full_name")
           .in("id", uniqueUserIds);
 
-        const map: Record<string, ProfileRow> = {};
-        (profs as ProfileRow[] | null)?.forEach((p) => (map[p.id] = p));
-        setProfilesById(map);
+        if (pErr) {
+          // Not fatal; we can still show user_id short
+          console.log("profiles load:", pErr.message);
+          setProfilesById({});
+        } else {
+          const map: Record<string, ProfileRow> = {};
+          (profs as ProfileRow[] | null)?.forEach((p) => (map[p.id] = p));
+          setProfilesById(map);
+        }
       } else {
         setProfilesById({});
       }
@@ -125,31 +135,50 @@ export default function ManageItemPage() {
 
   async function acceptInterest(interestId: string) {
     setErr(null);
-    setBusy(true);
+    setBusyAcceptId(interestId);
+
     try {
       const { error } = await supabase.rpc("accept_interest", { p_interest_id: interestId });
       if (error) throw new Error(error.message);
-      await loadOne();
+      await loadAll();
     } catch (e: any) {
       setErr(e?.message || "Could not accept.");
     } finally {
-      setBusy(false);
+      setBusyAcceptId(null);
+    }
+  }
+
+  async function markPickedUp() {
+    if (!item) return;
+
+    setErr(null);
+    setBusyPickup(true);
+
+    try {
+      const { error } = await supabase.rpc("mark_picked_up", { p_item_id: item.id });
+      if (error) throw new Error(error.message);
+      await loadAll();
+    } catch (e: any) {
+      setErr(e?.message || "Could not mark picked up.");
+    } finally {
+      setBusyPickup(false);
     }
   }
 
   // live countdown refresh
   useEffect(() => {
     const t = setInterval(() => {
-      // force re-render every second for countdown
-      setInterests((prev) => [...prev]);
+      setInterests((prev) => [...prev]); // re-render for timers
     }, 1000);
     return () => clearInterval(t);
   }, []);
 
   useEffect(() => {
-    if (id) loadOne();
+    if (id) loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  const canMarkPickedUp = itemStatus === "reserved" && !!item?.reserved_interest_id && !busyPickup;
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -195,12 +224,13 @@ export default function ManageItemPage() {
             <div style={{ marginTop: 10, opacity: 0.8 }}>{item.description || "—"}</div>
 
             <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <Pill label={`Status: ${item.status ?? "available"}`} />
-              <Pill label={`Posted: ${new Date(item.created_at).toLocaleString()}`} />
+              <Pill label={`Status: ${itemStatus}`} />
               <Pill label={`Requests: ${interests.length}`} />
+              <Pill label={`Posted: ${new Date(item.created_at).toLocaleString()}`} />
             </div>
 
-            {activeAccepted && (
+            {/* Accepted notice */}
+            {activeAccepted && itemStatus === "available" && (
               <div
                 style={{
                   marginTop: 14,
@@ -219,6 +249,48 @@ export default function ManageItemPage() {
                 </div>
               </div>
             )}
+
+            {/* Reserved notice + Step 11 button */}
+            {itemStatus === "reserved" && (
+              <div
+                style={{
+                  marginTop: 14,
+                  border: "1px solid #14532d",
+                  borderRadius: 12,
+                  padding: 12,
+                  background: "#052e16",
+                }}
+              >
+                <div style={{ fontWeight: 900 }}>Reserved ✅</div>
+                <div style={{ opacity: 0.9, marginTop: 6 }}>
+                  The selected person confirmed. After pickup, mark it as picked up.
+                </div>
+
+                <button
+                  onClick={markPickedUp}
+                  disabled={!canMarkPickedUp}
+                  style={{
+                    marginTop: 12,
+                    border: "1px solid #16a34a",
+                    background: canMarkPickedUp ? "#16a34a" : "transparent",
+                    color: "white",
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    cursor: canMarkPickedUp ? "pointer" : "not-allowed",
+                    fontWeight: 900,
+                    opacity: canMarkPickedUp ? 1 : 0.5,
+                  }}
+                >
+                  {busyPickup ? "Marking..." : "Mark picked up"}
+                </button>
+              </div>
+            )}
+
+            {itemStatus === "claimed" && (
+              <div style={{ marginTop: 14, opacity: 0.85 }}>
+                ✅ This item is claimed.
+              </div>
+            )}
           </div>
 
           {/* Requests list */}
@@ -234,18 +306,17 @@ export default function ManageItemPage() {
               <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
                 {interests.map((r) => {
                   const prof = profilesById[r.user_id];
-                  const display =
-                    prof?.full_name ||
-                    prof?.email ||
-                    `${r.user_id.slice(0, 8)}…`;
-
-                  const canAccept =
-                    r.status === "pending" &&
-                    (item.status ?? "available") === "available" &&
-                    !activeAccepted &&
-                    !busy;
+                  const display = prof?.full_name || `${r.user_id.slice(0, 8)}…`;
 
                   const timeLeft = r.status === "accepted" ? formatTimeLeft(r.accepted_expires_at) : null;
+
+                  const alreadyLocked = itemStatus !== "available" || !!activeReserved || !!activeAccepted;
+                  const canAccept =
+                    r.status === "pending" &&
+                    itemStatus === "available" &&
+                    !activeAccepted &&
+                    !activeReserved &&
+                    busyAcceptId === null;
 
                   return (
                     <div
@@ -259,7 +330,7 @@ export default function ManageItemPage() {
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                         <div style={{ fontWeight: 900 }}>{display}</div>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                           <Pill label={`Status: ${r.status}`} />
                           {r.status === "accepted" && <Pill label={`Expires: ${timeLeft ?? "—"}`} />}
                           {r.earliest_pickup && <Pill label={`Pickup: ${r.earliest_pickup}`} />}
@@ -276,7 +347,7 @@ export default function ManageItemPage() {
                       <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
                         <button
                           onClick={() => acceptInterest(r.id)}
-                          disabled={!canAccept}
+                          disabled={!canAccept || busyAcceptId !== null}
                           style={{
                             ...outlineBtn,
                             opacity: canAccept ? 1 : 0.5,
@@ -287,14 +358,14 @@ export default function ManageItemPage() {
                           title={
                             canAccept
                               ? "Select this person"
-                              : activeAccepted
-                              ? "Someone is already selected"
+                              : alreadyLocked
+                              ? "Item already reserved/claimed or someone selected"
                               : r.status !== "pending"
                               ? "Not pending"
                               : "Unavailable"
                           }
                         >
-                          {busy && canAccept ? "Selecting..." : "Accept"}
+                          {busyAcceptId === r.id ? "Selecting..." : "Accept"}
                         </button>
 
                         <div style={{ opacity: 0.6, fontSize: 12, alignSelf: "center" }}>
