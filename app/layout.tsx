@@ -18,13 +18,42 @@ export const metadata: Metadata = {
   description: "Campus exchange platform",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-        {/* nav is ~56 + padding, so give content room */}
-        <main style={{ paddingBottom: 90 }}>{children}</main>
-        <BottomNav />
+      <body
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        style={{
+          margin: 0,
+          background: "black",
+          color: "white",
+        }}
+      >
+        {/* FULL APP WRAPPER — this is the real fix */}
+        <div
+          style={{
+            minHeight: "100vh",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          {/* Page content fills screen */}
+          <main
+            style={{
+              flex: 1,
+              paddingBottom: 120, // room for BottomNav
+            }}
+          >
+            {children}
+          </main>
+
+          {/* Fixed bottom navigation */}
+          <BottomNav />
+        </div>
       </body>
     </html>
   );
