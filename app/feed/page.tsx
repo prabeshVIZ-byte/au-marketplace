@@ -48,6 +48,96 @@ function isAvailableNow(row: FeedRow) {
   return t > Date.now();
 }
 
+function ChipRow({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: { label: string; value: string }[];
+}) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 8 }}>{label}</div>
+      <div
+        style={{
+          display: "flex",
+          gap: 10,
+          overflowX: "auto",
+          paddingBottom: 6,
+          WebkitOverflowScrolling: "touch",
+        }}
+      >
+        {options.map((opt) => {
+          const active = value === opt.value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => onChange(opt.value)}
+              style={{
+                flex: "0 0 auto",
+                borderRadius: 999,
+                border: active ? "1px solid rgba(52,211,153,0.45)" : "1px solid rgba(148,163,184,0.22)",
+                background: active ? "rgba(16,185,129,0.14)" : "rgba(255,255,255,0.04)",
+                color: active ? "rgba(209,250,229,0.95)" : "rgba(255,255,255,0.82)",
+                padding: "10px 14px",
+                cursor: "pointer",
+                fontWeight: 900,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function statusBadge(status: string | null) {
+  const st = (status ?? "available").toLowerCase();
+  const base = {
+    padding: "6px 10px",
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: 900,
+    border: "1px solid rgba(148,163,184,0.25)",
+    background: "rgba(0,0,0,0.35)",
+    color: "rgba(255,255,255,0.82)",
+  } as const;
+
+  if (st === "reserved") {
+    return {
+      ...base,
+      border: "1px solid rgba(96,165,250,0.35)",
+      background: "rgba(59,130,246,0.16)",
+      color: "rgba(191,219,254,0.95)",
+    };
+  }
+  if (st === "available") {
+    return {
+      ...base,
+      border: "1px solid rgba(52,211,153,0.35)",
+      background: "rgba(16,185,129,0.14)",
+      color: "rgba(209,250,229,0.95)",
+    };
+  }
+  if (st === "expired") {
+    return {
+      ...base,
+      border: "1px solid rgba(248,113,113,0.35)",
+      background: "rgba(239,68,68,0.12)",
+      color: "rgba(254,202,202,0.95)",
+    };
+  }
+  return base;
+}
+
 export default function FeedPage() {
   const router = useRouter();
 
@@ -58,6 +148,7 @@ export default function FeedPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
+  // "Interested" map stays the same in DB, but UI will say "Requested"
   const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
 
@@ -65,8 +156,7 @@ export default function FeedPage() {
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState<string>("");
 
-  // sidebar
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // filters (horizontal chips)
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
   const [availabilityFilter, setAvailabilityFilter] = useState<"all" | "available" | "expiring_3d">("all");
@@ -128,7 +218,8 @@ export default function FeedPage() {
     setLoading(false);
   }
 
-  async function toggleInterest(itemId: string) {
+  // same DB logic, new UI label "Request item"
+  async function toggleRequest(itemId: string) {
     if (!isLoggedIn || !userId) {
       router.push("/me");
       return;
@@ -144,7 +235,9 @@ export default function FeedPage() {
       if (error) return alert(error.message);
 
       setMyInterested((p) => ({ ...p, [itemId]: false }));
-      setItems((prev) => prev.map((x) => (x.id === itemId ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) } : x)));
+      setItems((prev) =>
+        prev.map((x) => (x.id === itemId ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) } : x))
+      );
       return;
     }
 
@@ -183,7 +276,6 @@ export default function FeedPage() {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
         setOpenImg(null);
-        setSidebarOpen(false);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -204,17 +296,14 @@ export default function FeedPage() {
     const threeDays = 3 * 24 * 60 * 60 * 1000;
 
     return items.filter((x) => {
-      // category
       if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
 
-      // role
       if (roleFilter !== "all") {
         const r = (x.owner_role ?? null) as OwnerRole;
         if (!r) return false;
         if (r !== roleFilter) return false;
       }
 
-      // availability
       if (availabilityFilter === "available") {
         if (!isAvailableNow(x)) return false;
       }
@@ -233,30 +322,21 @@ export default function FeedPage() {
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
       {/* top row */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <button
-            type="button"
-            onClick={() => setSidebarOpen(true)}
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: 12,
-              border: "1px solid #334155",
-              background: "transparent",
-              color: "white",
-              cursor: "pointer",
-              fontWeight: 900,
-            }}
-            aria-label="Open filters"
-            title="Filters"
-          >
-            ☰
-          </button>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <h1 style={{ fontSize: 34, fontWeight: 900, margin: 0, letterSpacing: -0.2 }}>AU Zero Marketplace</h1>
+          <p style={{ marginTop: 10, opacity: 0.78, maxWidth: 760 }}>
+            Browse publicly. Login with <b>@ashland.edu</b> to list or request items.
+          </p>
 
-          <div>
-            <h1 style={{ fontSize: 32, fontWeight: 800, margin: 0 }}>AU Zero Marketplace</h1>
-            <p style={{ marginTop: 8, opacity: 0.8 }}>Browse publicly. Login with @ashland.edu to post or express interest.</p>
+          <div style={{ marginTop: 10, opacity: 0.78 }}>
+            {isLoggedIn ? (
+              <span>
+                Logged in as <b>{userEmail}</b>
+              </span>
+            ) : (
+              <span>Not logged in — browse only.</span>
+            )}
           </div>
         </div>
 
@@ -265,197 +345,104 @@ export default function FeedPage() {
           style={{
             background: "transparent",
             padding: "10px 14px",
-            borderRadius: 10,
-            border: "1px solid #334155",
+            borderRadius: 12,
+            border: "1px solid rgba(148,163,184,0.25)",
             color: "white",
             cursor: "pointer",
-            fontWeight: 800,
+            fontWeight: 900,
             whiteSpace: "nowrap",
+            height: 44,
           }}
         >
           {isLoggedIn ? "My listings" : "Request Access"}
         </button>
       </div>
 
-      <div style={{ marginTop: 10, opacity: 0.8 }}>
-        {isLoggedIn ? (
-          <span>
-            Logged in as <b>{userEmail}</b>
-          </span>
-        ) : (
-          <span>Not logged in — browse only.</span>
-        )}
-      </div>
-
       {err && <p style={{ color: "#f87171", marginTop: 12 }}>{err}</p>}
       {loading && <p style={{ marginTop: 12, opacity: 0.8 }}>Loading…</p>}
 
-      {/* sidebar drawer */}
-      {sidebarOpen && (
-        <div
-          onClick={() => setSidebarOpen(false)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.55)",
-            zIndex: 9998,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
+      {/* filter bar like "store" UI */}
+      <div
+        style={{
+          marginTop: 18,
+          borderRadius: 18,
+          border: "1px solid rgba(148,163,184,0.15)",
+          background: "rgba(255,255,255,0.04)",
+          padding: 14,
+        }}
+      >
+        <ChipRow
+          label="Category"
+          value={categoryFilter}
+          onChange={setCategoryFilter}
+          options={categories.map((c) => ({
+            value: c,
+            label: c === "all" ? "All" : c[0].toUpperCase() + c.slice(1),
+          }))}
+        />
+
+        <ChipRow
+          label="Lister type"
+          value={roleFilter}
+          onChange={(v) => setRoleFilter(v as any)}
+          options={[
+            { value: "all", label: "All" },
+            { value: "student", label: "Student" },
+            { value: "faculty", label: "Faculty" },
+          ]}
+        />
+
+        <ChipRow
+          label="Availability"
+          value={availabilityFilter}
+          onChange={(v) => setAvailabilityFilter(v as any)}
+          options={[
+            { value: "all", label: "All" },
+            { value: "available", label: "Available now" },
+            { value: "expiring_3d", label: "Expiring ≤ 3 days" },
+          ]}
+        />
+
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            onClick={() => {
+              setCategoryFilter("all");
+              setRoleFilter("all");
+              setAvailabilityFilter("all");
+            }}
             style={{
-              position: "absolute",
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: 320,
-              background: "#0b1730",
-              borderRight: "1px solid #0f223f",
-              padding: 16,
-              overflowY: "auto",
+              borderRadius: 12,
+              border: "1px solid rgba(148,163,184,0.25)",
+              background: "transparent",
+              color: "white",
+              padding: "10px 12px",
+              cursor: "pointer",
+              fontWeight: 900,
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-              <div style={{ fontSize: 18, fontWeight: 900 }}>Filters</div>
-              <button
-                type="button"
-                onClick={() => setSidebarOpen(false)}
-                style={{
-                  background: "transparent",
-                  border: "1px solid #334155",
-                  color: "white",
-                  padding: "6px 10px",
-                  borderRadius: 10,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div style={{ marginTop: 14, border: "1px solid #0f223f", borderRadius: 14, padding: 12, background: "#020617" }}>
-              <div style={{ fontWeight: 900, marginBottom: 8 }}>Category</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {categories.map((c) => {
-                  const active = categoryFilter === c;
-                  return (
-                    <button
-                      key={c}
-                      type="button"
-                      onClick={() => setCategoryFilter(c)}
-                      style={{
-                        borderRadius: 999,
-                        border: "1px solid #334155",
-                        padding: "8px 10px",
-                        background: active ? "#052e16" : "transparent",
-                        color: "white",
-                        cursor: "pointer",
-                        fontWeight: 800,
-                        opacity: active ? 1 : 0.9,
-                      }}
-                    >
-                      {c === "all" ? "All" : c}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div style={{ marginTop: 12, border: "1px solid #0f223f", borderRadius: 14, padding: 12, background: "#020617" }}>
-              <div style={{ fontWeight: 900, marginBottom: 8 }}>Lister type</div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {(["all", "student", "faculty"] as const).map((v) => {
-                  const active = roleFilter === v;
-                  return (
-                    <button
-                      key={v}
-                      type="button"
-                      onClick={() => setRoleFilter(v)}
-                      style={{
-                        borderRadius: 999,
-                        border: "1px solid #334155",
-                        padding: "8px 10px",
-                        background: active ? "#052e16" : "transparent",
-                        color: "white",
-                        cursor: "pointer",
-                        fontWeight: 800,
-                      }}
-                    >
-                      {v === "all" ? "All" : v[0].toUpperCase() + v.slice(1)}
-                    </button>
-                  );
-                })}
-              </div>
-              <div style={{ marginTop: 8, opacity: 0.7, fontSize: 12 }}>
-                If this stays empty, your view isn’t returning <code>owner_role</code>.
-              </div>
-            </div>
-
-            <div style={{ marginTop: 12, border: "1px solid #0f223f", borderRadius: 14, padding: 12, background: "#020617" }}>
-              <div style={{ fontWeight: 900, marginBottom: 8 }}>Availability</div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {(
-                  [
-                    ["all", "All"],
-                    ["available", "Available now"],
-                    ["expiring_3d", "Expiring ≤ 3 days"],
-                  ] as const
-                ).map(([v, label]) => {
-                  const active = availabilityFilter === v;
-                  return (
-                    <button
-                      key={v}
-                      type="button"
-                      onClick={() => setAvailabilityFilter(v)}
-                      style={{
-                        borderRadius: 999,
-                        border: "1px solid #334155",
-                        padding: "8px 10px",
-                        background: active ? "#052e16" : "transparent",
-                        color: "white",
-                        cursor: "pointer",
-                        fontWeight: 800,
-                      }}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                setCategoryFilter("all");
-                setRoleFilter("all");
-                setAvailabilityFilter("all");
-              }}
-              style={{
-                marginTop: 14,
-                width: "100%",
-                borderRadius: 12,
-                border: "1px solid #334155",
-                background: "transparent",
-                color: "white",
-                padding: "10px 12px",
-                cursor: "pointer",
-                fontWeight: 900,
-              }}
-            >
-              Reset filters
-            </button>
-          </div>
+            Reset filters
+          </button>
         </div>
-      )}
-
-      <h2 style={{ marginTop: 26 }}>Public Feed</h2>
-      <div style={{ marginTop: 8, opacity: 0.8 }}>
-        Showing <b>{filteredItems.length}</b> of <b>{items.length}</b>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16, marginTop: 12 }}>
+      <div style={{ marginTop: 16, display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 900, opacity: 0.92 }}>Public Feed</h2>
+        <div style={{ opacity: 0.75 }}>
+          Showing <b>{filteredItems.length}</b> of <b>{items.length}</b>
+        </div>
+      </div>
+
+      {/* store-like cards */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(270px, 1fr))",
+          gap: 18,
+          marginTop: 14,
+          paddingBottom: 90,
+        }}
+      >
         {filteredItems.map((item) => {
           const mine = myInterested[item.id] === true;
           const expiryText = formatExpiry(item.expires_at);
@@ -464,118 +451,131 @@ export default function FeedPage() {
             <div
               key={item.id}
               style={{
-                background: "#0b1730",
-                padding: 16,
-                borderRadius: 14,
-                border: "1px solid #0f223f",
+                background: "rgba(255,255,255,0.04)",
+                borderRadius: 18,
+                border: "1px solid rgba(148,163,184,0.15)",
+                overflow: "hidden",
+                boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
               }}
             >
-              {/* photo */}
-              {item.photo_url ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setOpenImg(item.photo_url!);
-                    setOpenTitle(item.title);
-                  }}
-                  style={{ padding: 0, border: "none", background: "transparent", cursor: "pointer", width: "100%", marginBottom: 12 }}
-                  aria-label="Open photo"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={item.photo_url}
-                    alt={item.title}
-                    loading="lazy"
-                    style={{ width: "100%", height: 160, objectFit: "cover", borderRadius: 12, border: "1px solid #0f223f", display: "block" }}
-                  />
-                </button>
-              ) : (
+              {/* image */}
+              <div style={{ position: "relative", height: 220, background: "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))" }}>
+                {item.photo_url ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenImg(item.photo_url!);
+                      setOpenTitle(item.title);
+                    }}
+                    style={{ padding: 0, border: "none", background: "transparent", cursor: "pointer", width: "100%", height: "100%" }}
+                    aria-label="Open photo"
+                    title="Open photo"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={item.photo_url}
+                      alt={item.title}
+                      loading="lazy"
+                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                    />
+                  </button>
+                ) : (
+                  <div
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "rgba(255,255,255,0.45)",
+                      borderTop: "1px solid rgba(148,163,184,0.08)",
+                      borderBottom: "1px solid rgba(148,163,184,0.08)",
+                    }}
+                  >
+                    No photo
+                  </div>
+                )}
+
+                {/* badge */}
+                <div style={{ position: "absolute", top: 12, left: 12 }}>
+                  <span style={statusBadge(item.status)}>{(item.status ?? "available").toLowerCase()}</span>
+                </div>
+              </div>
+
+              {/* body */}
+              <div style={{ padding: 14 }}>
+                <div style={{ fontSize: 12, opacity: 0.72 }}>
+                  {item.category ? `Category: ${item.category}` : "Category: —"}
+                  {item.owner_role ? ` • Lister: ${item.owner_role}` : ""}
+                </div>
+
+                <div style={{ marginTop: 8, fontSize: 20, fontWeight: 950, letterSpacing: -0.2 }}>{item.title}</div>
+
+                <div style={{ marginTop: 8, opacity: 0.7, fontSize: 13 }}>
+                  {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}` : "Contributor will de-list themselves"}{" "}
+                  <span style={{ opacity: 0.75 }}>({expiryText})</span>
+                </div>
+
                 <div
                   style={{
-                    width: "100%",
-                    height: 160,
-                    borderRadius: 12,
-                    border: "1px dashed #334155",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    color: "#94a3b8",
-                    marginBottom: 12,
+                    marginTop: 10,
+                    opacity: 0.75,
+                    fontSize: 14,
+                    display: "-webkit-box",
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: "vertical",
+                    overflow: "hidden",
+                    minHeight: 40,
                   }}
                 >
-                  No photo
+                  {item.description || "—"}
                 </div>
-              )}
 
-              <div style={{ fontSize: 18, fontWeight: 900 }}>{item.title}</div>
+                <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13 }}>{item.interest_count || 0} requests</div>
 
-              {item.category && (
-                <div style={{ opacity: 0.85, marginTop: 6 }}>
-                  Category: <span style={{ fontWeight: 800 }}>{item.category}</span>
+                {/* actions */}
+                <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  <button
+                    onClick={() => router.push(`/item/${item.id}`)}
+                    style={{
+                      width: "100%",
+                      border: "1px solid rgba(148,163,184,0.25)",
+                      background: "rgba(255,255,255,0.03)",
+                      color: "rgba(255,255,255,0.85)",
+                      padding: "10px 12px",
+                      borderRadius: 14,
+                      cursor: "pointer",
+                      fontWeight: 900,
+                    }}
+                  >
+                    View item
+                  </button>
+
+                  <button
+                    onClick={() => toggleRequest(item.id)}
+                    disabled={savingId === item.id}
+                    style={{
+                      width: "100%",
+                      border: "1px solid rgba(52,211,153,0.25)",
+                      background: isLoggedIn ? (mine ? "rgba(16,185,129,0.16)" : "rgba(16,185,129,0.24)") : "rgba(255,255,255,0.03)",
+                      color: "rgba(255,255,255,0.9)",
+                      padding: "10px 12px",
+                      borderRadius: 14,
+                      cursor: savingId === item.id ? "not-allowed" : "pointer",
+                      fontWeight: 950,
+                      opacity: savingId === item.id ? 0.7 : 1,
+                    }}
+                  >
+                    {savingId === item.id
+                      ? "Saving…"
+                      : isLoggedIn
+                      ? mine
+                        ? "Requested"
+                        : "Request item"
+                      : "Request item (login required)"}
+                  </button>
                 </div>
-              )}
-
-              {!!item.owner_role && (
-                <div style={{ opacity: 0.85, marginTop: 6 }}>
-                  Lister: <span style={{ fontWeight: 800 }}>{item.owner_role}</span>
-                </div>
-              )}
-
-              <div style={{ opacity: 0.75, marginTop: 6 }}>
-                {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}` : "Contributor will de-list themselves"}{" "}
-                <span style={{ opacity: 0.75 }}>({expiryText})</span>
               </div>
-
-              <div
-                style={{
-                  opacity: 0.75,
-                  marginTop: 8,
-                  display: "-webkit-box",
-                  WebkitLineClamp: 2,
-                  WebkitBoxOrient: "vertical",
-                  overflow: "hidden",
-                }}
-              >
-                {item.description || "—"}
-              </div>
-
-              <div style={{ opacity: 0.75, marginTop: 10 }}>{item.interest_count || 0} interested</div>
-
-              <button
-                onClick={() => router.push(`/item/${item.id}`)}
-                style={{
-                  marginTop: 12,
-                  width: "100%",
-                  border: "1px solid #334155",
-                  background: "transparent",
-                  color: "white",
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  cursor: "pointer",
-                  fontWeight: 800,
-                }}
-              >
-                View item
-              </button>
-
-              <button
-                onClick={() => toggleInterest(item.id)}
-                disabled={savingId === item.id}
-                style={{
-                  marginTop: 10,
-                  width: "100%",
-                  border: "1px solid #334155",
-                  background: isLoggedIn ? (mine ? "#1f2937" : "#052e16") : "transparent",
-                  color: "white",
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  cursor: savingId === item.id ? "not-allowed" : "pointer",
-                  fontWeight: 900,
-                  opacity: savingId === item.id ? 0.7 : 1,
-                }}
-              >
-                {savingId === item.id ? "Saving…" : isLoggedIn ? (mine ? "Uninterested" : "Interested") : "Interested (login required)"}
-              </button>
             </div>
           );
         })}
@@ -601,18 +601,34 @@ export default function FeedPage() {
             style={{
               width: "min(1000px, 95vw)",
               maxHeight: "90vh",
-              background: "#0b1730",
-              border: "1px solid #0f223f",
-              borderRadius: 14,
+              background: "rgba(255,255,255,0.04)",
+              border: "1px solid rgba(148,163,184,0.18)",
+              borderRadius: 16,
               overflow: "hidden",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid #0f223f" }}>
-              <div style={{ fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{openTitle || "Photo"}</div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "10px 12px",
+                borderBottom: "1px solid rgba(148,163,184,0.15)",
+              }}
+            >
+              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{openTitle || "Photo"}</div>
               <button
                 type="button"
                 onClick={() => setOpenImg(null)}
-                style={{ background: "transparent", color: "white", border: "1px solid #334155", padding: "6px 10px", borderRadius: 10, cursor: "pointer", fontWeight: 900 }}
+                style={{
+                  background: "transparent",
+                  color: "white",
+                  border: "1px solid rgba(148,163,184,0.25)",
+                  padding: "6px 10px",
+                  borderRadius: 12,
+                  cursor: "pointer",
+                  fontWeight: 950,
+                }}
               >
                 ✕
               </button>
