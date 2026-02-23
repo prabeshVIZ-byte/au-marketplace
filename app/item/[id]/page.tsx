@@ -2,7 +2,7 @@
 export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter, useParams } from "next/navigation";
+import { useRouter, useParams, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 type ItemRow = {
@@ -48,6 +48,8 @@ function formatExpiry(expiresAt: string | null) {
 export default function ItemDetailPage() {
   const router = useRouter();
   const params = useParams();
+  const searchParams = useSearchParams();
+
   const itemId = (params?.id as string) || "";
 
   const [loading, setLoading] = useState(true);
@@ -63,7 +65,7 @@ export default function ItemDetailPage() {
   const [mineInterested, setMineInterested] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Step 8: interest modal state
+  // interest modal state
   const [showInterest, setShowInterest] = useState(false);
   const [earliestPickup, setEarliestPickup] = useState<"today" | "tomorrow" | "weekend">("today");
   const [timeWindow, setTimeWindow] = useState<"morning" | "afternoon" | "evening">("afternoon");
@@ -74,19 +76,26 @@ export default function ItemDetailPage() {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
 
+  const wantsInterest = searchParams?.get("interest") === "1";
+
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
     const session = data.session;
     setUserId(session?.user?.id ?? null);
     setUserEmail(session?.user?.email ?? null);
+    return session?.user?.id ?? null;
   }
 
-  async function loadItem() {
+  async function loadItemAndState() {
     if (!itemId) return;
+
     setLoading(true);
     setErr(null);
 
     try {
+      // 0) auth (so we can check "mine interest")
+      const uid = await syncAuth();
+
       // 1) fetch item
       const { data: it, error: itErr } = await supabase
         .from("items")
@@ -95,9 +104,11 @@ export default function ItemDetailPage() {
         .single();
 
       if (itErr) throw new Error(itErr.message);
-      setItem(it as ItemRow);
 
-      // 2) fetch interest count
+      const itRow = it as ItemRow;
+      setItem(itRow);
+
+      // 2) interest count
       const { count, error: cntErr } = await supabase
         .from("interests")
         .select("*", { count: "exact", head: true })
@@ -105,10 +116,7 @@ export default function ItemDetailPage() {
 
       if (!cntErr) setInterestCount(count ?? 0);
 
-      // 3) if logged in, check if I already expressed interest
-      const { data: s } = await supabase.auth.getSession();
-      const uid = s.session?.user?.id ?? null;
-
+      // 3) check if I already expressed interest
       if (uid) {
         const { data: mine, error: mineErr } = await supabase
           .from("interests")
@@ -118,13 +126,14 @@ export default function ItemDetailPage() {
           .maybeSingle();
 
         if (!mineErr) setMineInterested(!!mine);
+        else setMineInterested(false);
       } else {
         setMineInterested(false);
       }
 
       // 4) fetch seller profile (only if NOT anonymous and owner_id exists)
-      const ownerId = (it as any)?.owner_id ?? null;
-      const anon = !!(it as any)?.is_anonymous;
+      const ownerId = itRow.owner_id ?? null;
+      const anon = !!itRow.is_anonymous;
 
       if (!anon && ownerId) {
         const { data: prof, error: pErr } = await supabase
@@ -142,12 +151,22 @@ export default function ItemDetailPage() {
       setErr(e?.message || "Failed to load item.");
       setItem(null);
       setSeller(null);
+      setMineInterested(false);
+      setInterestCount(0);
     } finally {
       setLoading(false);
     }
   }
 
-  // Step 8: submit interest with pickup readiness fields
+  function openInterestModalOrRedirect() {
+    if (!isLoggedIn) {
+      router.push("/me");
+      return;
+    }
+    setInterestMsg(null);
+    setShowInterest(true);
+  }
+
   async function submitInterest() {
     if (!item) return;
 
@@ -185,7 +204,7 @@ export default function ItemDetailPage() {
       setInterestCount((c) => c + 1);
       setInterestMsg("✅ Interest sent! If you’re selected, you’ll get a confirm button in your Account page.");
       setNote("");
-      // keep modal open so they see success message; they can close
+      // keep modal open so they see success message
     } catch (e: any) {
       setInterestMsg(e?.message || "Could not send interest.");
     } finally {
@@ -193,18 +212,39 @@ export default function ItemDetailPage() {
     }
   }
 
+  // initial load + reload on auth changes
   useEffect(() => {
-    syncAuth();
-    loadItem();
+    loadItemAndState();
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      syncAuth();
-      loadItem();
+      loadItemAndState();
     });
 
     return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId]);
+
+  // AUTO-OPEN interest modal when coming from feed: /item/[id]?interest=1
+  useEffect(() => {
+    if (!wantsInterest) return;
+    if (loading) return;
+    if (!item) return;
+
+    // if not logged in, push to /me (as requested)
+    if (!isLoggedIn) {
+      router.push("/me");
+      return;
+    }
+
+    // if already interested, don't re-open modal
+    if (mineInterested) return;
+
+    // if not available, don't open
+    if ((item.status ?? "available") !== "available") return;
+
+    setInterestMsg(null);
+    setShowInterest(true);
+  }, [wantsInterest, loading, item, isLoggedIn, mineInterested, router]);
 
   const expiryText = formatExpiry(item?.expires_at ?? null);
   const showSellerName = item && !item.is_anonymous && seller?.full_name;
@@ -248,7 +288,9 @@ export default function ItemDetailPage() {
             )}
 
             <div style={{ opacity: 0.85, marginTop: 10 }}>
-              {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleString()}` : "Contributor will de-list themselves"}
+              {item.expires_at
+                ? `Available until: ${new Date(item.expires_at).toLocaleString()}`
+                : "Contributor will de-list themselves"}
               {"  "}
               <span style={{ opacity: 0.75 }}>({expiryText})</span>
             </div>
@@ -256,7 +298,9 @@ export default function ItemDetailPage() {
             <div style={{ marginTop: 6 }}>
               Seller:{" "}
               <b>{item.is_anonymous ? "Anonymous" : showSellerName ? seller!.full_name : "Ashland user"}</b>
-              {!item.is_anonymous && seller?.user_role ? <span style={{ opacity: 0.8 }}> ({seller.user_role})</span> : null}
+              {!item.is_anonymous && seller?.user_role ? (
+                <span style={{ opacity: 0.8 }}> ({seller.user_role})</span>
+              ) : null}
             </div>
 
             <div style={{ marginTop: 6 }}>
@@ -300,34 +344,36 @@ export default function ItemDetailPage() {
           )}
 
           {/* Description */}
-          <div style={{ marginTop: 14, background: "#0b1730", border: "1px solid #0f223f", borderRadius: 14, padding: 14 }}>
+          <div
+            style={{
+              marginTop: 14,
+              background: "#0b1730",
+              border: "1px solid #0f223f",
+              borderRadius: 14,
+              padding: 14,
+            }}
+          >
             <div style={{ fontWeight: 900, marginBottom: 8 }}>Description</div>
             <div style={{ opacity: 0.9, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-              {item.description && item.description.trim().toLowerCase() !== "until i cancel" ? item.description : "—"}
+              {item.description && item.description.trim().toLowerCase() !== "until i cancel"
+                ? item.description
+                : "—"}
             </div>
           </div>
 
           {/* Actions */}
           <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button
-              onClick={() => {
-                if (!isLoggedIn) {
-                  router.push("/me");
-                  return;
-                }
-                setInterestMsg(null);
-                setShowInterest(true);
-              }}
+              onClick={openInterestModalOrRedirect}
               disabled={saving || mineInterested || (item.status ?? "available") !== "available"}
               style={{
-                background:
-                  !isLoggedIn
-                    ? "transparent"
-                    : mineInterested
-                    ? "#1f2937"
-                    : (item.status ?? "available") === "available"
-                    ? "#052e16"
-                    : "#111827",
+                background: !isLoggedIn
+                  ? "transparent"
+                  : mineInterested
+                  ? "#1f2937"
+                  : (item.status ?? "available") === "available"
+                  ? "#052e16"
+                  : "#111827",
                 border: "1px solid #334155",
                 color: "white",
                 padding: "10px 14px",
@@ -365,7 +411,7 @@ export default function ItemDetailPage() {
             </button>
           </div>
 
-          {/* Step 8: Interest Modal */}
+          {/* Interest Modal */}
           {showInterest && (
             <div
               onClick={() => setShowInterest(false)}
@@ -474,16 +520,16 @@ export default function ItemDetailPage() {
 
                 {interestMsg && (
                   <div
-                    style={{
-                      marginTop: 12,
-                      border: "1px solid #334155",
-                      borderRadius: 12,
-                      padding: 10,
-                      opacity: 0.9,
-                    }}
-                  >
-                    {interestMsg}
-                  </div>
+                      style={{
+                        marginTop: 12,
+                        border: "1px solid #334155",
+                        borderRadius: 12,
+                        padding: 10,
+                        opacity: 0.9,
+                      }}
+                    >
+                      {interestMsg}
+                    </div>
                 )}
 
                 <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end" }}>

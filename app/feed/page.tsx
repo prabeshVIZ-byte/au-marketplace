@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -24,13 +24,9 @@ function formatExpiry(expiresAt: string | null) {
 
   const now = new Date();
   const ms = end.getTime() - now.getTime();
-
-  // Already expired
   if (ms <= 0) return "Expired";
 
   const oneDay = 24 * 60 * 60 * 1000;
-
-  // Compare by calendar day (not exact hours)
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const startOfEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
   const dayDiff = Math.round((startOfEnd - startOfToday) / oneDay);
@@ -39,7 +35,6 @@ function formatExpiry(expiresAt: string | null) {
   if (dayDiff === 1) return "Tomorrow";
   if (dayDiff < 7) return `in ${dayDiff} days`;
 
-  // For longer, show a normal date
   return end.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
@@ -54,116 +49,108 @@ export default function FeedPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // whether current user is interested in each item
+  // whether current user already expressed interest in each item
+  // key: itemId -> true/false
   const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
-  const [savingId, setSavingId] = useState<string | null>(null);
 
   // photo modal
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState<string>("");
+
+  const isLoggedIn = useMemo(() => {
+    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  }, [userId, userEmail]);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
     const session = data.session;
     setUserId(session?.user?.id ?? null);
     setUserEmail(session?.user?.email ?? null);
+    return session?.user?.id ?? null;
   }
 
-  const isLoggedIn =
-    !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-
   async function loadFeed() {
+    const { data, error } = await supabase
+      .from("v_feed_items")
+      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count")
+      .order("created_at", { ascending: false });
+
+    if (error) throw new Error(error.message || "Error loading feed.");
+    return ((data as FeedRow[]) || []) as FeedRow[];
+  }
+
+  async function loadMyInterests(uid: string, feedIds: string[]) {
+    if (!feedIds.length) {
+      setMyInterested({});
+      return;
+    }
+
+    // Fetch ONLY interests for items currently in the feed (efficient + correct)
+    const { data, error } = await supabase
+      .from("interests")
+      .select("item_id")
+      .eq("user_id", uid)
+      .in("item_id", feedIds);
+
+    if (error) {
+      console.log("loadMyInterests error:", error.message);
+      setMyInterested({});
+      return;
+    }
+
+    const map: Record<string, boolean> = {};
+    for (const row of data ?? []) {
+      // row is { item_id: string }
+      map[(row as any).item_id] = true;
+    }
+    setMyInterested(map);
+  }
+
+  async function refreshAll() {
     setLoading(true);
     setErr(null);
 
     try {
-      const { data, error } = await supabase
-        .from("v_feed_items")
-        .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count")
-        .order("created_at", { ascending: false });
+      const uid = await syncAuth();
+      const feed = await loadFeed();
+      setItems(feed);
 
-      if (error) {
-        setItems([]);
+      if (uid) {
+        await loadMyInterests(uid, feed.map((x) => x.id));
+      } else {
         setMyInterested({});
-        setErr(error.message || "Error loading feed.");
-        return;
       }
-
-      const rows = (data as FeedRow[]) || [];
-      setItems(rows);
-      setMyInterested({});
     } catch (e: any) {
-      console.error("feed exception:", e);
+      console.error("refreshAll exception:", e);
+      setItems([]);
+      setMyInterested({});
       setErr(e?.message || "Unexpected error.");
     } finally {
       setLoading(false);
     }
   }
 
-  async function toggleInterest(itemId: string) {
+  function handleInterestedClick(itemId: string) {
+    // NO QUICK ACTION HERE.
+    // If not logged in -> send to /me
+    // If logged in -> go to item page (interest form lives there)
     if (!isLoggedIn || !userId) {
       router.push("/me");
       return;
     }
 
     const already = myInterested[itemId] === true;
-    setSavingId(itemId);
 
-    if (already) {
-      const { error } = await supabase
-        .from("interests")
-        .delete()
-        .eq("item_id", itemId)
-        .eq("user_id", userId);
-
-      setSavingId(null);
-
-      if (error) {
-        alert(error.message);
-        return;
-      }
-
-      setMyInterested((p) => ({ ...p, [itemId]: false }));
-      setItems((prev) =>
-        prev.map((x) =>
-          x.id === itemId
-            ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) }
-            : x
-        )
-      );
-      return;
-    }
-
-    const { error } = await supabase
-      .from("interests")
-      .insert([{ item_id: itemId, user_id: userId }]);
-
-    setSavingId(null);
-
-    if (error) {
-      if (error.message.toLowerCase().includes("duplicate key")) {
-        setMyInterested((p) => ({ ...p, [itemId]: true }));
-        return;
-      }
-      alert(error.message);
-      return;
-    }
-
-    setMyInterested((p) => ({ ...p, [itemId]: true }));
-    setItems((prev) =>
-      prev.map((x) =>
-        x.id === itemId ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x
-      )
-    );
+    // If already interested, still go to the item page
+    // If not, go with ?interest=1 to nudge the page to open/scroll to the form (optional)
+    router.push(already ? `/item/${itemId}` : `/item/${itemId}?interest=1`);
   }
 
   useEffect(() => {
-    syncAuth();
-    loadFeed();
+    refreshAll();
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      syncAuth();
-      loadFeed();
+      refreshAll();
     });
 
     return () => sub.subscription.unsubscribe();
@@ -227,7 +214,7 @@ export default function FeedPage() {
         }}
       >
         {items.map((item) => {
-          const mine = myInterested[item.id] === true;
+          const alreadyInterested = myInterested[item.id] === true;
           const expiryText = formatExpiry(item.expires_at);
 
           return (
@@ -300,10 +287,11 @@ export default function FeedPage() {
               )}
 
               <div style={{ opacity: 0.75, marginTop: 6 }}>
-  {item.expires_at
-    ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}`
-    : "Contributor will de-list themselves"}
-</div>
+                {item.expires_at
+                  ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}`
+                  : "Contributor will de-list themselves"}
+                {/* keeping your existing display, expiryText is computed if you want it later */}
+              </div>
 
               <div
                 style={{
@@ -339,29 +327,33 @@ export default function FeedPage() {
                 View item
               </button>
 
+              {/* Interested: NO quick insert/delete. Routes to item page form. */}
               <button
-                onClick={() => toggleInterest(item.id)}
-                disabled={savingId === item.id}
+                onClick={() => handleInterestedClick(item.id)}
                 style={{
                   marginTop: 10,
                   width: "100%",
                   border: "1px solid #334155",
-                  background: isLoggedIn ? (mine ? "#1f2937" : "#052e16") : "transparent",
+                  background: !isLoggedIn
+                    ? "transparent"
+                    : alreadyInterested
+                    ? "#1f2937"
+                    : "#052e16",
                   color: "white",
                   padding: "10px 12px",
                   borderRadius: 10,
-                  cursor: savingId === item.id ? "not-allowed" : "pointer",
+                  cursor: "pointer",
                   fontWeight: 900,
-                  opacity: savingId === item.id ? 0.7 : 1,
                 }}
+                title={
+                  !isLoggedIn
+                    ? "Login required"
+                    : alreadyInterested
+                    ? "You already submitted interest (view item)"
+                    : "Open the interest form"
+                }
               >
-                {savingId === item.id
-                  ? "Saving…"
-                  : isLoggedIn
-                  ? mine
-                    ? "Uninterested"
-                    : "Interested"
-                  : "Interested (login required)"}
+                {!isLoggedIn ? "Interested (login required)" : alreadyInterested ? "Interested ✓" : "Interested"}
               </button>
             </div>
           );
