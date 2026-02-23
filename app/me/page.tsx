@@ -1,6 +1,5 @@
+// /app/me/page.tsx
 "use client";
-
-export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -10,11 +9,13 @@ type Role = "student" | "faculty" | "";
 type StatusType = "error" | "success" | "info";
 type UiStatus = { text: string; type: StatusType } | null;
 
-type AcceptedInterest = {
+type MyRequest = {
   id: string;
   item_id: string;
-  status: string;
+  status: "pending" | "accepted" | "confirmed" | "rejected" | string;
+  accepted_at: string | null;
   accepted_expires_at: string | null;
+  created_at: string | null;
 };
 
 function formatTimeLeft(expiresAt: string | null) {
@@ -52,16 +53,13 @@ export default function MePage() {
   const [dbProfileComplete, setDbProfileComplete] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
 
-  // accepted interest + buyer notification
-  const [accepted, setAccepted] = useState<AcceptedInterest | null>(null);
-  const [confirming, setConfirming] = useState(false);
+  // ✅ buyer notifications / requests
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [requests, setRequests] = useState<MyRequest[]>([]);
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
   // status
   const [status, setStatus] = useState<UiStatus>(null);
-
-  const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-  }, [userId, userEmail]);
 
   const draftComplete = useMemo(() => {
     return fullName.trim().length > 0 && (role === "student" || role === "faculty");
@@ -69,11 +67,6 @@ export default function MePage() {
 
   const statusColor =
     status?.type === "error" ? "#f87171" : status?.type === "success" ? "#4ade80" : "#93c5fd";
-
-  const timeLeft = useMemo(
-    () => formatTimeLeft(accepted?.accepted_expires_at ?? null),
-    [accepted?.accepted_expires_at]
-  );
 
   async function loadProfile(uid: string) {
     setProfileLoading(true);
@@ -88,7 +81,6 @@ export default function MePage() {
     setProfileLoading(false);
 
     if (error) {
-      console.log("loadProfile:", error.message);
       setStatus({ text: `Profile load failed: ${error.message}`, type: "error" });
       return;
     }
@@ -103,51 +95,46 @@ export default function MePage() {
     setDbProfileComplete(complete);
   }
 
-  async function loadAcceptedInterest(uid: string) {
+  // ✅ load all my requests (so buyers see Accepted immediately)
+  async function loadMyRequests(uid: string) {
+    setRequestsLoading(true);
+
     const { data, error } = await supabase
       .from("interests")
-      .select("id,item_id,status,accepted_expires_at")
+      .select("id,item_id,status,accepted_at,accepted_expires_at,created_at")
       .eq("user_id", uid)
-      .eq("status", "accepted")
-      .order("accepted_at", { ascending: false })
-      .maybeSingle();
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    setRequestsLoading(false);
 
     if (error) {
-      console.log("loadAcceptedInterest:", error.message);
-      setAccepted(null);
+      console.log("loadMyRequests:", error.message);
+      setRequests([]);
       return;
     }
 
-    if (data) {
-      setAccepted({
-        id: (data as any).id,
-        item_id: (data as any).item_id,
-        status: (data as any).status,
-        accepted_expires_at: (data as any).accepted_expires_at,
-      });
-    } else {
-      setAccepted(null);
-    }
+    setRequests((data as any as MyRequest[]) || []);
   }
 
   async function refreshUser() {
-    const { data } = await supabase.auth.getSession();
-    const session = data.session;
+    const { data, error } = await supabase.auth.getUser();
+    if (error) console.log("getUser:", error.message);
 
-    const e = session?.user?.email ?? null;
-    const uid = session?.user?.id ?? null;
+    const e = data.user?.email ?? null;
+    const uid = data.user?.id ?? null;
 
     setUserEmail(e);
     setUserId(uid);
 
     if (uid) {
       await loadProfile(uid);
-      await loadAcceptedInterest(uid);
+      await loadMyRequests(uid);
     } else {
       setFullName("");
       setRole("");
       setDbProfileComplete(false);
-      setAccepted(null);
+      setRequests([]);
     }
   }
 
@@ -164,23 +151,29 @@ export default function MePage() {
       refreshUser();
     });
 
-    // live buyer notification (accepted/confirmed updates)
-    const ch = supabase
-      .channel("buyer-interest-status")
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "interests" }, (payload) => {
-        const uid = userId;
-        const row = payload.new as any;
-        if (!uid) return;
-        if (row?.user_id !== uid) return;
-        // refresh accepted card immediately
-        refreshUser();
-      })
+    // ✅ realtime: when seller accepts you, this updates instantly
+    const channel = supabase
+      .channel("buyer-interest-updates")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "interests" },
+        (payload) => {
+          const row: any = payload.new || payload.old;
+          if (!row) return;
+          if (row.user_id !== userId) return; // only my rows
+          if (userId) loadMyRequests(userId);
+        }
+      )
       .subscribe();
+
+    // keep countdown timers fresh
+    const t = setInterval(() => setRequests((p) => [...p]), 1000);
 
     return () => {
       alive = false;
       sub.subscription.unsubscribe();
-      supabase.removeChannel(ch);
+      supabase.removeChannel(channel);
+      clearInterval(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
@@ -266,30 +259,28 @@ export default function MePage() {
     setStatus({ text: "Profile saved ✅", type: "success" });
   }
 
-  async function confirmPickup() {
-    if (!accepted) return;
-
-    if (timeLeft === "Expired") {
+  // ✅ buyer confirms pickup after accepted (uses your existing RPC)
+  async function confirmPickup(interestId: string, expiresAt: string | null) {
+    const left = formatTimeLeft(expiresAt);
+    if (left === "Expired") {
       setStatus({ text: "This selection expired. Ask the seller to select you again.", type: "error" });
       return;
     }
 
     setStatus(null);
-    setConfirming(true);
+    setConfirmingId(interestId);
 
-    const { error } = await supabase.rpc("confirm_interest", {
-      p_interest_id: accepted.id,
-    });
+    const { error } = await supabase.rpc("confirm_interest", { p_interest_id: interestId });
 
-    setConfirming(false);
+    setConfirmingId(null);
 
     if (error) {
       setStatus({ text: error.message, type: "error" });
       return;
     }
 
+    if (userId) await loadMyRequests(userId);
     setStatus({ text: "Confirmed ✅ Item is now reserved for you.", type: "success" });
-    setAccepted(null);
     router.refresh();
   }
 
@@ -309,7 +300,7 @@ export default function MePage() {
     setFullName("");
     setRole("");
     setDbProfileComplete(false);
-    setAccepted(null);
+    setRequests([]);
 
     router.replace("/feed");
     router.refresh();
@@ -320,7 +311,7 @@ export default function MePage() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120, maxWidth: 520 }}>
+    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120, maxWidth: 560 }}>
       <button
         type="button"
         onClick={() => router.push("/feed")}
@@ -337,7 +328,7 @@ export default function MePage() {
         ← Back to feed
       </button>
 
-      <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Account</h1>
+      <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Request Access</h1>
       <p style={{ opacity: 0.8, marginTop: 8 }}>
         Login is restricted to <b>@ashland.edu</b>.
       </p>
@@ -348,38 +339,6 @@ export default function MePage() {
           <div style={{ fontWeight: 900 }}>Logged in as</div>
           <div style={{ opacity: 0.85, marginTop: 6 }}>{userEmail}</div>
 
-          {/* BUYER NOTIFICATION */}
-          {accepted && (
-            <div style={{ marginTop: 14, border: "1px solid #14532d", borderRadius: 14, padding: 14, background: "#052e16" }}>
-              <div style={{ fontWeight: 900 }}>🎉 You were selected!</div>
-              <div style={{ opacity: 0.9, marginTop: 6 }}>
-                Confirm within: <b>{timeLeft ?? "—"}</b>
-              </div>
-              <div style={{ opacity: 0.75, marginTop: 6, fontSize: 12 }}>Item ID: {accepted.item_id.slice(0, 8)}…</div>
-
-              <button
-                type="button"
-                onClick={confirmPickup}
-                disabled={confirming || timeLeft === "Expired"}
-                style={{
-                  marginTop: 10,
-                  width: "100%",
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "none",
-                  background: confirming ? "#14532d" : "#16a34a",
-                  color: "white",
-                  fontWeight: 900,
-                  cursor: confirming ? "not-allowed" : "pointer",
-                  opacity: confirming ? 0.85 : 1,
-                }}
-              >
-                {confirming ? "Confirming..." : "Confirm pickup"}
-              </button>
-            </div>
-          )}
-
-          {/* PROFILE REQUIRED */}
           {!dbProfileComplete && (
             <div style={{ marginTop: 14, border: "1px solid #334155", borderRadius: 12, padding: 14 }}>
               <div style={{ fontWeight: 900, marginBottom: 10 }}>
@@ -459,6 +418,111 @@ export default function MePage() {
               </button>
             </div>
           )}
+
+          {/* ✅ MY REQUESTS / NOTIFICATIONS */}
+          <div style={{ marginTop: 14, border: "1px solid #334155", borderRadius: 12, padding: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <div style={{ fontWeight: 900 }}>My requests</div>
+              <button
+                type="button"
+                onClick={() => userId && loadMyRequests(userId)}
+                style={{
+                  background: "transparent",
+                  border: "1px solid #334155",
+                  color: "white",
+                  padding: "6px 10px",
+                  borderRadius: 10,
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  opacity: requestsLoading ? 0.7 : 1,
+                }}
+                disabled={requestsLoading}
+              >
+                {requestsLoading ? "Refreshing…" : "Refresh"}
+              </button>
+            </div>
+
+            {requests.length === 0 ? (
+              <div style={{ marginTop: 10, opacity: 0.75 }}>No requests yet.</div>
+            ) : (
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+                {requests.slice(0, 10).map((r) => {
+                  const left = formatTimeLeft(r.accepted_expires_at);
+                  const isAccepted = r.status === "accepted";
+                  const isConfirmed = r.status === "confirmed";
+                  const isRejected = r.status === "rejected";
+
+                  return (
+                    <div
+                      key={r.id}
+                      style={{
+                        border: "1px solid #0f223f",
+                        borderRadius: 12,
+                        padding: 12,
+                        background: isAccepted ? "#052e16" : "#020617",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                        <div style={{ fontWeight: 900 }}>
+                          Item: {r.item_id.slice(0, 8)}…
+                        </div>
+                        <div style={{ opacity: 0.9 }}>
+                          Status:{" "}
+                          <b>
+                            {isAccepted ? "ACCEPTED ✅" : isConfirmed ? "CONFIRMED ✅" : isRejected ? "REJECTED" : r.status.toUpperCase()}
+                          </b>
+                        </div>
+                      </div>
+
+                      {isAccepted && (
+                        <div style={{ marginTop: 6, opacity: 0.9 }}>
+                          Confirm within: <b>{left ?? "—"}</b>
+                        </div>
+                      )}
+
+                      <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          onClick={() => router.push(`/item/${r.item_id}`)}
+                          style={{
+                            border: "1px solid #334155",
+                            background: "transparent",
+                            color: "white",
+                            padding: "8px 10px",
+                            borderRadius: 10,
+                            cursor: "pointer",
+                            fontWeight: 900,
+                          }}
+                        >
+                          View item
+                        </button>
+
+                        {isAccepted && (
+                          <button
+                            type="button"
+                            onClick={() => confirmPickup(r.id, r.accepted_expires_at)}
+                            disabled={confirmingId === r.id || left === "Expired"}
+                            style={{
+                              border: "1px solid #14532d",
+                              background: confirmingId === r.id ? "#14532d" : "#16a34a",
+                              color: "white",
+                              padding: "8px 10px",
+                              borderRadius: 10,
+                              cursor: confirmingId === r.id ? "not-allowed" : "pointer",
+                              fontWeight: 900,
+                              opacity: confirmingId === r.id ? 0.85 : 1,
+                            }}
+                          >
+                            {confirmingId === r.id ? "Confirming…" : left === "Expired" ? "Expired" : "Confirm pickup"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
 
           {/* ACTIONS */}
           <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
@@ -590,11 +654,6 @@ export default function MePage() {
       )}
 
       {status && <p style={{ marginTop: 14, color: statusColor }}>{status.text}</p>}
-      {isLoggedIn && (
-        <div style={{ marginTop: 10, opacity: 0.6, fontSize: 12 }}>
-          Tip: keep this tab open — if a seller accepts you, this page updates automatically.
-        </div>
-      )}
     </div>
   );
 }
