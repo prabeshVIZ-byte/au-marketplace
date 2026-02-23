@@ -35,25 +35,28 @@ export default function MePage() {
 
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
 
+  const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Profile onboarding fields
+  // profile
   const [fullName, setFullName] = useState("");
   const [role, setRole] = useState<Role>("");
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
 
-  // ✅ Step 10: buyer notification + confirm
+  // buyer selection
   const [accepted, setAccepted] = useState<AcceptedInterest | null>(null);
   const [confirming, setConfirming] = useState(false);
 
   const profileComplete =
     fullName.trim().length > 0 && (role === "student" || role === "faculty");
 
-  const timeLeft = useMemo(() => formatTimeLeft(accepted?.accepted_expires_at ?? null), [accepted?.accepted_expires_at]);
+  const timeLeft = useMemo(
+    () => formatTimeLeft(accepted?.accepted_expires_at ?? null),
+    [accepted?.accepted_expires_at]
+  );
 
   async function loadProfile(uid: string) {
     setProfileLoading(true);
@@ -63,7 +66,7 @@ export default function MePage() {
       .from("profiles")
       .select("full_name,user_role")
       .eq("id", uid)
-      .single();
+      .maybeSingle();
 
     setProfileLoading(false);
 
@@ -77,7 +80,6 @@ export default function MePage() {
   }
 
   async function loadAcceptedInterest(uid: string) {
-    // Find if THIS user has an accepted interest (selected by a seller)
     const { data, error } = await supabase
       .from("interests")
       .select("id,item_id,status,accepted_expires_at")
@@ -114,7 +116,7 @@ export default function MePage() {
 
     if (uid) {
       await loadProfile(uid);
-      await loadAcceptedInterest(uid); // ✅ notification
+      await loadAcceptedInterest(uid);
     } else {
       setFullName("");
       setRole("");
@@ -136,7 +138,6 @@ export default function MePage() {
       refreshUser();
     });
 
-    // re-render countdown every second (only affects display)
     const t = setInterval(() => {
       setAccepted((prev) => (prev ? { ...prev } : prev));
     }, 1000);
@@ -234,6 +235,9 @@ export default function MePage() {
       return;
     }
 
+    // ✅ important: reload from DB so UI doesn't "forget"
+    await loadProfile(uid);
+
     setProfileSaved(true);
     setStatus("Profile saved ✅");
   }
@@ -241,7 +245,6 @@ export default function MePage() {
   async function confirmPickup() {
     if (!accepted) return;
 
-    // prevent confirming after expiry
     if (timeLeft === "Expired") {
       setStatus("This selection expired. Ask the seller to select you again.");
       return;
@@ -300,6 +303,7 @@ export default function MePage() {
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, maxWidth: 520 }}>
       <button
+        type="button"
         onClick={() => router.push("/feed")}
         style={{
           marginBottom: 16,
@@ -324,7 +328,6 @@ export default function MePage() {
           <div style={{ fontWeight: 900 }}>Logged in as</div>
           <div style={{ opacity: 0.85, marginTop: 6 }}>{userEmail}</div>
 
-          {/* ✅ Buyer notification card */}
           {accepted && (
             <div
               style={{
@@ -344,7 +347,11 @@ export default function MePage() {
               </div>
 
               <button
-                onClick={confirmPickup}
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  confirmPickup();
+                }}
                 disabled={confirming || timeLeft === "Expired"}
                 style={{
                   marginTop: 10,
@@ -388,7 +395,10 @@ export default function MePage() {
               <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
                 <button
                   type="button"
-                  onClick={() => setRole("student")}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setRole("student");
+                  }}
                   style={{
                     flex: 1,
                     padding: "10px 12px",
@@ -402,9 +412,13 @@ export default function MePage() {
                 >
                   Student
                 </button>
+
                 <button
                   type="button"
-                  onClick={() => setRole("faculty")}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setRole("faculty");
+                  }}
                   style={{
                     flex: 1,
                     padding: "10px 12px",
@@ -422,7 +436,10 @@ export default function MePage() {
 
               <button
                 type="button"
-                onClick={saveProfile}
+                onClick={(e) => {
+                  e.preventDefault();
+                  saveProfile();
+                }}
                 disabled={profileLoading}
                 style={{
                   width: "100%",
@@ -445,6 +462,7 @@ export default function MePage() {
 
           <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
             <button
+              type="button"
               onClick={() => router.push("/create")}
               disabled={!profileComplete}
               title={!profileComplete ? "Complete your profile first" : "Post an item"}
@@ -463,6 +481,7 @@ export default function MePage() {
             </button>
 
             <button
+              type="button"
               onClick={signOut}
               style={{
                 background: "transparent",
@@ -482,6 +501,7 @@ export default function MePage() {
         <div style={{ marginTop: 16 }}>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
             <button
+              type="button"
               onClick={() => setMode("signin")}
               style={{
                 flex: 1,
@@ -498,6 +518,7 @@ export default function MePage() {
             </button>
 
             <button
+              type="button"
               onClick={() => setMode("signup")}
               style={{
                 flex: 1,
@@ -545,6 +566,7 @@ export default function MePage() {
           />
 
           <button
+            type="button"
             onClick={handleAuth}
             disabled={sending}
             style={{
