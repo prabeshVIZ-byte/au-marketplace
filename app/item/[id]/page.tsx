@@ -15,7 +15,7 @@ type ItemRow = {
   expires_at: string | null;
   photo_url: string | null;
   status: string | null;
-  owner_id: string | null; // IMPORTANT: change if your schema uses different name
+  owner_id: string | null;
 };
 
 type SellerProfile = {
@@ -63,6 +63,13 @@ export default function ItemDetailPage() {
   const [mineInterested, setMineInterested] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Step 8: interest modal state
+  const [showInterest, setShowInterest] = useState(false);
+  const [earliestPickup, setEarliestPickup] = useState<"today" | "tomorrow" | "weekend">("today");
+  const [timeWindow, setTimeWindow] = useState<"morning" | "afternoon" | "evening">("afternoon");
+  const [note, setNote] = useState("");
+  const [interestMsg, setInterestMsg] = useState<string | null>(null);
+
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
@@ -98,14 +105,14 @@ export default function ItemDetailPage() {
 
       if (!cntErr) setInterestCount(count ?? 0);
 
-      // 3) if logged in, check if I am interested
+      // 3) if logged in, check if I already expressed interest
       const { data: s } = await supabase.auth.getSession();
       const uid = s.session?.user?.id ?? null;
 
       if (uid) {
         const { data: mine, error: mineErr } = await supabase
           .from("interests")
-          .select("item_id")
+          .select("id")
           .eq("item_id", itemId)
           .eq("user_id", uid)
           .maybeSingle();
@@ -140,7 +147,8 @@ export default function ItemDetailPage() {
     }
   }
 
-  async function toggleInterest() {
+  // Step 8: submit interest with pickup readiness fields
+  async function submitInterest() {
     if (!item) return;
 
     if (!isLoggedIn || !userId) {
@@ -149,34 +157,37 @@ export default function ItemDetailPage() {
     }
 
     setSaving(true);
+    setInterestMsg(null);
 
     try {
-      if (mineInterested) {
-        const { error } = await supabase
-          .from("interests")
-          .delete()
-          .eq("item_id", item.id)
-          .eq("user_id", userId);
+      const { error } = await supabase.from("interests").insert([
+        {
+          item_id: item.id,
+          user_id: userId,
+          status: "pending",
+          earliest_pickup: earliestPickup,
+          time_window: timeWindow,
+          note: note.trim() || null,
+        },
+      ]);
 
-        if (error) throw new Error(error.message);
-
-        setMineInterested(false);
-        setInterestCount((c) => Math.max(0, c - 1));
-      } else {
-        const { error } = await supabase
-          .from("interests")
-          .insert([{ item_id: item.id, user_id: userId }]);
-
-        if (error) {
-          // ignore duplicates
-          if (!error.message.toLowerCase().includes("duplicate")) throw new Error(error.message);
+      if (error) {
+        const msg = error.message.toLowerCase();
+        if (msg.includes("duplicate") || msg.includes("unique")) {
+          setInterestMsg("You already sent an interest request for this item.");
+          setMineInterested(true);
+          return;
         }
-
-        setMineInterested(true);
-        setInterestCount((c) => c + 1);
+        throw new Error(error.message);
       }
+
+      setMineInterested(true);
+      setInterestCount((c) => c + 1);
+      setInterestMsg("✅ Interest sent! If you’re selected, you’ll get a confirm button in your Account page.");
+      setNote("");
+      // keep modal open so they see success message; they can close
     } catch (e: any) {
-      alert(e?.message || "Could not update interest.");
+      setInterestMsg(e?.message || "Could not send interest.");
     } finally {
       setSaving(false);
     }
@@ -236,20 +247,16 @@ export default function ItemDetailPage() {
               </div>
             )}
 
-           <div style={{ opacity: 0.85, marginTop: 10 }}>
-  {item.expires_at
-    ? `Available until: ${new Date(item.expires_at).toLocaleString()}`
-    : "Contributor will de-list themselves"}
-</div>
+            <div style={{ opacity: 0.85, marginTop: 10 }}>
+              {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleString()}` : "Contributor will de-list themselves"}
+              {"  "}
+              <span style={{ opacity: 0.75 }}>({expiryText})</span>
+            </div>
 
             <div style={{ marginTop: 6 }}>
               Seller:{" "}
-              <b>
-                {item.is_anonymous ? "Anonymous" : showSellerName ? seller!.full_name : "Ashland user"}
-              </b>
-              {!item.is_anonymous && seller?.user_role ? (
-                <span style={{ opacity: 0.8 }}> ({seller.user_role})</span>
-              ) : null}
+              <b>{item.is_anonymous ? "Anonymous" : showSellerName ? seller!.full_name : "Ashland user"}</b>
+              {!item.is_anonymous && seller?.user_role ? <span style={{ opacity: 0.8 }}> ({seller.user_role})</span> : null}
             </div>
 
             <div style={{ marginTop: 6 }}>
@@ -296,19 +303,31 @@ export default function ItemDetailPage() {
           <div style={{ marginTop: 14, background: "#0b1730", border: "1px solid #0f223f", borderRadius: 14, padding: 14 }}>
             <div style={{ fontWeight: 900, marginBottom: 8 }}>Description</div>
             <div style={{ opacity: 0.9, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-  {item.description && item.description.trim().toLowerCase() !== "until i cancel"
-    ? item.description
-    : "—"}
-</div>
+              {item.description && item.description.trim().toLowerCase() !== "until i cancel" ? item.description : "—"}
+            </div>
           </div>
 
           {/* Actions */}
           <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button
-              onClick={toggleInterest}
-              disabled={saving}
+              onClick={() => {
+                if (!isLoggedIn) {
+                  router.push("/me");
+                  return;
+                }
+                setInterestMsg(null);
+                setShowInterest(true);
+              }}
+              disabled={saving || mineInterested || (item.status ?? "available") !== "available"}
               style={{
-                background: isLoggedIn ? (mineInterested ? "#1f2937" : "#052e16") : "transparent",
+                background:
+                  !isLoggedIn
+                    ? "transparent"
+                    : mineInterested
+                    ? "#1f2937"
+                    : (item.status ?? "available") === "available"
+                    ? "#052e16"
+                    : "#111827",
                 border: "1px solid #334155",
                 color: "white",
                 padding: "10px 14px",
@@ -317,14 +336,17 @@ export default function ItemDetailPage() {
                 fontWeight: 900,
                 opacity: saving ? 0.75 : 1,
               }}
+              title={
+                !isLoggedIn
+                  ? "Login required"
+                  : mineInterested
+                  ? "You already sent a request"
+                  : (item.status ?? "available") !== "available"
+                  ? "Not available"
+                  : "Send a pickup-ready request"
+              }
             >
-              {saving
-                ? "Saving…"
-                : isLoggedIn
-                ? mineInterested
-                  ? "Uninterested"
-                  : "Interested"
-                : "Interested (login required)"}
+              {!isLoggedIn ? "Interested (login required)" : mineInterested ? "Request sent" : "Interested"}
             </button>
 
             <button
@@ -342,6 +364,164 @@ export default function ItemDetailPage() {
               Account
             </button>
           </div>
+
+          {/* Step 8: Interest Modal */}
+          {showInterest && (
+            <div
+              onClick={() => setShowInterest(false)}
+              style={{
+                position: "fixed",
+                inset: 0,
+                background: "rgba(0,0,0,0.65)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 16,
+                zIndex: 50,
+              }}
+            >
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  width: "100%",
+                  maxWidth: 520,
+                  borderRadius: 18,
+                  border: "1px solid #334155",
+                  background: "#020617",
+                  padding: 16,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div style={{ fontSize: 18, fontWeight: 900 }}>Request this item</div>
+                  <button
+                    onClick={() => setShowInterest(false)}
+                    style={{
+                      background: "transparent",
+                      border: "1px solid #334155",
+                      color: "white",
+                      padding: "6px 10px",
+                      borderRadius: 10,
+                      cursor: "pointer",
+                      fontWeight: 900,
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div style={{ marginTop: 12, opacity: 0.85 }}>
+                  Tell the lister when you can pick up. This helps them choose someone who will actually show up.
+                </div>
+
+                <div style={{ marginTop: 14 }}>
+                  <label style={{ display: "block", fontWeight: 800, marginBottom: 6 }}>Earliest pickup</label>
+                  <select
+                    value={earliestPickup}
+                    onChange={(e) => setEarliestPickup(e.target.value as any)}
+                    style={{
+                      width: "100%",
+                      background: "black",
+                      color: "white",
+                      border: "1px solid #334155",
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                    }}
+                  >
+                    <option value="today">Today</option>
+                    <option value="tomorrow">Tomorrow</option>
+                    <option value="weekend">Weekend</option>
+                  </select>
+                </div>
+
+                <div style={{ marginTop: 12 }}>
+                  <label style={{ display: "block", fontWeight: 800, marginBottom: 6 }}>Time window</label>
+                  <select
+                    value={timeWindow}
+                    onChange={(e) => setTimeWindow(e.target.value as any)}
+                    style={{
+                      width: "100%",
+                      background: "black",
+                      color: "white",
+                      border: "1px solid #334155",
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                    }}
+                  >
+                    <option value="morning">Morning</option>
+                    <option value="afternoon">Afternoon</option>
+                    <option value="evening">Evening</option>
+                  </select>
+                </div>
+
+                <div style={{ marginTop: 12 }}>
+                  <label style={{ display: "block", fontWeight: 800, marginBottom: 6 }}>Optional note</label>
+                  <textarea
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="Example: I can meet at the library after 3pm."
+                    style={{
+                      width: "100%",
+                      minHeight: 90,
+                      background: "black",
+                      color: "white",
+                      border: "1px solid #334155",
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      resize: "vertical",
+                    }}
+                  />
+                </div>
+
+                {interestMsg && (
+                  <div
+                    style={{
+                      marginTop: 12,
+                      border: "1px solid #334155",
+                      borderRadius: 12,
+                      padding: 10,
+                      opacity: 0.9,
+                    }}
+                  >
+                    {interestMsg}
+                  </div>
+                )}
+
+                <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button
+                    onClick={() => setShowInterest(false)}
+                    style={{
+                      background: "transparent",
+                      border: "1px solid #334155",
+                      color: "white",
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      cursor: "pointer",
+                      fontWeight: 900,
+                    }}
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    onClick={submitInterest}
+                    disabled={saving}
+                    style={{
+                      background: "#052e16",
+                      border: "1px solid #14532d",
+                      color: "white",
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      cursor: saving ? "not-allowed" : "pointer",
+                      fontWeight: 900,
+                      opacity: saving ? 0.75 : 1,
+                    }}
+                  >
+                    {saving ? "Sending..." : "Send request"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
