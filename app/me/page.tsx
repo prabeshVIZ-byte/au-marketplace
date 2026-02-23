@@ -12,22 +12,55 @@ type UiStatus = { text: string; type: StatusType } | null;
 type MyRequest = {
   id: string;
   item_id: string;
-  status: "pending" | "accepted" | "confirmed" | "rejected" | string;
-  accepted_at: string | null;
-  accepted_expires_at: string | null;
+  status: string | null;
   created_at: string | null;
+  item_title?: string | null;
 };
 
-function formatTimeLeft(expiresAt: string | null) {
-  if (!expiresAt) return null;
-  const end = new Date(expiresAt).getTime();
-  const now = Date.now();
-  const ms = end - now;
-  if (ms <= 0) return "Expired";
-  const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+function shortId(id: string) {
+  if (!id) return "";
+  return `${id.slice(0, 8)}…`;
+}
+
+function statusPill(status: string | null) {
+  const s = (status ?? "pending").toLowerCase();
+  const label =
+    s === "accepted" ? "Accepted" : s === "reserved" ? "Reserved" : s === "confirmed" ? "Confirmed" : s === "rejected" ? "Rejected" : "Pending";
+
+  const bg =
+    s === "accepted" || s === "reserved" || s === "confirmed"
+      ? "#052e16"
+      : s === "rejected"
+      ? "#3f1d1d"
+      : "#0b1730";
+
+  const border =
+    s === "accepted" || s === "reserved" || s === "confirmed"
+      ? "#14532d"
+      : s === "rejected"
+      ? "#7f1d1d"
+      : "#334155";
+
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "6px 10px",
+        borderRadius: 999,
+        border: `1px solid ${border}`,
+        background: bg,
+        color: "white",
+        fontWeight: 900,
+        fontSize: 12,
+        letterSpacing: 0.2,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label}
+    </span>
+  );
 }
 
 export default function MePage() {
@@ -53,10 +86,13 @@ export default function MePage() {
   const [dbProfileComplete, setDbProfileComplete] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
 
-  // ✅ buyer notifications / requests
-  const [requestsLoading, setRequestsLoading] = useState(false);
+  // requests
   const [requests, setRequests] = useState<MyRequest[]>([]);
-  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [reqLoading, setReqLoading] = useState(false);
+
+  // section toggles (clean UI)
+  const [showProfile, setShowProfile] = useState(false);
+  const [showRequests, setShowRequests] = useState(true);
 
   // status
   const [status, setStatus] = useState<UiStatus>(null);
@@ -81,6 +117,7 @@ export default function MePage() {
     setProfileLoading(false);
 
     if (error) {
+      console.log("loadProfile:", error.message);
       setStatus({ text: `Profile load failed: ${error.message}`, type: "error" });
       return;
     }
@@ -93,20 +130,23 @@ export default function MePage() {
 
     const complete = dbName.length > 0 && (dbRole === "student" || dbRole === "faculty");
     setDbProfileComplete(complete);
+
+    // if incomplete, open profile section automatically
+    if (!complete) setShowProfile(true);
   }
 
-  // ✅ load all my requests (so buyers see Accepted immediately)
   async function loadMyRequests(uid: string) {
-    setRequestsLoading(true);
+    setReqLoading(true);
 
+    // Pull minimal info from interests; optionally join item title if you have a view later.
     const { data, error } = await supabase
       .from("interests")
-      .select("id,item_id,status,accepted_at,accepted_expires_at,created_at")
+      .select("id,item_id,status,created_at")
       .eq("user_id", uid)
       .order("created_at", { ascending: false })
-      .limit(50);
+      .limit(20);
 
-    setRequestsLoading(false);
+    setReqLoading(false);
 
     if (error) {
       console.log("loadMyRequests:", error.message);
@@ -114,7 +154,7 @@ export default function MePage() {
       return;
     }
 
-    setRequests((data as any as MyRequest[]) || []);
+    setRequests(((data as any[]) || []).map((r) => ({ ...r })));
   }
 
   async function refreshUser() {
@@ -151,32 +191,11 @@ export default function MePage() {
       refreshUser();
     });
 
-    // ✅ realtime: when seller accepts you, this updates instantly
-    const channel = supabase
-      .channel("buyer-interest-updates")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "interests" },
-        (payload) => {
-          const row: any = payload.new || payload.old;
-          if (!row) return;
-          if (row.user_id !== userId) return; // only my rows
-          if (userId) loadMyRequests(userId);
-        }
-      )
-      .subscribe();
-
-    // keep countdown timers fresh
-    const t = setInterval(() => setRequests((p) => [...p]), 1000);
-
     return () => {
       alive = false;
       sub.subscription.unsubscribe();
-      supabase.removeChannel(channel);
-      clearInterval(t);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]);
+  }, []);
 
   async function handleAuth() {
     setStatus(null);
@@ -257,31 +276,7 @@ export default function MePage() {
 
     await loadProfile(uid);
     setStatus({ text: "Profile saved ✅", type: "success" });
-  }
-
-  // ✅ buyer confirms pickup after accepted (uses your existing RPC)
-  async function confirmPickup(interestId: string, expiresAt: string | null) {
-    const left = formatTimeLeft(expiresAt);
-    if (left === "Expired") {
-      setStatus({ text: "This selection expired. Ask the seller to select you again.", type: "error" });
-      return;
-    }
-
-    setStatus(null);
-    setConfirmingId(interestId);
-
-    const { error } = await supabase.rpc("confirm_interest", { p_interest_id: interestId });
-
-    setConfirmingId(null);
-
-    if (error) {
-      setStatus({ text: error.message, type: "error" });
-      return;
-    }
-
-    if (userId) await loadMyRequests(userId);
-    setStatus({ text: "Confirmed ✅ Item is now reserved for you.", type: "success" });
-    router.refresh();
+    setShowProfile(false);
   }
 
   async function signOut() {
@@ -306,12 +301,28 @@ export default function MePage() {
     router.refresh();
   }
 
+  const canPost = !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu") && dbProfileComplete;
+
   if (loading) {
-    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Loading…</div>;
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+        Loading…
+      </div>
+    );
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120, maxWidth: 560 }}>
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "black",
+        color: "white",
+        padding: 24,
+        paddingBottom: 120,
+        maxWidth: 920,
+        margin: "0 auto",
+      }}
+    >
       <button
         type="button"
         onClick={() => router.push("/feed")}
@@ -319,230 +330,52 @@ export default function MePage() {
           marginBottom: 16,
           background: "transparent",
           color: "white",
-          border: "1px solid #333",
+          border: "1px solid #334155",
           padding: "8px 12px",
-          borderRadius: 10,
+          borderRadius: 12,
           cursor: "pointer",
+          fontWeight: 900,
         }}
       >
         ← Back to feed
       </button>
 
-      <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Request Access</h1>
-      <p style={{ opacity: 0.8, marginTop: 8 }}>
-        Login is restricted to <b>@ashland.edu</b>.
-      </p>
-
-      {/* SIGNED IN */}
-      {userEmail ? (
-        <div style={{ marginTop: 16, border: "1px solid #0f223f", borderRadius: 14, padding: 16, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900 }}>Logged in as</div>
-          <div style={{ opacity: 0.85, marginTop: 6 }}>{userEmail}</div>
-
-          {!dbProfileComplete && (
-            <div style={{ marginTop: 14, border: "1px solid #334155", borderRadius: 12, padding: 14 }}>
-              <div style={{ fontWeight: 900, marginBottom: 10 }}>
-                Complete profile (required)
-                {profileLoading && <span style={{ marginLeft: 8, opacity: 0.7, fontSize: 12 }}>loading…</span>}
-              </div>
-
-              <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>Full name</label>
-              <input
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                placeholder="e.g., Tom Sudow"
-                style={{
-                  width: "100%",
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid #334155",
-                  background: "black",
-                  color: "white",
-                  marginBottom: 12,
-                }}
-              />
-
-              <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>You are</label>
-              <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
-                <button
-                  type="button"
-                  onClick={() => setRole("student")}
-                  style={{
-                    flex: 1,
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    border: "1px solid #334155",
-                    background: role === "student" ? "#052e16" : "transparent",
-                    color: "white",
-                    fontWeight: 900,
-                    cursor: "pointer",
-                  }}
-                >
-                  Student
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setRole("faculty")}
-                  style={{
-                    flex: 1,
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    border: "1px solid #334155",
-                    background: role === "faculty" ? "#052e16" : "transparent",
-                    color: "white",
-                    fontWeight: 900,
-                    cursor: "pointer",
-                  }}
-                >
-                  Faculty
-                </button>
-              </div>
-
-              <button
-                type="button"
-                onClick={saveProfile}
-                disabled={profileSaving || !draftComplete}
-                style={{
-                  width: "100%",
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid #334155",
-                  background: profileSaving ? "#1f2937" : draftComplete ? "#16a34a" : "#14532d",
-                  color: "white",
-                  fontWeight: 900,
-                  cursor: profileSaving ? "not-allowed" : draftComplete ? "pointer" : "not-allowed",
-                }}
-              >
-                {profileSaving ? "Saving..." : "Save profile"}
-              </button>
-            </div>
-          )}
-
-          {/* ✅ MY REQUESTS / NOTIFICATIONS */}
-          <div style={{ marginTop: 14, border: "1px solid #334155", borderRadius: 12, padding: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-              <div style={{ fontWeight: 900 }}>My requests</div>
-              <button
-                type="button"
-                onClick={() => userId && loadMyRequests(userId)}
-                style={{
-                  background: "transparent",
-                  border: "1px solid #334155",
-                  color: "white",
-                  padding: "6px 10px",
-                  borderRadius: 10,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  opacity: requestsLoading ? 0.7 : 1,
-                }}
-                disabled={requestsLoading}
-              >
-                {requestsLoading ? "Refreshing…" : "Refresh"}
-              </button>
-            </div>
-
-            {requests.length === 0 ? (
-              <div style={{ marginTop: 10, opacity: 0.75 }}>No requests yet.</div>
+      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h1 style={{ fontSize: 34, fontWeight: 950, margin: 0 }}>Account</h1>
+          <p style={{ opacity: 0.75, marginTop: 8, marginBottom: 0 }}>
+            {userEmail ? (
+              <>
+                Logged in as <b>{userEmail}</b>
+              </>
             ) : (
-              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
-                {requests.slice(0, 10).map((r) => {
-                  const left = formatTimeLeft(r.accepted_expires_at);
-                  const isAccepted = r.status === "accepted";
-                  const isConfirmed = r.status === "confirmed";
-                  const isRejected = r.status === "rejected";
-
-                  return (
-                    <div
-                      key={r.id}
-                      style={{
-                        border: "1px solid #0f223f",
-                        borderRadius: 12,
-                        padding: 12,
-                        background: isAccepted ? "#052e16" : "#020617",
-                      }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                        <div style={{ fontWeight: 900 }}>
-                          Item: {r.item_id.slice(0, 8)}…
-                        </div>
-                        <div style={{ opacity: 0.9 }}>
-                          Status:{" "}
-                          <b>
-                            {isAccepted ? "ACCEPTED ✅" : isConfirmed ? "CONFIRMED ✅" : isRejected ? "REJECTED" : r.status.toUpperCase()}
-                          </b>
-                        </div>
-                      </div>
-
-                      {isAccepted && (
-                        <div style={{ marginTop: 6, opacity: 0.9 }}>
-                          Confirm within: <b>{left ?? "—"}</b>
-                        </div>
-                      )}
-
-                      <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                        <button
-                          type="button"
-                          onClick={() => router.push(`/item/${r.item_id}`)}
-                          style={{
-                            border: "1px solid #334155",
-                            background: "transparent",
-                            color: "white",
-                            padding: "8px 10px",
-                            borderRadius: 10,
-                            cursor: "pointer",
-                            fontWeight: 900,
-                          }}
-                        >
-                          View item
-                        </button>
-
-                        {isAccepted && (
-                          <button
-                            type="button"
-                            onClick={() => confirmPickup(r.id, r.accepted_expires_at)}
-                            disabled={confirmingId === r.id || left === "Expired"}
-                            style={{
-                              border: "1px solid #14532d",
-                              background: confirmingId === r.id ? "#14532d" : "#16a34a",
-                              color: "white",
-                              padding: "8px 10px",
-                              borderRadius: 10,
-                              cursor: confirmingId === r.id ? "not-allowed" : "pointer",
-                              fontWeight: 900,
-                              opacity: confirmingId === r.id ? 0.85 : 1,
-                            }}
-                          >
-                            {confirmingId === r.id ? "Confirming…" : left === "Expired" ? "Expired" : "Confirm pickup"}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              <>
+                Login is restricted to <b>@ashland.edu</b>.
+              </>
             )}
-          </div>
+          </p>
+        </div>
 
-          {/* ACTIONS */}
-          <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+        {/* Primary actions (minimal) */}
+        {userEmail ? (
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button
               type="button"
               onClick={() => router.push("/create")}
-              disabled={!dbProfileComplete}
-              title={!dbProfileComplete ? "Complete your profile first" : "Post an item"}
+              disabled={!canPost}
+              title={!canPost ? "Complete your profile first" : "Post an item"}
               style={{
-                background: !dbProfileComplete ? "#14532d" : "#16a34a",
+                background: !canPost ? "#14532d" : "#16a34a",
                 padding: "10px 14px",
-                borderRadius: 10,
-                border: "none",
+                borderRadius: 12,
+                border: "1px solid #14532d",
                 color: "white",
-                cursor: !dbProfileComplete ? "not-allowed" : "pointer",
-                fontWeight: 900,
-                opacity: !dbProfileComplete ? 0.6 : 1,
+                cursor: !canPost ? "not-allowed" : "pointer",
+                fontWeight: 950,
+                opacity: !canPost ? 0.55 : 1,
               }}
             >
-              Post an Item
+              Post an item
             </button>
 
             <button
@@ -551,7 +384,7 @@ export default function MePage() {
               style={{
                 background: "transparent",
                 padding: "10px 14px",
-                borderRadius: 10,
+                borderRadius: 12,
                 border: "1px solid #334155",
                 color: "white",
                 cursor: "pointer",
@@ -561,10 +394,12 @@ export default function MePage() {
               Sign out
             </button>
           </div>
-        </div>
-      ) : (
-        // LOGGED OUT
-        <div style={{ marginTop: 16 }}>
+        ) : null}
+      </div>
+
+      {/* Logged out: keep clean */}
+      {!userEmail ? (
+        <div style={{ marginTop: 18, maxWidth: 520, border: "1px solid #0f223f", borderRadius: 16, padding: 16, background: "#0b1730" }}>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
             <button
               type="button"
@@ -572,12 +407,12 @@ export default function MePage() {
               style={{
                 flex: 1,
                 padding: "10px 12px",
-                borderRadius: 10,
+                borderRadius: 12,
                 border: mode === "signin" ? "1px solid #16a34a" : "1px solid #334155",
                 background: "transparent",
                 color: "white",
                 cursor: "pointer",
-                fontWeight: 900,
+                fontWeight: 950,
               }}
             >
               Sign in
@@ -589,12 +424,12 @@ export default function MePage() {
               style={{
                 flex: 1,
                 padding: "10px 12px",
-                borderRadius: 10,
+                borderRadius: 12,
                 border: mode === "signup" ? "1px solid #16a34a" : "1px solid #334155",
                 background: "transparent",
                 color: "white",
                 cursor: "pointer",
-                fontWeight: 900,
+                fontWeight: 950,
               }}
             >
               Sign up
@@ -607,10 +442,10 @@ export default function MePage() {
             placeholder="you@ashland.edu"
             style={{
               width: "100%",
-              padding: 10,
-              borderRadius: 10,
-              border: "1px solid #333",
-              background: "#111",
+              padding: 12,
+              borderRadius: 12,
+              border: "1px solid #334155",
+              background: "black",
               color: "white",
               marginBottom: 10,
             }}
@@ -623,10 +458,10 @@ export default function MePage() {
             type="password"
             style={{
               width: "100%",
-              padding: 10,
-              borderRadius: 10,
-              border: "1px solid #333",
-              background: "#111",
+              padding: 12,
+              borderRadius: 12,
+              border: "1px solid #334155",
+              background: "black",
               color: "white",
             }}
           />
@@ -639,21 +474,279 @@ export default function MePage() {
               marginTop: 12,
               width: "100%",
               background: sending ? "#14532d" : "#16a34a",
-              padding: "10px 14px",
-              borderRadius: 10,
-              border: "none",
+              padding: "12px 14px",
+              borderRadius: 12,
+              border: "1px solid #14532d",
               color: "white",
               cursor: sending ? "not-allowed" : "pointer",
-              fontWeight: 900,
+              fontWeight: 950,
               opacity: sending ? 0.85 : 1,
             }}
           >
             {sending ? "Working…" : mode === "signup" ? "Create account" : "Sign in"}
           </button>
+
+          {status && <p style={{ marginTop: 14, color: statusColor }}>{status.text}</p>}
+        </div>
+      ) : (
+        // Logged in: clean 2-column layout
+        <div style={{ marginTop: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          {/* Left: Profile card */}
+          <div style={{ border: "1px solid #0f223f", borderRadius: 16, background: "#0b1730", padding: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div style={{ fontWeight: 950, fontSize: 16 }}>Profile</div>
+
+              <button
+                type="button"
+                onClick={() => setShowProfile((v) => !v)}
+                style={{
+                  background: "transparent",
+                  border: "1px solid #334155",
+                  color: "white",
+                  padding: "8px 10px",
+                  borderRadius: 12,
+                  cursor: "pointer",
+                  fontWeight: 900,
+                }}
+              >
+                {showProfile ? "Hide" : "Edit"}
+              </button>
+            </div>
+
+            <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  padding: "6px 10px",
+                  borderRadius: 999,
+                  border: "1px solid #334155",
+                  background: "#020617",
+                  fontWeight: 900,
+                  fontSize: 12,
+                  opacity: 0.95,
+                }}
+              >
+                Name: {fullName.trim().length ? fullName.trim() : "Not set"}
+              </span>
+
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  padding: "6px 10px",
+                  borderRadius: 999,
+                  border: "1px solid #334155",
+                  background: "#020617",
+                  fontWeight: 900,
+                  fontSize: 12,
+                  opacity: 0.95,
+                }}
+              >
+                Role: {role ? role : "Not set"}
+              </span>
+
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  padding: "6px 10px",
+                  borderRadius: 999,
+                  border: `1px solid ${dbProfileComplete ? "#14532d" : "#7f1d1d"}`,
+                  background: dbProfileComplete ? "#052e16" : "#3f1d1d",
+                  fontWeight: 950,
+                  fontSize: 12,
+                }}
+              >
+                {dbProfileComplete ? "Complete" : "Incomplete"}
+              </span>
+            </div>
+
+            {showProfile && (
+              <div style={{ marginTop: 14, borderTop: "1px solid #0f223f", paddingTop: 14 }}>
+                <div style={{ fontWeight: 950, marginBottom: 8 }}>
+                  Update profile{" "}
+                  {profileLoading && <span style={{ marginLeft: 8, opacity: 0.7, fontSize: 12 }}>loading…</span>}
+                </div>
+
+                <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>Full name</label>
+                <input
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="e.g., Tom Sudow"
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid #334155",
+                    background: "black",
+                    color: "white",
+                    marginBottom: 12,
+                  }}
+                />
+
+                <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>You are</label>
+                <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+                  <button
+                    type="button"
+                    onClick={() => setRole("student")}
+                    style={{
+                      flex: 1,
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #334155",
+                      background: role === "student" ? "#052e16" : "transparent",
+                      color: "white",
+                      fontWeight: 950,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Student
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setRole("faculty")}
+                    style={{
+                      flex: 1,
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #334155",
+                      background: role === "faculty" ? "#052e16" : "transparent",
+                      color: "white",
+                      fontWeight: 950,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Faculty
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={saveProfile}
+                  disabled={profileSaving || !draftComplete}
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid #14532d",
+                    background: profileSaving ? "#1f2937" : draftComplete ? "#16a34a" : "#14532d",
+                    color: "white",
+                    fontWeight: 950,
+                    cursor: profileSaving ? "not-allowed" : draftComplete ? "pointer" : "not-allowed",
+                    opacity: profileSaving ? 0.85 : 1,
+                  }}
+                >
+                  {profileSaving ? "Saving..." : "Save"}
+                </button>
+              </div>
+            )}
+
+            {status && <p style={{ marginTop: 12, color: statusColor }}>{status.text}</p>}
+          </div>
+
+          {/* Right: My requests */}
+          <div style={{ border: "1px solid #0f223f", borderRadius: 16, background: "#0b1730", padding: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div style={{ fontWeight: 950, fontSize: 16 }}>My requests</div>
+
+              <div style={{ display: "flex", gap: 10 }}>
+                <button
+                  type="button"
+                  onClick={() => setShowRequests((v) => !v)}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid #334155",
+                    color: "white",
+                    padding: "8px 10px",
+                    borderRadius: 12,
+                    cursor: "pointer",
+                    fontWeight: 900,
+                  }}
+                >
+                  {showRequests ? "Collapse" : "Expand"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!userId) return;
+                    await loadMyRequests(userId);
+                  }}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid #334155",
+                    color: "white",
+                    padding: "8px 10px",
+                    borderRadius: 12,
+                    cursor: "pointer",
+                    fontWeight: 900,
+                  }}
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 10, opacity: 0.75, fontSize: 13 }}>
+              If a seller accepts you, it will show here.
+            </div>
+
+            {showRequests && (
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                {reqLoading ? (
+                  <div style={{ opacity: 0.8 }}>Loading…</div>
+                ) : requests.length === 0 ? (
+                  <div style={{ opacity: 0.8 }}>No requests yet.</div>
+                ) : (
+                  requests.map((r) => (
+                    <div
+                      key={r.id}
+                      style={{
+                        border: "1px solid #334155",
+                        borderRadius: 14,
+                        padding: 12,
+                        background: "#020617",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          Item: {shortId(r.item_id)}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => router.push(`/item/${r.item_id}`)}
+                          style={{
+                            marginTop: 8,
+                            background: "transparent",
+                            border: "1px solid #334155",
+                            color: "white",
+                            padding: "8px 10px",
+                            borderRadius: 12,
+                            cursor: "pointer",
+                            fontWeight: 900,
+                          }}
+                        >
+                          View item
+                        </button>
+                      </div>
+
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+                        {statusPill(r.status)}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
-
-      {status && <p style={{ marginTop: 14, color: statusColor }}>{status.text}</p>}
     </div>
   );
 }
