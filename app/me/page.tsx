@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 type Role = "student" | "faculty" | "";
+type StatusType = "error" | "success" | "info";
+type UiStatus = { text: string; type: StatusType } | null;
 
 type AcceptedInterest = {
   id: string;
@@ -29,37 +31,48 @@ function formatTimeLeft(expiresAt: string | null) {
 export default function MePage() {
   const router = useRouter();
 
+  // auth
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
-
-  const [status, setStatus] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-  const [loading, setLoading] = useState(true);
 
   // profile
   const [fullName, setFullName] = useState("");
   const [role, setRole] = useState<Role>("");
-  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
 
-  // buyer selection
+  // accepted selection
   const [accepted, setAccepted] = useState<AcceptedInterest | null>(null);
   const [confirming, setConfirming] = useState(false);
 
-  const profileComplete =
-    fullName.trim().length > 0 && (role === "student" || role === "faculty");
+  // UI status
+  const [status, setStatus] = useState<UiStatus>(null);
+
+  const profileComplete = useMemo(() => {
+    return fullName.trim().length > 0 && (role === "student" || role === "faculty");
+  }, [fullName, role]);
 
   const timeLeft = useMemo(
     () => formatTimeLeft(accepted?.accepted_expires_at ?? null),
     [accepted?.accepted_expires_at]
   );
 
+  const statusColor = status?.type === "error" ? "#f87171" : status?.type === "success" ? "#4ade80" : "#93c5fd";
+
+  function safeClick(e: React.MouseEvent) {
+    // This is the “nav can’t steal my clicks” shield.
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
   async function loadProfile(uid: string) {
-    setProfileLoading(true);
     setProfileSaved(false);
 
     const { data, error } = await supabase
@@ -68,10 +81,10 @@ export default function MePage() {
       .eq("id", uid)
       .maybeSingle();
 
-    setProfileLoading(false);
-
     if (error) {
       console.log("loadProfile:", error.message);
+      // don’t throw UI into red panic; just show info
+      setStatus({ text: "Could not load profile yet.", type: "info" });
       return;
     }
 
@@ -151,15 +164,15 @@ export default function MePage() {
 
   async function handleAuth() {
     setStatus(null);
+    setProfileSaved(false);
 
     const e = email.trim().toLowerCase();
     if (!e.endsWith("@ashland.edu")) {
-      setStatus("Use your @ashland.edu email.");
+      setStatus({ text: "Use your @ashland.edu email.", type: "error" });
       return;
     }
-
     if (password.length < 8) {
-      setStatus("Password must be at least 8 characters.");
+      setStatus({ text: "Password must be at least 8 characters.", type: "error" });
       return;
     }
 
@@ -170,27 +183,23 @@ export default function MePage() {
       setSending(false);
 
       if (error) {
-        setStatus(error.message);
+        setStatus({ text: error.message, type: "error" });
         return;
       }
 
-      setStatus("Account created ✅ Now switch to Sign in.");
+      setStatus({ text: "Account created ✅ Now switch to Sign in.", type: "success" });
       return;
     }
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email: e,
-      password,
-    });
-
+    const { error } = await supabase.auth.signInWithPassword({ email: e, password });
     setSending(false);
 
     if (error) {
-      setStatus(error.message);
+      setStatus({ text: error.message, type: "error" });
       return;
     }
 
-    setStatus("Signed in ✅");
+    setStatus({ text: "Signed in ✅", type: "success" });
     router.refresh();
   }
 
@@ -200,53 +209,46 @@ export default function MePage() {
 
     const name = fullName.trim();
     if (!name) {
-      setStatus("Please enter your full name.");
+      setStatus({ text: "Please enter your full name.", type: "error" });
       return;
     }
     if (role !== "student" && role !== "faculty") {
-      setStatus("Please choose Student or Faculty.");
+      setStatus({ text: "Please choose Student or Faculty.", type: "error" });
       return;
     }
 
     const { data } = await supabase.auth.getSession();
     const uid = data.session?.user?.id;
     if (!uid) {
-      setStatus("No session found. Please sign in again.");
+      setStatus({ text: "No session found. Please sign in again.", type: "error" });
       return;
     }
 
-    setProfileLoading(true);
+    setProfileSaving(true);
 
     const { error } = await supabase.from("profiles").upsert(
-      [
-        {
-          id: uid,
-          full_name: name,
-          user_role: role,
-        },
-      ],
+      [{ id: uid, full_name: name, user_role: role }],
       { onConflict: "id" }
     );
 
-    setProfileLoading(false);
+    setProfileSaving(false);
 
     if (error) {
-      setStatus(error.message);
+      // If this happens after we fix navigation, it’s RLS.
+      setStatus({ text: `Profile save failed: ${error.message}`, type: "error" });
       return;
     }
 
-    // ✅ important: reload from DB so UI doesn't "forget"
     await loadProfile(uid);
-
     setProfileSaved(true);
-    setStatus("Profile saved ✅");
+    setStatus({ text: "Profile saved ✅", type: "success" });
   }
 
   async function confirmPickup() {
     if (!accepted) return;
 
     if (timeLeft === "Expired") {
-      setStatus("This selection expired. Ask the seller to select you again.");
+      setStatus({ text: "This selection expired. Ask the seller to select you again.", type: "error" });
       return;
     }
 
@@ -260,11 +262,11 @@ export default function MePage() {
     setConfirming(false);
 
     if (error) {
-      setStatus(error.message);
+      setStatus({ text: error.message, type: "error" });
       return;
     }
 
-    setStatus("Confirmed ✅ Item is now reserved for you.");
+    setStatus({ text: "Confirmed ✅ Item is now reserved for you.", type: "success" });
     setAccepted(null);
     router.refresh();
   }
@@ -274,7 +276,7 @@ export default function MePage() {
 
     const { error } = await supabase.auth.signOut();
     if (error) {
-      setStatus(error.message);
+      setStatus({ text: error.message, type: "error" });
       return;
     }
 
@@ -286,7 +288,8 @@ export default function MePage() {
     setRole("");
     setProfileSaved(false);
     setAccepted(null);
-    setStatus("Signed out.");
+
+    setStatus({ text: "Signed out.", type: "info" });
 
     router.replace("/feed");
     router.refresh();
@@ -301,7 +304,10 @@ export default function MePage() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, maxWidth: 520 }}>
+    <div
+      // paddingBottom prevents any fixed bottom nav from blocking/stealing clicks
+      style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 100, maxWidth: 520 }}
+    >
       <button
         type="button"
         onClick={() => router.push("/feed")}
@@ -349,7 +355,7 @@ export default function MePage() {
               <button
                 type="button"
                 onClick={(e) => {
-                  e.preventDefault();
+                  safeClick(e);
                   confirmPickup();
                 }}
                 disabled={confirming || timeLeft === "Expired"}
@@ -396,7 +402,7 @@ export default function MePage() {
                 <button
                   type="button"
                   onClick={(e) => {
-                    e.preventDefault();
+                    safeClick(e);
                     setRole("student");
                   }}
                   style={{
@@ -416,7 +422,7 @@ export default function MePage() {
                 <button
                   type="button"
                   onClick={(e) => {
-                    e.preventDefault();
+                    safeClick(e);
                     setRole("faculty");
                   }}
                   style={{
@@ -437,23 +443,23 @@ export default function MePage() {
               <button
                 type="button"
                 onClick={(e) => {
-                  e.preventDefault();
+                  safeClick(e);
                   saveProfile();
                 }}
-                disabled={profileLoading}
+                disabled={profileSaving}
                 style={{
                   width: "100%",
                   padding: "10px 12px",
                   borderRadius: 10,
                   border: "1px solid #334155",
-                  background: profileLoading ? "#1f2937" : "#16a34a",
+                  background: profileSaving ? "#1f2937" : "#16a34a",
                   color: "white",
                   fontWeight: 900,
-                  cursor: profileLoading ? "not-allowed" : "pointer",
-                  opacity: profileLoading ? 0.85 : 1,
+                  cursor: profileSaving ? "not-allowed" : "pointer",
+                  opacity: profileSaving ? 0.85 : 1,
                 }}
               >
-                {profileLoading ? "Saving..." : "Save profile"}
+                {profileSaving ? "Saving..." : "Save profile"}
               </button>
 
               {profileSaved && <div style={{ marginTop: 10, opacity: 0.85 }}>Saved ✅</div>}
@@ -463,7 +469,10 @@ export default function MePage() {
           <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
             <button
               type="button"
-              onClick={() => router.push("/create")}
+              onClick={(e) => {
+                safeClick(e);
+                router.push("/create");
+              }}
               disabled={!profileComplete}
               title={!profileComplete ? "Complete your profile first" : "Post an item"}
               style={{
@@ -482,7 +491,10 @@ export default function MePage() {
 
             <button
               type="button"
-              onClick={signOut}
+              onClick={(e) => {
+                safeClick(e);
+                signOut();
+              }}
               style={{
                 background: "transparent",
                 padding: "10px 14px",
@@ -587,7 +599,7 @@ export default function MePage() {
         </div>
       )}
 
-      {status && <p style={{ marginTop: 14, color: "#f87171" }}>{status}</p>}
+      {status && <p style={{ marginTop: 14, color: statusColor }}>{status.text}</p>}
     </div>
   );
 }
