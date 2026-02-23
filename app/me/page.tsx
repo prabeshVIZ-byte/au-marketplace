@@ -8,26 +8,6 @@ type Role = "student" | "faculty" | "";
 type StatusType = "error" | "success" | "info";
 type UiStatus = { text: string; type: StatusType } | null;
 
-type AcceptedInterest = {
-  id: string;
-  item_id: string;
-  status: string;
-  accepted_expires_at: string | null;
-};
-
-function formatTimeLeft(expiresAt: string | null) {
-  if (!expiresAt) return null;
-  const end = new Date(expiresAt).getTime();
-  const now = Date.now();
-  const ms = end - now;
-  if (ms <= 0) return "Expired";
-
-  const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
 export default function MePage() {
   const router = useRouter();
 
@@ -42,44 +22,36 @@ export default function MePage() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
 
-  // profile
+  // profile (draft inputs)
   const [fullName, setFullName] = useState("");
   const [role, setRole] = useState<Role>("");
-  const [profileSaving, setProfileSaving] = useState(false);
-  const [profileLoadedOnce, setProfileLoadedOnce] = useState(false);
 
-  // accepted (buyer selection)
-  const [accepted, setAccepted] = useState<AcceptedInterest | null>(null);
-  const [confirming, setConfirming] = useState(false);
+  // profile (DB truth)
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [dbProfileComplete, setDbProfileComplete] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
 
   // status
   const [status, setStatus] = useState<UiStatus>(null);
 
-  const profileComplete = useMemo(() => {
+  const draftComplete = useMemo(() => {
     return fullName.trim().length > 0 && (role === "student" || role === "faculty");
   }, [fullName, role]);
-
-  const timeLeft = useMemo(
-    () => formatTimeLeft(accepted?.accepted_expires_at ?? null),
-    [accepted?.accepted_expires_at]
-  );
 
   const statusColor =
     status?.type === "error" ? "#f87171" : status?.type === "success" ? "#4ade80" : "#93c5fd";
 
-  function safeClick(e: React.MouseEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-  }
-
   async function loadProfile(uid: string) {
+    setProfileLoading(true);
+    setDbProfileComplete(false);
+
     const { data, error } = await supabase
       .from("profiles")
       .select("full_name,user_role,email")
       .eq("id", uid)
       .maybeSingle();
 
-    setProfileLoadedOnce(true);
+    setProfileLoading(false);
 
     if (error) {
       console.log("loadProfile:", error.message);
@@ -87,39 +59,21 @@ export default function MePage() {
       return;
     }
 
-    setFullName((data?.full_name ?? "") as string);
-    setRole(((data?.user_role ?? "") as Role) || "");
-  }
+    const dbName = (data?.full_name ?? "").trim();
+    const dbRole = (data?.user_role ?? "") as Role;
 
-  async function loadAcceptedInterest(uid: string) {
-    const { data, error } = await supabase
-      .from("interests")
-      .select("id,item_id,status,accepted_expires_at")
-      .eq("user_id", uid)
-      .eq("status", "accepted")
-      .order("accepted_at", { ascending: false })
-      .maybeSingle();
+    // hydrate inputs from DB
+    setFullName(dbName);
+    setRole(dbRole || "");
 
-    if (error) {
-      console.log("loadAcceptedInterest:", error.message);
-      setAccepted(null);
-      return;
-    }
-
-    if (data) {
-      setAccepted({
-        id: (data as any).id,
-        item_id: (data as any).item_id,
-        status: (data as any).status,
-        accepted_expires_at: (data as any).accepted_expires_at,
-      });
-    } else {
-      setAccepted(null);
-    }
+    const complete = dbName.length > 0 && (dbRole === "student" || dbRole === "faculty");
+    setDbProfileComplete(complete);
   }
 
   async function refreshUser() {
-    const { data } = await supabase.auth.getUser();
+    const { data, error } = await supabase.auth.getUser();
+    if (error) console.log("getUser:", error.message);
+
     const e = data.user?.email ?? null;
     const uid = data.user?.id ?? null;
 
@@ -128,12 +82,10 @@ export default function MePage() {
 
     if (uid) {
       await loadProfile(uid);
-      await loadAcceptedInterest(uid);
     } else {
       setFullName("");
       setRole("");
-      setAccepted(null);
-      setProfileLoadedOnce(false);
+      setDbProfileComplete(false);
     }
   }
 
@@ -150,14 +102,9 @@ export default function MePage() {
       refreshUser();
     });
 
-    const t = setInterval(() => {
-      setAccepted((prev) => (prev ? { ...prev } : prev));
-    }, 1000);
-
     return () => {
       alive = false;
       sub.subscription.unsubscribe();
-      clearInterval(t);
     };
   }, []);
 
@@ -204,13 +151,8 @@ export default function MePage() {
   async function saveProfile() {
     setStatus(null);
 
-    const name = fullName.trim();
-    if (!name) {
-      setStatus({ text: "Please enter your full name.", type: "error" });
-      return;
-    }
-    if (role !== "student" && role !== "faculty") {
-      setStatus({ text: "Please choose Student or Faculty.", type: "error" });
+    if (!draftComplete) {
+      setStatus({ text: "Enter full name and choose Student/Faculty.", type: "error" });
       return;
     }
 
@@ -232,10 +174,9 @@ export default function MePage() {
 
     const { error } = await supabase
       .from("profiles")
-      .upsert(
-        [{ id: uid, email: email ?? null, full_name: name, user_role: role }],
-        { onConflict: "id" }
-      );
+      .upsert([{ id: uid, email: email ?? null, full_name: fullName.trim(), user_role: role }], {
+        onConflict: "id",
+      });
 
     setProfileSaving(false);
 
@@ -246,33 +187,6 @@ export default function MePage() {
 
     await loadProfile(uid);
     setStatus({ text: "Profile saved ✅", type: "success" });
-  }
-
-  async function confirmPickup() {
-    if (!accepted) return;
-
-    if (timeLeft === "Expired") {
-      setStatus({ text: "This selection expired. Ask the seller to select you again.", type: "error" });
-      return;
-    }
-
-    setStatus(null);
-    setConfirming(true);
-
-    const { error } = await supabase.rpc("confirm_interest", {
-      p_interest_id: accepted.id,
-    });
-
-    setConfirming(false);
-
-    if (error) {
-      setStatus({ text: error.message, type: "error" });
-      return;
-    }
-
-    setStatus({ text: "Confirmed ✅ Item is now reserved for you.", type: "success" });
-    setAccepted(null);
-    router.refresh();
   }
 
   async function signOut() {
@@ -290,8 +204,7 @@ export default function MePage() {
     setPassword("");
     setFullName("");
     setRole("");
-    setAccepted(null);
-    setProfileLoadedOnce(false);
+    setDbProfileComplete(false);
 
     router.replace("/feed");
     router.refresh();
@@ -306,7 +219,16 @@ export default function MePage() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120, maxWidth: 520 }}>
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "black",
+        color: "white",
+        padding: 24,
+        paddingBottom: 120,
+        maxWidth: 520,
+      }}
+    >
       <button
         type="button"
         onClick={() => router.push("/feed")}
@@ -334,12 +256,11 @@ export default function MePage() {
           <div style={{ fontWeight: 900 }}>Logged in as</div>
           <div style={{ opacity: 0.85, marginTop: 6 }}>{userEmail}</div>
 
-          {/* PROFILE REQUIRED */}
-          {!profileComplete && (
+          {!dbProfileComplete && (
             <div style={{ marginTop: 14, border: "1px solid #334155", borderRadius: 12, padding: 14 }}>
               <div style={{ fontWeight: 900, marginBottom: 10 }}>
                 Complete profile (required)
-                {!profileLoadedOnce && <span style={{ marginLeft: 8, opacity: 0.7, fontSize: 12 }}>loading…</span>}
+                {profileLoading && <span style={{ marginLeft: 8, opacity: 0.7, fontSize: 12 }}>loading…</span>}
               </div>
 
               <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>Full name</label>
@@ -362,10 +283,7 @@ export default function MePage() {
               <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
                 <button
                   type="button"
-                  onClick={(e) => {
-                    safeClick(e);
-                    setRole("student");
-                  }}
+                  onClick={() => setRole("student")}
                   style={{
                     flex: 1,
                     padding: "10px 12px",
@@ -382,10 +300,7 @@ export default function MePage() {
 
                 <button
                   type="button"
-                  onClick={(e) => {
-                    safeClick(e);
-                    setRole("faculty");
-                  }}
+                  onClick={() => setRole("faculty")}
                   style={{
                     flex: 1,
                     padding: "10px 12px",
@@ -403,60 +318,20 @@ export default function MePage() {
 
               <button
                 type="button"
-                onClick={(e) => {
-                  safeClick(e);
-                  saveProfile();
-                }}
-                disabled={profileSaving}
+                onClick={saveProfile}
+                disabled={profileSaving || !draftComplete}
                 style={{
                   width: "100%",
                   padding: "10px 12px",
                   borderRadius: 10,
                   border: "1px solid #334155",
-                  background: profileSaving ? "#1f2937" : "#16a34a",
+                  background: profileSaving ? "#1f2937" : draftComplete ? "#16a34a" : "#14532d",
                   color: "white",
                   fontWeight: 900,
-                  cursor: profileSaving ? "not-allowed" : "pointer",
-                  opacity: profileSaving ? 0.85 : 1,
+                  cursor: profileSaving ? "not-allowed" : draftComplete ? "pointer" : "not-allowed",
                 }}
               >
                 {profileSaving ? "Saving..." : "Save profile"}
-              </button>
-            </div>
-          )}
-
-          {/* ACCEPTED */}
-          {accepted && (
-            <div style={{ marginTop: 14, border: "1px solid #14532d", borderRadius: 14, padding: 14, background: "#052e16" }}>
-              <div style={{ fontWeight: 900 }}>🎉 You were selected!</div>
-              <div style={{ opacity: 0.9, marginTop: 6 }}>
-                Confirm within: <b>{timeLeft ?? "—"}</b>
-              </div>
-              <div style={{ opacity: 0.75, marginTop: 6, fontSize: 12 }}>
-                Item ID: {accepted.item_id.slice(0, 8)}…
-              </div>
-
-              <button
-                type="button"
-                onClick={(e) => {
-                  safeClick(e);
-                  confirmPickup();
-                }}
-                disabled={confirming || timeLeft === "Expired"}
-                style={{
-                  marginTop: 10,
-                  width: "100%",
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "none",
-                  background: confirming ? "#14532d" : "#16a34a",
-                  color: "white",
-                  fontWeight: 900,
-                  cursor: confirming ? "not-allowed" : "pointer",
-                  opacity: confirming ? 0.85 : 1,
-                }}
-              >
-                {confirming ? "Confirming..." : "Confirm pickup"}
               </button>
             </div>
           )}
@@ -465,32 +340,26 @@ export default function MePage() {
           <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
             <button
               type="button"
-              onClick={(e) => {
-                safeClick(e);
-                router.push("/create");
-              }}
-              disabled={!profileComplete}
-              title={!profileComplete ? "Complete your profile first" : "Post an item"}
+              onClick={() => router.push("/create")}
+              disabled={!dbProfileComplete}
+              title={!dbProfileComplete ? "Complete your profile first" : "Post an item"}
               style={{
-                background: !profileComplete ? "#14532d" : "#16a34a",
+                background: !dbProfileComplete ? "#14532d" : "#16a34a",
                 padding: "10px 14px",
                 borderRadius: 10,
                 border: "none",
                 color: "white",
-                cursor: !profileComplete ? "not-allowed" : "pointer",
+                cursor: !dbProfileComplete ? "not-allowed" : "pointer",
                 fontWeight: 900,
-                opacity: !profileComplete ? 0.6 : 1,
+                opacity: !dbProfileComplete ? 0.6 : 1,
               }}
             >
-              Post an item
+              Post an Item
             </button>
 
             <button
               type="button"
-              onClick={(e) => {
-                safeClick(e);
-                signOut();
-              }}
+              onClick={signOut}
               style={{
                 background: "transparent",
                 padding: "10px 14px",
