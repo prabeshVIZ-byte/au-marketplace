@@ -1,6 +1,7 @@
+// /app/feed/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -45,118 +46,145 @@ export default function FeedPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // auth-aware UI
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // whether current user already expressed interest in each item
-  // key: itemId -> true/false
   const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
+  const [savingId, setSavingId] = useState<string | null>(null);
 
-  // photo modal
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState<string>("");
-
-  const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-  }, [userId, userEmail]);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
     const session = data.session;
     setUserId(session?.user?.id ?? null);
     setUserEmail(session?.user?.email ?? null);
-    return session?.user?.id ?? null;
   }
 
-  async function loadFeed() {
-    const { data, error } = await supabase
-      .from("v_feed_items")
-      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count")
-      .order("created_at", { ascending: false });
+  const isLoggedIn = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
 
-    if (error) throw new Error(error.message || "Error loading feed.");
-    return ((data as FeedRow[]) || []) as FeedRow[];
-  }
+  async function loadMyInterestMap(uid: string, itemIds: string[]) {
+    if (itemIds.length === 0) return;
 
-  async function loadMyInterests(uid: string, feedIds: string[]) {
-    if (!feedIds.length) {
-      setMyInterested({});
-      return;
-    }
-
-    // Fetch ONLY interests for items currently in the feed (efficient + correct)
     const { data, error } = await supabase
       .from("interests")
       .select("item_id")
       .eq("user_id", uid)
-      .in("item_id", feedIds);
+      .in("item_id", itemIds);
 
     if (error) {
-      console.log("loadMyInterests error:", error.message);
-      setMyInterested({});
+      console.log("loadMyInterestMap:", error.message);
       return;
     }
 
     const map: Record<string, boolean> = {};
-    for (const row of data ?? []) {
-      // row is { item_id: string }
-      map[(row as any).item_id] = true;
-    }
+    for (const r of (data as any[]) || []) map[String(r.item_id)] = true;
     setMyInterested(map);
   }
 
-  async function refreshAll() {
+  async function loadFeed() {
     setLoading(true);
     setErr(null);
 
     try {
-      const uid = await syncAuth();
-      const feed = await loadFeed();
-      setItems(feed);
+      const { data, error } = await supabase
+        .from("v_feed_items")
+        .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count")
+        .order("created_at", { ascending: false });
 
-      if (uid) {
-        await loadMyInterests(uid, feed.map((x) => x.id));
+      if (error) {
+        setItems([]);
+        setMyInterested({});
+        setErr(error.message || "Error loading feed.");
+        return;
+      }
+
+      const rows = (data as FeedRow[]) || [];
+      setItems(rows);
+
+      // ✅ IMPORTANT: hydrate myInterested so "Interested" doesn't reset after reload
+      if (isLoggedIn && userId) {
+        await loadMyInterestMap(
+          userId,
+          rows.map((x) => x.id)
+        );
       } else {
         setMyInterested({});
       }
     } catch (e: any) {
-      console.error("refreshAll exception:", e);
-      setItems([]);
-      setMyInterested({});
+      console.error("feed exception:", e);
       setErr(e?.message || "Unexpected error.");
     } finally {
       setLoading(false);
     }
   }
 
-  function handleInterestedClick(itemId: string) {
-    // NO QUICK ACTION HERE.
-    // If not logged in -> send to /me
-    // If logged in -> go to item page (interest form lives there)
+  async function toggleInterest(itemId: string) {
     if (!isLoggedIn || !userId) {
       router.push("/me");
       return;
     }
 
     const already = myInterested[itemId] === true;
+    setSavingId(itemId);
 
-    // If already interested, still go to the item page
-    // If not, go with ?interest=1 to nudge the page to open/scroll to the form (optional)
-    router.push(already ? `/item/${itemId}` : `/item/${itemId}?interest=1`);
+    if (already) {
+      const { error } = await supabase
+        .from("interests")
+        .delete()
+        .eq("item_id", itemId)
+        .eq("user_id", userId);
+
+      setSavingId(null);
+
+      if (error) {
+        alert(error.message);
+        return;
+      }
+
+      setMyInterested((p) => ({ ...p, [itemId]: false }));
+      setItems((prev) =>
+        prev.map((x) =>
+          x.id === itemId ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) } : x
+        )
+      );
+      return;
+    }
+
+    const { error } = await supabase.from("interests").insert([{ item_id: itemId, user_id: userId }]);
+
+    setSavingId(null);
+
+    if (error) {
+      const msg = error.message.toLowerCase();
+      if (msg.includes("duplicate") || msg.includes("unique")) {
+        setMyInterested((p) => ({ ...p, [itemId]: true }));
+        return;
+      }
+      alert(error.message);
+      return;
+    }
+
+    setMyInterested((p) => ({ ...p, [itemId]: true }));
+    setItems((prev) => prev.map((x) => (x.id === itemId ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
   }
 
   useEffect(() => {
-    refreshAll();
+    (async () => {
+      await syncAuth();
+      await loadFeed();
+    })();
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      refreshAll();
+      syncAuth();
+      loadFeed();
     });
 
     return () => sub.subscription.unsubscribe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ESC closes modal
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") setOpenImg(null);
@@ -170,9 +198,7 @@ export default function FeedPage() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
         <div>
           <h1 style={{ fontSize: 32, fontWeight: 800, margin: 0 }}>AU Zero Marketplace</h1>
-          <p style={{ marginTop: 8, opacity: 0.8 }}>
-            Browse publicly. Login with @ashland.edu to post or express interest.
-          </p>
+          <p style={{ marginTop: 8, opacity: 0.8 }}>Browse publicly. Login with @ashland.edu to post or express interest.</p>
         </div>
 
         <button
@@ -206,15 +232,9 @@ export default function FeedPage() {
 
       <h2 style={{ marginTop: 26 }}>Public Feed</h2>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-          gap: 16,
-        }}
-      >
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
         {items.map((item) => {
-          const alreadyInterested = myInterested[item.id] === true;
+          const mine = myInterested[item.id] === true;
           const expiryText = formatExpiry(item.expires_at);
 
           return (
@@ -227,7 +247,6 @@ export default function FeedPage() {
                 border: "1px solid #0f223f",
               }}
             >
-              {/* PHOTO */}
               {item.photo_url ? (
                 <button
                   type="button"
@@ -287,10 +306,9 @@ export default function FeedPage() {
               )}
 
               <div style={{ opacity: 0.75, marginTop: 6 }}>
-                {item.expires_at
-                  ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}`
-                  : "Contributor will de-list themselves"}
-                {/* keeping your existing display, expiryText is computed if you want it later */}
+                {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}` : "Contributor will de-list themselves"}
+                {"  "}
+                <span style={{ opacity: 0.75 }}>({expiryText})</span>
               </div>
 
               <div
@@ -306,9 +324,7 @@ export default function FeedPage() {
                 {item.description || "—"}
               </div>
 
-              <div style={{ opacity: 0.75, marginTop: 10 }}>
-                {item.interest_count || 0} interested
-              </div>
+              <div style={{ opacity: 0.75, marginTop: 10 }}>{item.interest_count || 0} interested</div>
 
               <button
                 onClick={() => router.push(`/item/${item.id}`)}
@@ -327,40 +343,35 @@ export default function FeedPage() {
                 View item
               </button>
 
-              {/* Interested: NO quick insert/delete. Routes to item page form. */}
               <button
-                onClick={() => handleInterestedClick(item.id)}
+                onClick={() => toggleInterest(item.id)}
+                disabled={savingId === item.id}
                 style={{
                   marginTop: 10,
                   width: "100%",
                   border: "1px solid #334155",
-                  background: !isLoggedIn
-                    ? "transparent"
-                    : alreadyInterested
-                    ? "#1f2937"
-                    : "#052e16",
+                  background: isLoggedIn ? (mine ? "#1f2937" : "#052e16") : "transparent",
                   color: "white",
                   padding: "10px 12px",
                   borderRadius: 10,
-                  cursor: "pointer",
+                  cursor: savingId === item.id ? "not-allowed" : "pointer",
                   fontWeight: 900,
+                  opacity: savingId === item.id ? 0.7 : 1,
                 }}
-                title={
-                  !isLoggedIn
-                    ? "Login required"
-                    : alreadyInterested
-                    ? "You already submitted interest (view item)"
-                    : "Open the interest form"
-                }
               >
-                {!isLoggedIn ? "Interested (login required)" : alreadyInterested ? "Interested ✓" : "Interested"}
+                {savingId === item.id
+                  ? "Saving…"
+                  : isLoggedIn
+                  ? mine
+                    ? "Uninterested"
+                    : "Interested"
+                  : "Interested (login required)"}
               </button>
             </div>
           );
         })}
       </div>
 
-      {/* FULLSCREEN IMAGE MODAL */}
       {openImg && (
         <div
           onClick={() => setOpenImg(null)}

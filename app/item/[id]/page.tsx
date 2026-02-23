@@ -1,8 +1,9 @@
+// /app/item/[id]/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter, useParams, useSearchParams } from "next/navigation";
+import { useRouter, useParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 type ItemRow = {
@@ -21,6 +22,11 @@ type ItemRow = {
 type SellerProfile = {
   full_name: string | null;
   user_role: string | null;
+};
+
+type MyInterestRow = {
+  id: string;
+  status: string | null;
 };
 
 function formatExpiry(expiresAt: string | null) {
@@ -48,8 +54,6 @@ function formatExpiry(expiresAt: string | null) {
 export default function ItemDetailPage() {
   const router = useRouter();
   const params = useParams();
-  const searchParams = useSearchParams();
-
   const itemId = (params?.id as string) || "";
 
   const [loading, setLoading] = useState(true);
@@ -62,7 +66,11 @@ export default function ItemDetailPage() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
   const [interestCount, setInterestCount] = useState(0);
-  const [mineInterested, setMineInterested] = useState(false);
+
+  // ✅ keep full interest state, not just boolean
+  const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
+  const mineInterested = !!myInterest?.id;
+
   const [saving, setSaving] = useState(false);
 
   // interest modal state
@@ -76,27 +84,19 @@ export default function ItemDetailPage() {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
 
-  const wantsInterest = searchParams?.get("interest") === "1";
-
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
     const session = data.session;
     setUserId(session?.user?.id ?? null);
     setUserEmail(session?.user?.email ?? null);
-    return session?.user?.id ?? null;
   }
 
-  async function loadItemAndState() {
+  async function loadItem() {
     if (!itemId) return;
-
     setLoading(true);
     setErr(null);
 
     try {
-      // 0) auth (so we can check "mine interest")
-      const uid = await syncAuth();
-
-      // 1) fetch item
       const { data: it, error: itErr } = await supabase
         .from("items")
         .select("id,title,description,category,pickup_location,is_anonymous,expires_at,photo_url,status,owner_id")
@@ -104,11 +104,8 @@ export default function ItemDetailPage() {
         .single();
 
       if (itErr) throw new Error(itErr.message);
+      setItem(it as ItemRow);
 
-      const itRow = it as ItemRow;
-      setItem(itRow);
-
-      // 2) interest count
       const { count, error: cntErr } = await supabase
         .from("interests")
         .select("*", { count: "exact", head: true })
@@ -116,24 +113,29 @@ export default function ItemDetailPage() {
 
       if (!cntErr) setInterestCount(count ?? 0);
 
-      // 3) check if I already expressed interest
+      // my interest row (id + status)
+      const { data: s } = await supabase.auth.getSession();
+      const uid = s.session?.user?.id ?? null;
+
       if (uid) {
         const { data: mine, error: mineErr } = await supabase
           .from("interests")
-          .select("id")
+          .select("id,status")
           .eq("item_id", itemId)
           .eq("user_id", uid)
           .maybeSingle();
 
-        if (!mineErr) setMineInterested(!!mine);
-        else setMineInterested(false);
+        if (!mineErr && mine) {
+          setMyInterest({ id: (mine as any).id, status: (mine as any).status ?? null });
+        } else {
+          setMyInterest(null);
+        }
       } else {
-        setMineInterested(false);
+        setMyInterest(null);
       }
 
-      // 4) fetch seller profile (only if NOT anonymous and owner_id exists)
-      const ownerId = itRow.owner_id ?? null;
-      const anon = !!itRow.is_anonymous;
+      const ownerId = (it as any)?.owner_id ?? null;
+      const anon = !!(it as any)?.is_anonymous;
 
       if (!anon && ownerId) {
         const { data: prof, error: pErr } = await supabase
@@ -151,20 +153,10 @@ export default function ItemDetailPage() {
       setErr(e?.message || "Failed to load item.");
       setItem(null);
       setSeller(null);
-      setMineInterested(false);
-      setInterestCount(0);
+      setMyInterest(null);
     } finally {
       setLoading(false);
     }
-  }
-
-  function openInterestModalOrRedirect() {
-    if (!isLoggedIn) {
-      router.push("/me");
-      return;
-    }
-    setInterestMsg(null);
-    setShowInterest(true);
   }
 
   async function submitInterest() {
@@ -179,32 +171,36 @@ export default function ItemDetailPage() {
     setInterestMsg(null);
 
     try {
-      const { error } = await supabase.from("interests").insert([
-        {
-          item_id: item.id,
-          user_id: userId,
-          status: "pending",
-          earliest_pickup: earliestPickup,
-          time_window: timeWindow,
-          note: note.trim() || null,
-        },
-      ]);
+      const { data, error } = await supabase
+        .from("interests")
+        .insert([
+          {
+            item_id: item.id,
+            user_id: userId,
+            status: "pending",
+            earliest_pickup: earliestPickup,
+            time_window: timeWindow,
+            note: note.trim() || null,
+          },
+        ])
+        .select("id,status")
+        .single();
 
       if (error) {
         const msg = error.message.toLowerCase();
         if (msg.includes("duplicate") || msg.includes("unique")) {
           setInterestMsg("You already sent an interest request for this item.");
-          setMineInterested(true);
+          // try to refresh myInterest
+          await loadItem();
           return;
         }
         throw new Error(error.message);
       }
 
-      setMineInterested(true);
+      setMyInterest({ id: (data as any).id, status: (data as any).status ?? "pending" });
       setInterestCount((c) => c + 1);
-      setInterestMsg("✅ Interest sent! If you’re selected, you’ll get a confirm button in your Account page.");
+      setInterestMsg("✅ Interest sent! Check Account page for updates.");
       setNote("");
-      // keep modal open so they see success message
     } catch (e: any) {
       setInterestMsg(e?.message || "Could not send interest.");
     } finally {
@@ -212,42 +208,64 @@ export default function ItemDetailPage() {
     }
   }
 
-  // initial load + reload on auth changes
+  // ✅ NEW: withdraw interest (Uninterested)
+  async function withdrawInterest() {
+    if (!item) return;
+
+    if (!isLoggedIn || !userId) {
+      router.push("/me");
+      return;
+    }
+
+    // if accepted, don't allow withdraw (keep your logic strict)
+    const st = (myInterest?.status ?? "").toLowerCase();
+    if (st === "accepted") {
+      setInterestMsg("This request was accepted. You can’t withdraw here.");
+      return;
+    }
+
+    setSaving(true);
+    setInterestMsg(null);
+
+    try {
+      const { error } = await supabase
+        .from("interests")
+        .delete()
+        .eq("item_id", item.id)
+        .eq("user_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      setMyInterest(null);
+      setInterestCount((c) => Math.max(0, c - 1));
+      setShowInterest(false);
+      setInterestMsg("Removed ✅");
+    } catch (e: any) {
+      setInterestMsg(e?.message || "Could not remove your request.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   useEffect(() => {
-    loadItemAndState();
+    syncAuth();
+    loadItem();
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      loadItemAndState();
+      syncAuth();
+      loadItem();
     });
 
     return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId]);
 
-  // AUTO-OPEN interest modal when coming from feed: /item/[id]?interest=1
-  useEffect(() => {
-    if (!wantsInterest) return;
-    if (loading) return;
-    if (!item) return;
-
-    // if not logged in, push to /me (as requested)
-    if (!isLoggedIn) {
-      router.push("/me");
-      return;
-    }
-
-    // if already interested, don't re-open modal
-    if (mineInterested) return;
-
-    // if not available, don't open
-    if ((item.status ?? "available") !== "available") return;
-
-    setInterestMsg(null);
-    setShowInterest(true);
-  }, [wantsInterest, loading, item, isLoggedIn, mineInterested, router]);
-
   const expiryText = formatExpiry(item?.expires_at ?? null);
   const showSellerName = item && !item.is_anonymous && seller?.full_name;
+
+  const myStatus = (myInterest?.status ?? "").toLowerCase();
+  const isAccepted = myStatus === "accepted";
+  const isPending = myStatus === "pending" || (mineInterested && !myStatus);
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -273,7 +291,6 @@ export default function ItemDetailPage() {
         <div style={{ maxWidth: 820 }}>
           <h1 style={{ fontSize: 34, fontWeight: 900, margin: 0 }}>{item.title}</h1>
 
-          {/* Meta */}
           <div style={{ marginTop: 10, opacity: 0.9 }}>
             {item.category && (
               <div style={{ marginTop: 6 }}>
@@ -288,19 +305,14 @@ export default function ItemDetailPage() {
             )}
 
             <div style={{ opacity: 0.85, marginTop: 10 }}>
-              {item.expires_at
-                ? `Available until: ${new Date(item.expires_at).toLocaleString()}`
-                : "Contributor will de-list themselves"}
+              {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleString()}` : "Contributor will de-list themselves"}
               {"  "}
               <span style={{ opacity: 0.75 }}>({expiryText})</span>
             </div>
 
             <div style={{ marginTop: 6 }}>
-              Seller:{" "}
-              <b>{item.is_anonymous ? "Anonymous" : showSellerName ? seller!.full_name : "Ashland user"}</b>
-              {!item.is_anonymous && seller?.user_role ? (
-                <span style={{ opacity: 0.8 }}> ({seller.user_role})</span>
-              ) : null}
+              Seller: <b>{item.is_anonymous ? "Anonymous" : showSellerName ? seller!.full_name : "Ashland user"}</b>
+              {!item.is_anonymous && seller?.user_role ? <span style={{ opacity: 0.8 }}> ({seller.user_role})</span> : null}
             </div>
 
             <div style={{ marginTop: 6 }}>
@@ -308,7 +320,6 @@ export default function ItemDetailPage() {
             </div>
           </div>
 
-          {/* Photo */}
           {item.photo_url ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
@@ -343,37 +354,38 @@ export default function ItemDetailPage() {
             </div>
           )}
 
-          {/* Description */}
-          <div
-            style={{
-              marginTop: 14,
-              background: "#0b1730",
-              border: "1px solid #0f223f",
-              borderRadius: 14,
-              padding: 14,
-            }}
-          >
+          <div style={{ marginTop: 14, background: "#0b1730", border: "1px solid #0f223f", borderRadius: 14, padding: 14 }}>
             <div style={{ fontWeight: 900, marginBottom: 8 }}>Description</div>
             <div style={{ opacity: 0.9, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-              {item.description && item.description.trim().toLowerCase() !== "until i cancel"
-                ? item.description
-                : "—"}
+              {item.description && item.description.trim().toLowerCase() !== "until i cancel" ? item.description : "—"}
             </div>
           </div>
 
-          {/* Actions */}
           <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {/* Primary Interest action */}
             <button
-              onClick={openInterestModalOrRedirect}
+              onClick={() => {
+                if (!isLoggedIn) {
+                  router.push("/me");
+                  return;
+                }
+
+                // if already interested -> allow withdraw (Uninterested) with separate button below
+                if (mineInterested) return;
+
+                setInterestMsg(null);
+                setShowInterest(true);
+              }}
               disabled={saving || mineInterested || (item.status ?? "available") !== "available"}
               style={{
-                background: !isLoggedIn
-                  ? "transparent"
-                  : mineInterested
-                  ? "#1f2937"
-                  : (item.status ?? "available") === "available"
-                  ? "#052e16"
-                  : "#111827",
+                background:
+                  !isLoggedIn
+                    ? "transparent"
+                    : mineInterested
+                    ? "#1f2937"
+                    : (item.status ?? "available") === "available"
+                    ? "#052e16"
+                    : "#111827",
                 border: "1px solid #334155",
                 color: "white",
                 padding: "10px 14px",
@@ -392,7 +404,26 @@ export default function ItemDetailPage() {
                   : "Send a pickup-ready request"
               }
             >
-              {!isLoggedIn ? "Interested (login required)" : mineInterested ? "Request sent" : "Interested"}
+              {!isLoggedIn ? "Interested (login required)" : mineInterested ? isAccepted ? "Accepted ✅" : "Request sent" : "Interested"}
+            </button>
+
+            {/* ✅ NEW: Uninterested button on item page */}
+            <button
+              onClick={withdrawInterest}
+              disabled={saving || !mineInterested || isAccepted}
+              title={!mineInterested ? "No request to remove" : isAccepted ? "Accepted request cannot be withdrawn here" : "Remove your request"}
+              style={{
+                background: "transparent",
+                border: "1px solid #334155",
+                color: "white",
+                padding: "10px 14px",
+                borderRadius: 10,
+                cursor: saving || !mineInterested || isAccepted ? "not-allowed" : "pointer",
+                fontWeight: 900,
+                opacity: saving || !mineInterested || isAccepted ? 0.55 : 1,
+              }}
+            >
+              Uninterested
             </button>
 
             <button
@@ -411,7 +442,6 @@ export default function ItemDetailPage() {
             </button>
           </div>
 
-          {/* Interest Modal */}
           {showInterest && (
             <div
               onClick={() => setShowInterest(false)}
@@ -519,17 +549,9 @@ export default function ItemDetailPage() {
                 </div>
 
                 {interestMsg && (
-                  <div
-                      style={{
-                        marginTop: 12,
-                        border: "1px solid #334155",
-                        borderRadius: 12,
-                        padding: 10,
-                        opacity: 0.9,
-                      }}
-                    >
-                      {interestMsg}
-                    </div>
+                  <div style={{ marginTop: 12, border: "1px solid #334155", borderRadius: 12, padding: 10, opacity: 0.9 }}>
+                    {interestMsg}
+                  </div>
                 )}
 
                 <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end" }}>
@@ -566,6 +588,13 @@ export default function ItemDetailPage() {
                   </button>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Inline status (optional) */}
+          {interestMsg && !showInterest && (
+            <div style={{ marginTop: 12, opacity: 0.9, border: "1px solid #334155", borderRadius: 12, padding: 10 }}>
+              {interestMsg}
             </div>
           )}
         </div>
