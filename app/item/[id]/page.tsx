@@ -1,4 +1,3 @@
-// /app/item/[id]/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
@@ -67,7 +66,7 @@ export default function ItemDetailPage() {
 
   const [interestCount, setInterestCount] = useState(0);
 
-  // ✅ keep full interest state, not just boolean
+  // keep full interest state, not just boolean
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
   const mineInterested = !!myInterest?.id;
 
@@ -83,6 +82,11 @@ export default function ItemDetailPage() {
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
+
+  const myStatus = (myInterest?.status ?? "").toLowerCase();
+  const isAccepted = myStatus === "accepted";
+  const isConfirmed = myStatus === "confirmed";
+  const isPending = myStatus === "pending" || (mineInterested && !myStatus);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
@@ -190,7 +194,6 @@ export default function ItemDetailPage() {
         const msg = error.message.toLowerCase();
         if (msg.includes("duplicate") || msg.includes("unique")) {
           setInterestMsg("You already sent an interest request for this item.");
-          // try to refresh myInterest
           await loadItem();
           return;
         }
@@ -208,7 +211,7 @@ export default function ItemDetailPage() {
     }
   }
 
-  // ✅ NEW: withdraw interest (Uninterested)
+  // STEP 1: Withdraw (Uninterested)
   async function withdrawInterest() {
     if (!item) return;
 
@@ -217,10 +220,9 @@ export default function ItemDetailPage() {
       return;
     }
 
-    // if accepted, don't allow withdraw (keep your logic strict)
     const st = (myInterest?.status ?? "").toLowerCase();
-    if (st === "accepted") {
-      setInterestMsg("This request was accepted. You can’t withdraw here.");
+    if (st === "accepted" || st === "confirmed") {
+      setInterestMsg("This request was accepted/confirmed. You can’t withdraw here.");
       return;
     }
 
@@ -228,12 +230,7 @@ export default function ItemDetailPage() {
     setInterestMsg(null);
 
     try {
-      const { error } = await supabase
-        .from("interests")
-        .delete()
-        .eq("item_id", item.id)
-        .eq("user_id", userId);
-
+      const { error } = await supabase.from("interests").delete().eq("item_id", item.id).eq("user_id", userId);
       if (error) throw new Error(error.message);
 
       setMyInterest(null);
@@ -247,6 +244,46 @@ export default function ItemDetailPage() {
     }
   }
 
+  // STEP 1: NEW confirm function (buyer confirms after seller accepted)
+  async function confirmPickup() {
+    if (!item || !userId || !myInterest?.id) return;
+
+    if (!isLoggedIn) {
+      router.push("/me");
+      return;
+    }
+
+    const st = (myInterest?.status ?? "").toLowerCase();
+    if (st !== "accepted") {
+      setInterestMsg("You can confirm only after the seller accepts.");
+      return;
+    }
+
+    setSaving(true);
+    setInterestMsg(null);
+
+    try {
+      const { error } = await supabase
+        .from("interests")
+        .update({ status: "confirmed" })
+        .eq("id", myInterest.id)
+        .eq("user_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      setMyInterest((prev) => (prev ? { ...prev, status: "confirmed" } : prev));
+      setInterestMsg("✅ Confirmed! Redirecting to messages...");
+
+      // change this if your messaging route is different
+      router.push("/messages");
+    } catch (e: any) {
+      setInterestMsg(e?.message || "Could not confirm.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // main bootstrap: auth + item load + auth change listener
   useEffect(() => {
     syncAuth();
     loadItem();
@@ -260,12 +297,33 @@ export default function ItemDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId]);
 
+  // STEP 3: realtime updates — so acceptance/confirmation shows instantly
+  useEffect(() => {
+    if (!itemId || !userId) return;
+
+    const channel = supabase
+      .channel(`interest-${itemId}-${userId}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "interests", filter: `item_id=eq.${itemId}` },
+        (payload) => {
+          const row: any = payload.new;
+
+          // only react to MY row
+          if (row?.user_id === userId) {
+            setMyInterest({ id: row.id, status: row.status ?? null });
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [itemId, userId]);
+
   const expiryText = formatExpiry(item?.expires_at ?? null);
   const showSellerName = item && !item.is_anonymous && seller?.full_name;
-
-  const myStatus = (myInterest?.status ?? "").toLowerCase();
-  const isAccepted = myStatus === "accepted";
-  const isPending = myStatus === "pending" || (mineInterested && !myStatus);
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -305,8 +363,7 @@ export default function ItemDetailPage() {
             )}
 
             <div style={{ opacity: 0.85, marginTop: 10 }}>
-              {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleString()}` : "Contributor will de-list themselves"}
-              {"  "}
+              {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleString()}` : "Contributor will de-list themselves"}{" "}
               <span style={{ opacity: 0.75 }}>({expiryText})</span>
             </div>
 
@@ -361,31 +418,22 @@ export default function ItemDetailPage() {
             </div>
           </div>
 
+          {/* STEP 2: Buttons row includes Confirm button when accepted */}
           <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            {/* Primary Interest action */}
+            {/* Interested */}
             <button
               onClick={() => {
                 if (!isLoggedIn) {
                   router.push("/me");
                   return;
                 }
-
-                // if already interested -> allow withdraw (Uninterested) with separate button below
                 if (mineInterested) return;
-
                 setInterestMsg(null);
                 setShowInterest(true);
               }}
               disabled={saving || mineInterested || (item.status ?? "available") !== "available"}
               style={{
-                background:
-                  !isLoggedIn
-                    ? "transparent"
-                    : mineInterested
-                    ? "#1f2937"
-                    : (item.status ?? "available") === "available"
-                    ? "#052e16"
-                    : "#111827",
+                background: !isLoggedIn ? "transparent" : mineInterested ? "#1f2937" : (item.status ?? "available") === "available" ? "#052e16" : "#111827",
                 border: "1px solid #334155",
                 color: "white",
                 padding: "10px 14px",
@@ -404,27 +452,48 @@ export default function ItemDetailPage() {
                   : "Send a pickup-ready request"
               }
             >
-              {!isLoggedIn ? "Interested (login required)" : mineInterested ? isAccepted ? "Accepted ✅" : "Request sent" : "Interested"}
+              {!isLoggedIn ? "Interested (login required)" : mineInterested ? (isAccepted ? "Accepted ✅" : isConfirmed ? "Confirmed ✅" : "Request sent") : "Interested"}
             </button>
 
-            {/* ✅ NEW: Uninterested button on item page */}
+            {/* Uninterested */}
             <button
               onClick={withdrawInterest}
-              disabled={saving || !mineInterested || isAccepted}
-              title={!mineInterested ? "No request to remove" : isAccepted ? "Accepted request cannot be withdrawn here" : "Remove your request"}
+              disabled={saving || !mineInterested || isAccepted || isConfirmed}
+              title={!mineInterested ? "No request to remove" : isAccepted || isConfirmed ? "Accepted/confirmed cannot be withdrawn here" : "Remove your request"}
               style={{
                 background: "transparent",
                 border: "1px solid #334155",
                 color: "white",
                 padding: "10px 14px",
                 borderRadius: 10,
-                cursor: saving || !mineInterested || isAccepted ? "not-allowed" : "pointer",
+                cursor: saving || !mineInterested || isAccepted || isConfirmed ? "not-allowed" : "pointer",
                 fontWeight: 900,
-                opacity: saving || !mineInterested || isAccepted ? 0.55 : 1,
+                opacity: saving || !mineInterested || isAccepted || isConfirmed ? 0.55 : 1,
               }}
             >
               Uninterested
             </button>
+
+            {/* ✅ Confirm pickup (ONLY after accepted, disappears after confirmed) */}
+            {isAccepted && !isConfirmed && (
+              <button
+                onClick={confirmPickup}
+                disabled={saving}
+                title="Confirm you will pick up, then go to messages"
+                style={{
+                  background: "#14532d",
+                  border: "1px solid #166534",
+                  color: "white",
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  cursor: saving ? "not-allowed" : "pointer",
+                  fontWeight: 900,
+                  opacity: saving ? 0.75 : 1,
+                }}
+              >
+                Confirm pickup ✅
+              </button>
+            )}
 
             <button
               onClick={() => router.push("/me")}
@@ -485,9 +554,7 @@ export default function ItemDetailPage() {
                   </button>
                 </div>
 
-                <div style={{ marginTop: 12, opacity: 0.85 }}>
-                  Tell the lister when you can pick up. This helps them choose someone who will actually show up.
-                </div>
+                <div style={{ marginTop: 12, opacity: 0.85 }}>Tell the lister when you can pick up. This helps them choose someone who will actually show up.</div>
 
                 <div style={{ marginTop: 14 }}>
                   <label style={{ display: "block", fontWeight: 800, marginBottom: 6 }}>Earliest pickup</label>
@@ -591,11 +658,9 @@ export default function ItemDetailPage() {
             </div>
           )}
 
-          {/* Inline status (optional) */}
+          {/* Inline status */}
           {interestMsg && !showInterest && (
-            <div style={{ marginTop: 12, opacity: 0.9, border: "1px solid #334155", borderRadius: 12, padding: 10 }}>
-              {interestMsg}
-            </div>
+            <div style={{ marginTop: 12, opacity: 0.9, border: "1px solid #334155", borderRadius: 12, padding: 10 }}>{interestMsg}</div>
           )}
         </div>
       )}
