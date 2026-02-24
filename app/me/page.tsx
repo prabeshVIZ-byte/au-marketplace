@@ -2,7 +2,7 @@
 
 export const dynamic = "force-dynamic";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
@@ -11,7 +11,7 @@ type ProfileRow = {
   id: string;
   email: string | null;
   full_name: string | null;
-  user_role: string | null;
+  user_role: string | null; // "student" | "faculty" etc
   created_at?: string;
 };
 
@@ -35,13 +35,38 @@ type MyRequestRow = {
   } | null;
 };
 
+type IncomingRequestRow = {
+  item_id: string;
+  user_id: string;
+  created_at: string | null;
+  owner_seen_at: string | null;
+  owner_dismissed_at: string | null;
+
+  items: {
+    id: string;
+    title: string;
+    photo_url: string | null;
+    status: string | null;
+    owner_id: string;
+  } | null;
+
+  requester: {
+    full_name: string | null;
+    email: string | null;
+    user_role: string | null;
+  } | null;
+};
+
 function shortId(id: string) {
   if (!id) return "";
   return id.slice(0, 6) + "…" + id.slice(-4);
 }
 
-function isAshlandEmail(email: string) {
-  return email.trim().toLowerCase().endsWith("@ashland.edu");
+function formatWhen(ts: string | null | undefined) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString();
 }
 
 export default function AccountPage() {
@@ -54,10 +79,12 @@ export default function AccountPage() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
   const [profile, setProfile] = useState<ProfileRow | null>(null);
-  const [tab, setTab] = useState<"listings" | "requests">("listings");
+
+  const [tab, setTab] = useState<"listings" | "my_requests" | "requests_for_you">("listings");
 
   const [myItems, setMyItems] = useState<MyItemRow[]>([]);
   const [myRequests, setMyRequests] = useState<MyRequestRow[]>([]);
+  const [incomingRequests, setIncomingRequests] = useState<IncomingRequestRow[]>([]);
 
   const [stats, setStats] = useState<{ listed: number; requested: number; chats: number }>({
     listed: 0,
@@ -67,19 +94,15 @@ export default function AccountPage() {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-
-  // --- LOGIN UI STATE (email + password) ---
-  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
-  const [loginEmail, setLoginEmail] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
-  const [authBusy, setAuthBusy] = useState(false);
-  const [loginMsg, setLoginMsg] = useState<string | null>(null);
-  const loginEmailRef = useRef<HTMLInputElement | null>(null);
-  const loginPasswordRef = useRef<HTMLInputElement | null>(null);
+  const [dismissingKey, setDismissingKey] = useState<string | null>(null);
 
   const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && isAshlandEmail(userEmail);
+    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
+
+  const unseenIncomingCount = useMemo(() => {
+    return incomingRequests.filter((r) => !r.owner_dismissed_at && !r.owner_seen_at).length;
+  }, [incomingRequests]);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
@@ -91,18 +114,85 @@ export default function AccountPage() {
     return { uid, email };
   }
 
+ async function loadIncomingRequests(uid: string) {
+  const { data, error } = await supabase
+    .from("interests")
+    .select(
+      `
+      item_id,
+      user_id,
+      created_at,
+      owner_seen_at,
+      owner_dismissed_at,
+      items:items!inner(id,title,photo_url,status,owner_id),
+      requester:profiles(full_name,email,user_role)
+    `
+    )
+    .eq("items.owner_id", uid)
+    .is("owner_dismissed_at", null)
+    .order("created_at", { ascending: false })
+    .returns<IncomingRequestRow[]>(); // ✅ important
+
+  if (error) {
+    console.warn("incoming requests load:", error.message);
+    setIncomingRequests([]);
+    return;
+  }
+
+  setIncomingRequests(data ?? []); // ✅ no cast needed
+}
+  async function markIncomingSeen(uid: string) {
+    // Mark all unseen incoming requests as seen
+    // We only update rows that are currently unseen (owner_seen_at is null) and not dismissed
+    const { error } = await supabase
+      .from("interests")
+      .update({ owner_seen_at: new Date().toISOString() })
+      .is("owner_seen_at", null)
+      .is("owner_dismissed_at", null)
+      // Only rows for items you own. Policy enforces this, but we also limit scope:
+      .in(
+        "item_id",
+        incomingRequests
+          .filter((r) => r.items?.owner_id === uid)
+          .map((r) => r.item_id)
+      );
+
+    if (error) {
+      console.warn("mark seen:", error.message);
+      return;
+    }
+
+    // Update UI instantly
+    setIncomingRequests((prev) =>
+      prev.map((r) => (r.owner_seen_at || r.owner_dismissed_at ? r : { ...r, owner_seen_at: new Date().toISOString() }))
+    );
+  }
+
+  async function dismissIncoming(itemId: string, requesterId: string) {
+    // Dismiss = hide it from inbox
+    const key = `${itemId}:${requesterId}`;
+    setDismissingKey(key);
+
+    const { error } = await supabase
+      .from("interests")
+      .update({ owner_dismissed_at: new Date().toISOString() })
+      .eq("item_id", itemId)
+      .eq("user_id", requesterId);
+
+    setDismissingKey(null);
+
+    if (error) return alert(error.message);
+
+    setIncomingRequests((prev) => prev.filter((r) => !(r.item_id === itemId && r.user_id === requesterId)));
+  }
+
   async function loadAll() {
     setLoading(true);
     setErr(null);
 
     const { uid, email } = await syncAuth();
-
-    // Not logged in? Don't redirect. Just show login UI.
-    if (!uid || !email || !isAshlandEmail(email)) {
-      setProfile(null);
-      setMyItems([]);
-      setMyRequests([]);
-      setStats({ listed: 0, requested: 0, chats: 0 });
+    if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
+      router.push("/me");
       setLoading(false);
       return;
     }
@@ -137,7 +227,7 @@ export default function AccountPage() {
       setMyItems(iData ?? []);
     }
 
-    // 3) my requests
+    // 3) my requests (things I requested)
     const { data: rData, error: rErr } = await supabase
       .from("interests")
       .select("item_id,created_at,items:items(id,title,photo_url,status)")
@@ -146,13 +236,16 @@ export default function AccountPage() {
       .returns<MyRequestRow[]>();
 
     if (rErr) {
-      console.warn("requests load:", rErr.message);
+      console.warn("my requests load:", rErr.message);
       setMyRequests([]);
     } else {
       setMyRequests(rData ?? []);
     }
 
-    // 4) stats
+    // 4) incoming requests for your items (notifications)
+    await loadIncomingRequests(uid);
+
+    // 5) stats
     const listed = (iData ?? []).length;
     const requested = (rData ?? []).length;
 
@@ -174,10 +267,7 @@ export default function AccountPage() {
   async function signOut() {
     await supabase.auth.signOut();
     setDrawerOpen(false);
-    setLoginMsg(null);
-    setLoginEmail("");
-    setLoginPassword("");
-    await loadAll(); // flips UI back to login
+    router.push("/me");
   }
 
   async function deleteListing(id: string) {
@@ -193,74 +283,13 @@ export default function AccountPage() {
     setStats((s) => ({ ...s, listed: Math.max(0, s.listed - 1) }));
   }
 
-  // --- Email + password auth ---
-  async function doAuth() {
-    setErr(null);
-    setLoginMsg(null);
-
-    const email = loginEmail.trim().toLowerCase();
-    const password = loginPassword;
-
-    if (!email) {
-      setLoginMsg("Enter your Ashland email.");
-      loginEmailRef.current?.focus();
-      return;
-    }
-    if (!isAshlandEmail(email)) {
-      setLoginMsg("Use your @ashland.edu email.");
-      loginEmailRef.current?.focus();
-      return;
-    }
-    if (!password || password.length < 6) {
-      setLoginMsg("Password must be at least 6 characters.");
-      loginPasswordRef.current?.focus();
-      return;
-    }
-
-    setAuthBusy(true);
-
-    if (authMode === "signin") {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      setAuthBusy(false);
-
-      if (error) {
-        setLoginMsg(error.message);
-        return;
-      }
-
-      await loadAll();
-      router.push("/feed");
-      return;
-    }
-
-    // signup
-    const { error } = await supabase.auth.signUp({ email, password });
-    setAuthBusy(false);
-
-    if (error) {
-      setLoginMsg(error.message);
-      return;
-    }
-
-    // If you turned OFF "Confirm email", user is logged in immediately.
-    // If not, Supabase might require confirmation → you'll see no session.
-    await loadAll();
-
-    const { data } = await supabase.auth.getSession();
-    if (data.session) {
-      router.push("/feed");
-    } else {
-      setLoginMsg(
-        "Account created. If you turned OFF email confirmation in Supabase, you should be logged in immediately. If not, check Supabase Auth settings."
-      );
-    }
-  }
-
   useEffect(() => {
     loadAll();
+
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
       loadAll();
     });
+
     return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -273,168 +302,53 @@ export default function AccountPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const displayName = (profile?.full_name ?? "").trim() || (userEmail ? userEmail.split("@")[0] : "") || "Account";
+  // When user opens "Requests for your items", mark as seen and clear dot
+  useEffect(() => {
+    (async () => {
+      if (tab !== "requests_for_you") return;
+      if (!userId) return;
+      if (unseenIncomingCount <= 0) return;
+      await markIncomingSeen(userId);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  const displayName =
+    (profile?.full_name ?? "").trim() ||
+    (userEmail ? userEmail.split("@")[0] : "") ||
+    "Account";
+
   const roleLabel = (profile?.user_role ?? "").trim() || "member";
 
   if (loading) {
     return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Loading…</div>;
   }
 
-  // ============================
-  // NOT LOGGED IN VIEW
-  // ============================
   if (!isLoggedIn) {
     return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
         <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Account</h1>
-        <p style={{ opacity: 0.8, marginTop: 10 }}>
-          Use your <b>@ashland.edu</b> email to {authMode === "signin" ? "sign in" : "sign up"}.
-        </p>
+        <p style={{ opacity: 0.8, marginTop: 10 }}>Please log in with your @ashland.edu email.</p>
 
-        <div style={{ marginTop: 14, display: "flex", gap: 10 }}>
-          <button
-            type="button"
-            onClick={() => {
-              setAuthMode("signin");
-              setLoginMsg(null);
-            }}
-            style={{
-              borderRadius: 999,
-              border: authMode === "signin" ? "1px solid #16a34a" : "1px solid #334155",
-              background: authMode === "signin" ? "rgba(22,163,74,0.18)" : "transparent",
-              color: "white",
-              padding: "10px 12px",
-              cursor: "pointer",
-              fontWeight: 900,
-            }}
-          >
-            Sign in
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setAuthMode("signup");
-              setLoginMsg(null);
-            }}
-            style={{
-              borderRadius: 999,
-              border: authMode === "signup" ? "1px solid #16a34a" : "1px solid #334155",
-              background: authMode === "signup" ? "rgba(22,163,74,0.18)" : "transparent",
-              color: "white",
-              padding: "10px 12px",
-              cursor: "pointer",
-              fontWeight: 900,
-            }}
-          >
-            Sign up
-          </button>
-        </div>
-
-        <div
+        <button
+          onClick={() => router.push("/me")}
           style={{
             marginTop: 14,
-            borderRadius: 16,
-            border: "1px solid #0f223f",
-            background: "#0b1730",
-            padding: 14,
-            maxWidth: 520,
+            border: "1px solid #334155",
+            background: "transparent",
+            color: "white",
+            padding: "10px 12px",
+            borderRadius: 12,
+            cursor: "pointer",
+            fontWeight: 900,
           }}
         >
-          <div style={{ fontWeight: 1000, marginBottom: 10 }}>
-            {authMode === "signin" ? "Sign in" : "Create account"}
-          </div>
-
-          <input
-            ref={loginEmailRef}
-            value={loginEmail}
-            onChange={(e) => setLoginEmail(e.target.value)}
-            placeholder="you@ashland.edu"
-            autoComplete="email"
-            inputMode="email"
-            style={{
-              width: "100%",
-              height: 44,
-              borderRadius: 12,
-              border: "1px solid #334155",
-              background: "rgba(0,0,0,0.35)",
-              color: "white",
-              padding: "0 12px",
-              outline: "none",
-              fontWeight: 700,
-            }}
-          />
-
-          <input
-            ref={loginPasswordRef}
-            value={loginPassword}
-            onChange={(e) => setLoginPassword(e.target.value)}
-            placeholder="Password (min 6 chars)"
-            type="password"
-            autoComplete={authMode === "signin" ? "current-password" : "new-password"}
-            style={{
-              width: "100%",
-              height: 44,
-              borderRadius: 12,
-              border: "1px solid #334155",
-              background: "rgba(0,0,0,0.35)",
-              color: "white",
-              padding: "0 12px",
-              outline: "none",
-              fontWeight: 700,
-              marginTop: 10,
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") doAuth();
-            }}
-          />
-
-          <button
-            onClick={doAuth}
-            disabled={authBusy}
-            style={{
-              marginTop: 12,
-              width: "100%",
-              height: 44,
-              borderRadius: 12,
-              border: "1px solid rgba(22,163,74,0.55)",
-              background: authBusy ? "rgba(22,163,74,0.10)" : "rgba(22,163,74,0.18)",
-              color: "white",
-              cursor: authBusy ? "not-allowed" : "pointer",
-              fontWeight: 1000,
-            }}
-          >
-            {authBusy ? "Working…" : authMode === "signin" ? "Sign in" : "Sign up"}
-          </button>
-
-          {loginMsg && <div style={{ marginTop: 10, opacity: 0.9 }}>{loginMsg}</div>}
-
-          <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>You can still browse the feed without logging in.</div>
-
-          <button
-            onClick={() => router.push("/feed")}
-            style={{
-              marginTop: 10,
-              width: "100%",
-              height: 44,
-              borderRadius: 12,
-              border: "1px solid #334155",
-              background: "transparent",
-              color: "white",
-              cursor: "pointer",
-              fontWeight: 900,
-            }}
-          >
-            Browse feed
-          </button>
-        </div>
+          Go to login
+        </button>
       </div>
     );
   }
 
-  // ============================
-  // LOGGED IN VIEW (your account UI)
-  // ============================
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
       {/* Top header */}
@@ -500,10 +414,19 @@ export default function AccountPage() {
       >
         {[
           { label: "Listed", value: stats.listed },
-          { label: "Requested", value: stats.requested },
+          { label: "My requests", value: stats.requested },
           { label: "Chats", value: stats.chats },
         ].map((s) => (
-          <div key={s.label} style={{ borderRadius: 14, border: "1px solid #0f223f", background: "#0b1730", padding: 12, textAlign: "center" }}>
+          <div
+            key={s.label}
+            style={{
+              borderRadius: 14,
+              border: "1px solid #0f223f",
+              background: "#0b1730",
+              padding: 12,
+              textAlign: "center",
+            }}
+          >
             <div style={{ fontSize: 20, fontWeight: 1000 }}>{s.value}</div>
             <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>{s.label}</div>
           </div>
@@ -546,17 +469,21 @@ export default function AccountPage() {
       {err && <p style={{ color: "#f87171", marginTop: 12 }}>{err}</p>}
 
       {/* Tabs */}
-      <div style={{ marginTop: 16, display: "flex", gap: 10 }}>
+      <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
         {[
           { key: "listings", label: "Listings" },
-          { key: "requests", label: "Requests" },
+          { key: "my_requests", label: "My requests" },
+          { key: "requests_for_you", label: "Requests for your items" },
         ].map((t) => {
           const active = tab === (t.key as any);
+          const showDot = t.key === "requests_for_you" && unseenIncomingCount > 0;
+
           return (
             <button
               key={t.key}
               onClick={() => setTab(t.key as any)}
               style={{
+                position: "relative",
                 borderRadius: 999,
                 border: active ? "1px solid #16a34a" : "1px solid #334155",
                 background: active ? "rgba(22,163,74,0.18)" : "transparent",
@@ -567,12 +494,28 @@ export default function AccountPage() {
               }}
             >
               {t.label}
+              {showDot && (
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 6,
+                    right: 6,
+                    width: 10,
+                    height: 10,
+                    borderRadius: 999,
+                    background: "#ef4444",
+                    boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
+                  }}
+                  aria-label="New requests"
+                  title="New requests"
+                />
+              )}
             </button>
           );
         })}
       </div>
 
-      {/* Listings tab */}
+      {/* LISTINGS */}
       {tab === "listings" && (
         <>
           <div style={{ marginTop: 14, opacity: 0.85 }}>
@@ -670,8 +613,8 @@ export default function AccountPage() {
         </>
       )}
 
-      {/* Requests tab */}
-      {tab === "requests" && (
+      {/* MY REQUESTS */}
+      {tab === "my_requests" && (
         <>
           <div style={{ marginTop: 14, opacity: 0.85 }}>These are items you requested (your “Request Item” clicks).</div>
 
@@ -767,6 +710,141 @@ export default function AccountPage() {
         </>
       )}
 
+      {/* REQUESTS FOR YOUR ITEMS (INBOX) */}
+      {tab === "requests_for_you" && (
+        <>
+          <div style={{ marginTop: 14, opacity: 0.85 }}>
+            People who requested your listings. Click one to jump straight to that item’s management screen.
+          </div>
+
+          {incomingRequests.length === 0 ? (
+            <div style={{ marginTop: 14, border: "1px solid #0f223f", background: "#0b1730", borderRadius: 16, padding: 14 }}>
+              <div style={{ fontWeight: 1000 }}>No one has requested your items yet.</div>
+              <div style={{ opacity: 0.8, marginTop: 6 }}>When someone clicks “Request item”, it will show up here.</div>
+            </div>
+          ) : (
+            <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+              {incomingRequests.map((r) => {
+                const it = r.items;
+                const req = r.requester;
+
+                const requesterName =
+                  (req?.full_name ?? "").trim() ||
+                  (req?.email ? req.email.split("@")[0] : "") ||
+                  "Someone";
+
+                const key = `${r.item_id}:${r.user_id}`;
+                const isUnseen = !r.owner_seen_at && !r.owner_dismissed_at;
+
+                return (
+                  <div
+                    key={key}
+                    style={{
+                      border: "1px solid #0f223f",
+                      background: "#0b1730",
+                      borderRadius: 16,
+                      padding: 14,
+                      display: "flex",
+                      gap: 12,
+                      alignItems: "center",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 54,
+                        height: 54,
+                        borderRadius: 14,
+                        border: "1px solid #0f223f",
+                        background: "#020617",
+                        overflow: "hidden",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "#94a3b8",
+                        flexShrink: 0,
+                        position: "relative",
+                      }}
+                      title={it?.title ?? "Item"}
+                    >
+                      {it?.photo_url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={it.photo_url} alt={it.title ?? "Item"} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      ) : (
+                        "—"
+                      )}
+
+                      {isUnseen && (
+                        <span
+                          style={{
+                            position: "absolute",
+                            top: 6,
+                            right: 6,
+                            width: 10,
+                            height: 10,
+                            borderRadius: 999,
+                            background: "#ef4444",
+                            boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
+                          }}
+                          title="New"
+                        />
+                      )}
+                    </div>
+
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 1000, fontSize: 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {requesterName} requested <span style={{ opacity: 0.92 }}>{it?.title ?? "your item"}</span>
+                      </div>
+
+                      <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>
+                        {req?.user_role ? <span style={{ marginRight: 8 }}>{req.user_role}</span> : null}
+                        {req?.email ? <span style={{ marginRight: 8 }}>{req.email}</span> : null}
+                        <span>Requested: <b>{formatWhen(r.created_at) || "—"}</b></span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+                      <button
+                        onClick={() => router.push(`/manage/${r.item_id}`)}
+                        style={{
+                          border: "1px solid #334155",
+                          background: "transparent",
+                          color: "white",
+                          padding: "10px 12px",
+                          borderRadius: 12,
+                          cursor: "pointer",
+                          fontWeight: 900,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        View
+                      </button>
+
+                      <button
+                        onClick={() => dismissIncoming(r.item_id, r.user_id)}
+                        disabled={dismissingKey === key}
+                        style={{
+                          border: "1px solid #7f1d1d",
+                          background: "transparent",
+                          color: "white",
+                          padding: "10px 12px",
+                          borderRadius: 12,
+                          cursor: dismissingKey === key ? "not-allowed" : "pointer",
+                          fontWeight: 900,
+                          opacity: dismissingKey === key ? 0.7 : 1,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {dismissingKey === key ? "…" : "Dismiss"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
       {/* Drawer */}
       {drawerOpen && (
         <div onClick={() => setDrawerOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 9998 }}>
@@ -805,7 +883,7 @@ export default function AccountPage() {
               <button
                 onClick={() => {
                   setDrawerOpen(false);
-                  setTab("requests");
+                  setTab("requests_for_you");
                 }}
                 style={{
                   width: "100%",
@@ -819,7 +897,7 @@ export default function AccountPage() {
                   textAlign: "left",
                 }}
               >
-                Requests
+                Requests for your items {unseenIncomingCount > 0 ? `• ${unseenIncomingCount} new` : ""}
               </button>
 
               <button
