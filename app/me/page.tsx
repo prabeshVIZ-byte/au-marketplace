@@ -204,36 +204,97 @@ export default function AccountPage() {
   }
 
   async function loadIncomingRequests(uid: string) {
-    setIncomingLoading(true);
+  setIncomingLoading(true);
 
-    const { data, error } = await supabase
-      .from("interests")
-      .select(
-        `
-        item_id,
-        user_id,
-        created_at,
-        owner_seen_at,
-        owner_dismissed_at,
-        items:items!inner(id,title,photo_url,status,owner_id),
-        requester:profiles(full_name,email,user_role)
+  // 1) Get interests for items YOU own (join through interests.item_id -> items.id)
+  // NOTE: the FK name may be interests_item_id_fkey (most common). If yours differs,
+  // Supabase will show the correct name in the error message. Replace it accordingly.
+  const { data: base, error } = await supabase
+    .from("interests")
+    .select(
       `
-      )
-      .eq("items.owner_id", uid)
-      .is("owner_dismissed_at", null)
-      .order("created_at", { ascending: false })
-      .returns<IncomingRequestRow[]>();
+      item_id,
+      user_id,
+      created_at,
+      owner_seen_at,
+      owner_dismissed_at,
+      items:items!interests_item_id_fkey(id,title,photo_url,status,owner_id)
+    `
+    )
+    .eq("items.owner_id", uid)
+    .is("owner_dismissed_at", null)
+    .order("created_at", { ascending: false });
 
-    if (error) {
-      console.warn("incoming requests load:", error.message);
-      setIncomingRequests([]);
-      setIncomingLoading(false);
-      return;
-    }
-
-    setIncomingRequests(data ?? []);
+  if (error) {
+    console.warn("incoming requests load:", error.message);
+    setIncomingRequests([]);
     setIncomingLoading(false);
+    return;
   }
+
+  const rowsRaw = base ?? [];
+  const rows = rowsRaw.map((r: any) => ({
+    item_id: String(r.item_id),
+    user_id: String(r.user_id),
+    created_at: r.created_at !== undefined && r.created_at !== null ? String(r.created_at) : null,
+    owner_seen_at: r.owner_seen_at !== undefined && r.owner_seen_at !== null ? String(r.owner_seen_at) : null,
+    owner_dismissed_at: r.owner_dismissed_at !== undefined && r.owner_dismissed_at !== null ? String(r.owner_dismissed_at) : null,
+    items: Array.isArray(r.items) && r.items.length > 0
+      ? {
+          id: String(r.items[0].id),
+          title: String(r.items[0].title),
+          photo_url: r.items[0].photo_url !== undefined && r.items[0].photo_url !== null ? String(r.items[0].photo_url) : null,
+          status: r.items[0].status !== undefined && r.items[0].status !== null ? String(r.items[0].status) : null,
+          owner_id: String(r.items[0].owner_id),
+        }
+      : r.items && typeof r.items === "object"
+      ? {
+          id: String(r.items.id),
+          title: String(r.items.title),
+          photo_url: r.items.photo_url !== undefined && r.items.photo_url !== null ? String(r.items.photo_url) : null,
+          status: r.items.status !== undefined && r.items.status !== null ? String(r.items.status) : null,
+          owner_id: String(r.items.owner_id),
+        }
+      : null,
+  }));
+
+  // 2) Fetch requester profiles separately (no FK guessing)
+  const userIds = Array.from(new Set(rows.map((r) => r.user_id).filter(Boolean)));
+  let profMap: Record<string, { full_name: string | null; email: string | null; user_role: string | null }> = {};
+
+  if (userIds.length > 0) {
+    const { data: profs, error: pErr } = await supabase
+      .from("profiles")
+      .select("id,full_name,email,user_role")
+      .in("id", userIds);
+
+    if (pErr) {
+      console.warn("incoming requester profiles load:", pErr.message);
+    } else {
+      (profs ?? []).forEach((p: any) => {
+        profMap[p.id] = {
+          full_name: p.full_name ?? null,
+          email: p.email ?? null,
+          user_role: p.user_role ?? null,
+        };
+      });
+    }
+  }
+
+  // 3) Merge into your IncomingRequestRow shape
+  const merged: IncomingRequestRow[] = rows.map((r) => ({
+    item_id: r.item_id,
+    user_id: r.user_id,
+    created_at: r.created_at,
+    owner_seen_at: r.owner_seen_at,
+    owner_dismissed_at: r.owner_dismissed_at,
+    items: r.items,
+    requester: profMap[r.user_id] ?? null,
+  }));
+
+  setIncomingRequests(merged);
+  setIncomingLoading(false);
+}
 
   async function markIncomingSeen() {
     const unseen = incomingRequests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at);
