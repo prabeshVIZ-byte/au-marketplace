@@ -4,18 +4,27 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
+type ItemMini =
+  | {
+      id: string;
+      title: string;
+      photo_url: string | null;
+      status: string | null;
+    }
+  | {
+      id: string;
+      title: string;
+      photo_url: string | null;
+      status: string | null;
+    }[];
+
 type ThreadRow = {
   id: string;
   item_id: string;
   owner_id: string;
   requester_id: string;
   created_at: string;
-  items?: {
-    id: string;
-    title: string;
-    photo_url: string | null;
-    status: string | null;
-  } | null;
+  items?: ItemMini | null; // can be object or array depending on join typing
 };
 
 type MessageRow = {
@@ -57,14 +66,13 @@ export default function MessagesPage() {
     // 1) Load threads + item info
     const { data: tData, error: tErr } = await supabase
       .from("threads")
-      // join items through the FK threads.item_id -> items.id
       .select("id,item_id,owner_id,requester_id,created_at,items:items(id,title,photo_url,status)")
       .or(`owner_id.eq.${uid},requester_id.eq.${uid}`)
       .order("created_at", { ascending: false });
 
     if (tErr) throw tErr;
 
-    const tRows = (tData as ThreadRow[]) || [];
+    const tRows = (((tData as unknown) as ThreadRow[]) || []) as ThreadRow[];
     setThreads(tRows);
 
     // 2) Load last messages for those threads (one query)
@@ -83,8 +91,8 @@ export default function MessagesPage() {
     if (mErr) throw mErr;
 
     const latest: Record<string, MessageRow | undefined> = {};
-    for (const m of (mData as MessageRow[]) || []) {
-      // because it's ordered DESC, first time we see a thread_id is the newest message
+    for (const m of ((mData as MessageRow[]) || []) as MessageRow[]) {
+      // because ordered DESC, the first time we see thread_id is newest msg
       if (!latest[m.thread_id]) latest[m.thread_id] = m;
     }
     setLastByThread(latest);
@@ -99,7 +107,6 @@ export default function MessagesPage() {
       const uid = data.session?.user?.id ?? null;
       const email = data.session?.user?.email ?? null;
 
-      // if not logged in or not ashland, we just show the login prompt
       if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
         setLoading(false);
         return;
@@ -116,10 +123,10 @@ export default function MessagesPage() {
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
       syncAuth();
-      // reload inbox after auth changes
       supabase.auth.getSession().then(({ data }) => {
         const uid = data.session?.user?.id ?? null;
         const email = data.session?.user?.email ?? null;
+
         if (uid && email && email.toLowerCase().endsWith("@ashland.edu")) {
           loadInbox(uid).catch(() => {});
         } else {
@@ -205,15 +212,18 @@ export default function MessagesPage() {
         ) : (
           <div style={{ display: "grid", gap: 12 }}>
             {rows.map(({ t, otherId, last }) => {
-              const itemTitle = t.items?.title ?? "Item";
-              const itemPhoto = t.items?.photo_url ?? null;
+              const itemObj = Array.isArray(t.items) ? t.items[0] : t.items;
+
+              const itemTitle = itemObj?.title ?? "Item";
+              const itemPhoto = itemObj?.photo_url ?? null;
+
               const lastPreview = last?.body ? (last.body.length > 70 ? last.body.slice(0, 70) + "…" : last.body) : "No messages yet";
               const when = last?.created_at ? new Date(last.created_at).toLocaleString() : new Date(t.created_at).toLocaleString();
 
               return (
                 <button
                   key={t.id}
-                  onClick={() => router.push(`/messages/${t.id}`)} // chat page next step
+                  onClick={() => router.push(`/messages/${t.id}`)}
                   style={{
                     textAlign: "left",
                     borderRadius: 18,
@@ -259,7 +269,16 @@ export default function MessagesPage() {
                         With: <span style={{ opacity: 0.9, fontWeight: 900 }}>{shortId(otherId)}</span>
                       </div>
 
-                      <div style={{ marginTop: 6, fontSize: 13, opacity: 0.78, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      <div
+                        style={{
+                          marginTop: 6,
+                          fontSize: 13,
+                          opacity: 0.78,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
                         {lastPreview}
                       </div>
                     </div>
