@@ -464,33 +464,122 @@ export default function AccountPage() {
           </button>
         </div>
 
-        {/* Stats + tiny action icons INSIDE */}
-        <div style={statsRow}>
-          <div style={statTile}>
-            <div style={statValue}>{stats.listed}</div>
-            <div style={statLabel}>Listed</div>
-          </div>
-
-          <div style={statTile}>
-            <div style={statValue}>{stats.requested}</div>
-            <div style={statLabel}>Requested</div>
-          </div>
-
-          <div style={{ ...statTile, position: "relative" }}>
-            <div style={statValue}>{stats.chats}</div>
-            <div style={statLabel}>Chats</div>
-
-            {/* ✅ Action icons (small) */}
-            <div style={statActions}>
-              <button onClick={() => router.push("/create")} style={miniIconBtn} aria-label="List new item" title="List new item">
-                ＋
-              </button>
-              <button onClick={() => router.push("/messages")} style={miniIconBtn} aria-label="Messages" title="Messages">
-                💬
-              </button>
-            </div>
-          </div>
+              {/* Stats (fixed: action icons won't overlap on phone) */}
+      <div
+        style={{
+          marginTop: 14,
+          border: "1px solid #0f223f",
+          background: "#020617",
+          borderRadius: 16,
+          padding: 12,
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 1fr)",
+          gap: 10,
+        }}
+      >
+        {/* Listed */}
+        <div
+          style={{
+            borderRadius: 14,
+            border: "1px solid #0f223f",
+            background: "#0b1730",
+            padding: 12,
+            textAlign: "center",
+          }}
+        >
+          <div style={{ fontSize: 20, fontWeight: 1000 }}>{stats.listed}</div>
+          <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>Listed</div>
         </div>
+
+        {/* Requested */}
+        <div
+          style={{
+            borderRadius: 14,
+            border: "1px solid #0f223f",
+            background: "#0b1730",
+            padding: 12,
+            textAlign: "center",
+          }}
+        >
+          <div style={{ fontSize: 20, fontWeight: 1000 }}>{stats.requested}</div>
+          <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>Requested</div>
+        </div>
+
+        {/* Chats (+ icons) */}
+        <div
+          style={{
+            position: "relative",
+            borderRadius: 14,
+            border: "1px solid #0f223f",
+            background: "#0b1730",
+            padding: 12,
+            paddingTop: 44, // ✅ reserve space for the icon row on mobile
+            textAlign: "center",
+            overflow: "hidden",
+          }}
+        >
+          {/* Icon row pinned top-right */}
+          <div
+            style={{
+              position: "absolute",
+              top: 10,
+              right: 10,
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+            }}
+          >
+            {/* Create (+) */}
+            <button
+              onClick={() => router.push("/create")}
+              aria-label="List new item"
+              title="List new item"
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 12,
+                border: "1px solid rgba(22,163,74,0.55)",
+                background: "rgba(22,163,74,0.14)",
+                color: "white",
+                cursor: "pointer",
+                fontWeight: 1000,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                lineHeight: 1,
+              }}
+            >
+              +
+            </button>
+
+            {/* Messages */}
+            <button
+              onClick={() => router.push("/messages")}
+              aria-label="Open messages"
+              title="Open messages"
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 12,
+                border: "1px solid #334155",
+                background: "transparent",
+                color: "white",
+                cursor: "pointer",
+                fontWeight: 900,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                lineHeight: 1,
+              }}
+            >
+              💬
+            </button>
+          </div>
+
+          <div style={{ fontSize: 20, fontWeight: 1000 }}>{stats.chats}</div>
+          <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>Chats</div>
+        </div>
+      </div>
 
         {err && <div style={{ marginTop: 10, color: "#f87171", fontWeight: 900 }}>{err}</div>}
 
