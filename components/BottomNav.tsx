@@ -10,11 +10,10 @@ export default function BottomNav() {
     { href: "/feed", label: "Feed", icon: "🏠" },
     { href: "/create", label: "List", icon: "➕" },
     { href: "/messages", label: "Messages", icon: "💬" },
-    { href: "/my-items", label: "My", icon: "📦" },
     { href: "/me", label: "Account", icon: "👤" },
   ];
 
-  const NAV_HEIGHT = 84;
+  const NAV_HEIGHT = 88;
 
   return (
     <div
@@ -39,31 +38,31 @@ export default function BottomNav() {
           borderTop: "1px solid #0f223f",
           backdropFilter: "blur(10px)",
           WebkitBackdropFilter: "blur(10px)",
-          padding: "10px 10px",
+          padding: "10px 12px",
           paddingBottom: "calc(10px + env(safe-area-inset-bottom))",
         }}
       >
         <div
           style={{
-            maxWidth: 980,
+            maxWidth: 760,
             margin: "0 auto",
             width: "100%",
             display: "grid",
-            gridTemplateColumns: "repeat(5, 1fr)",
-            gap: 8,
+            gridTemplateColumns: "repeat(4, 1fr)",
+            gap: 10,
             alignItems: "center",
           }}
         >
           {items.map((it) => {
-            const active = pathname === it.href;
+            // active if exact match OR if we're inside a messages thread (/messages/xxx)
+            const active = pathname === it.href || (it.href === "/messages" && pathname.startsWith("/messages/"));
 
             return (
               <Link
                 key={it.href}
                 href={it.href}
-                aria-label={it.label}
                 style={{
-                  height: 54,
+                  height: 56,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -73,46 +72,18 @@ export default function BottomNav() {
                   border: active ? "1px solid #16a34a" : "1px solid #334155",
                   background: active ? "rgba(22,163,74,0.18)" : "transparent",
                   fontWeight: 900,
+                  gap: 8,
                   userSelect: "none",
                   WebkitTapHighlightColor: "transparent",
                   touchAction: "manipulation",
-                  padding: "0 10px",
-                  minWidth: 0,
                 }}
               >
-                {/* icon */}
-                <span style={{ fontSize: 18, lineHeight: 1 }}>{it.icon}</span>
-
-                {/* label: desktop shows always, mobile shows only for active */}
-                <span className={`navLabel ${active ? "showOnMobile" : ""}`}>{it.label}</span>
+                <span style={{ fontSize: 18 }}>{it.icon}</span>
+                <span style={{ fontSize: 14 }}>{it.label}</span>
               </Link>
             );
           })}
         </div>
-
-        {/* Inline CSS so you don't need to touch global files */}
-        <style jsx>{`
-          .navLabel {
-            margin-left: 8px;
-            font-size: 13px;
-            white-space: nowrap;
-          }
-
-          /* Mobile: hide labels by default */
-          @media (max-width: 480px) {
-            .navLabel {
-              display: none;
-              margin-left: 0;
-            }
-            /* Only show label for active tab */
-            .showOnMobile {
-              display: inline;
-              margin-left: 6px;
-              font-size: 12px;
-              opacity: 0.95;
-            }
-          }
-        `}</style>
       </footer>
     </div>
   );
