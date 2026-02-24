@@ -1,3 +1,4 @@
+// /app/feed/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -17,6 +18,7 @@ type FeedRow = {
   expires_at: string | null;
   interest_count: number;
   owner_role?: OwnerRole; // from view
+  owner_id?: string | null; // ✅ MUST be selected from v_feed_items
 };
 
 function formatExpiry(expiresAt: string | null) {
@@ -50,7 +52,7 @@ function isAvailableNow(row: FeedRow) {
 
 function statusBadge(status: string | null) {
   const st = (status ?? "available").toLowerCase();
-  const base = {
+  const base: React.CSSProperties = {
     padding: "6px 10px",
     borderRadius: 999,
     fontSize: 12,
@@ -58,7 +60,7 @@ function statusBadge(status: string | null) {
     border: "1px solid rgba(148,163,184,0.25)",
     background: "rgba(0,0,0,0.35)",
     color: "rgba(255,255,255,0.82)",
-  } as const;
+  };
 
   if (st === "reserved") {
     return {
@@ -97,7 +99,7 @@ export default function FeedPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // "Interested" map stays the same in DB, but UI will say "Requested"
+  // Requested map (interests table)
   const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
 
@@ -105,10 +107,14 @@ export default function FeedPage() {
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState<string>("");
 
-  // filters (LOGIC UNCHANGED)
+  // filters
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
   const [availabilityFilter, setAvailabilityFilter] = useState<"all" | "available" | "expiring_3d">("all");
+
+  const isLoggedIn = useMemo(() => {
+    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  }, [userId, userEmail]);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
@@ -116,8 +122,6 @@ export default function FeedPage() {
     setUserId(session?.user?.id ?? null);
     setUserEmail(session?.user?.email ?? null);
   }
-
-  const isLoggedIn = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
 
   async function loadMyInterestMap(uid: string, itemIds: string[]) {
     if (itemIds.length === 0) return;
@@ -139,9 +143,10 @@ export default function FeedPage() {
     setLoading(true);
     setErr(null);
 
+    // ✅ IMPORTANT: owner_id must exist in v_feed_items and be selected
     const { data, error } = await supabase
       .from("v_feed_items")
-      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
+      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role,owner_id")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -167,7 +172,6 @@ export default function FeedPage() {
     setLoading(false);
   }
 
-  // same DB logic, new UI label "Request item"
   async function toggleRequest(itemId: string) {
     if (!isLoggedIn || !userId) {
       router.push("/me");
@@ -223,9 +227,7 @@ export default function FeedPage() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        setOpenImg(null);
-      }
+      if (e.key === "Escape") setOpenImg(null);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -240,7 +242,6 @@ export default function FeedPage() {
     return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
   }, [items]);
 
-  // ✅ LOGIC UNCHANGED (still uses availabilityFilter even though UI won’t show it)
   const filteredItems = useMemo(() => {
     const now = Date.now();
     const threeDays = 3 * 24 * 60 * 60 * 1000;
@@ -257,6 +258,7 @@ export default function FeedPage() {
       if (availabilityFilter === "available") {
         if (!isAvailableNow(x)) return false;
       }
+
       if (availabilityFilter === "expiring_3d") {
         if (!isAvailableNow(x)) return false;
         if (!x.expires_at) return false;
@@ -311,17 +313,8 @@ export default function FeedPage() {
       {err && <p style={{ color: "#f87171", marginTop: 12 }}>{err}</p>}
       {loading && <p style={{ marginTop: 12, opacity: 0.8 }}>Loading…</p>}
 
-      {/* ✅ NEW: Compact filter bar (UI ONLY) */}
-      <div
-        style={{
-          marginTop: 18,
-          display: "flex",
-          alignItems: "center",
-          gap: 14,
-          flexWrap: "wrap",
-        }}
-      >
-        {/* Lister type dropdown (same roleFilter state) */}
+      {/* filter bar */}
+      <div style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ fontSize: 12, opacity: 0.75, fontWeight: 900 }}>Lister</div>
           <select
@@ -345,7 +338,6 @@ export default function FeedPage() {
           </select>
         </div>
 
-        {/* Category pills (same categoryFilter state) */}
         <div
           style={{
             display: "flex",
@@ -383,7 +375,6 @@ export default function FeedPage() {
           })}
         </div>
 
-        {/* Reset (same logic; also resets availabilityFilter even though UI doesn’t show it) */}
         <button
           type="button"
           onClick={() => {
@@ -426,6 +417,9 @@ export default function FeedPage() {
         {filteredItems.map((item) => {
           const mine = myInterested[item.id] === true;
           const expiryText = formatExpiry(item.expires_at);
+
+          // ✅ block requesting your own listing
+          const isMineListing = !!userId && !!item.owner_id && item.owner_id === userId;
 
           return (
             <div
@@ -545,12 +539,17 @@ export default function FeedPage() {
                   </button>
 
                   <button
-                    onClick={() => toggleRequest(item.id)}
-                    disabled={savingId === item.id}
+                    onClick={() => {
+                      if (isMineListing) return;
+                      toggleRequest(item.id);
+                    }}
+                    disabled={savingId === item.id || isMineListing}
                     style={{
                       width: "100%",
                       border: "1px solid rgba(52,211,153,0.25)",
-                      background: isLoggedIn
+                      background: isMineListing
+                        ? "rgba(255,255,255,0.03)"
+                        : isLoggedIn
                         ? mine
                           ? "rgba(16,185,129,0.16)"
                           : "rgba(16,185,129,0.24)"
@@ -558,12 +557,14 @@ export default function FeedPage() {
                       color: "rgba(255,255,255,0.9)",
                       padding: "10px 12px",
                       borderRadius: 14,
-                      cursor: savingId === item.id ? "not-allowed" : "pointer",
+                      cursor: savingId === item.id || isMineListing ? "not-allowed" : "pointer",
                       fontWeight: 950,
-                      opacity: savingId === item.id ? 0.7 : 1,
+                      opacity: savingId === item.id || isMineListing ? 0.6 : 1,
                     }}
                   >
-                    {savingId === item.id
+                    {isMineListing
+                      ? "Your listing"
+                      : savingId === item.id
                       ? "Saving…"
                       : isLoggedIn
                       ? mine
