@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
 
 type Item = {
   id: string;
@@ -21,7 +22,7 @@ type InterestRow = {
   id: string;
   item_id: string;
   user_id: string;
-  status: "pending" | "accepted" | "reserved" | "declined" | "expired" | "completed" | string;
+  status: string;
   earliest_pickup: string | null;
   time_window: string | null;
   note: string | null;
@@ -69,7 +70,6 @@ export default function ManageItemPage() {
 
   const activeAccepted = useMemo(() => interests.find((x) => x.status === "accepted"), [interests]);
   const activeReserved = useMemo(() => interests.find((x) => x.status === "reserved"), [interests]);
-
   const itemStatus = item?.status ?? "available";
 
   async function loadAll() {
@@ -79,7 +79,6 @@ export default function ManageItemPage() {
     setErr(null);
 
     try {
-      // item
       const { data: it, error: itErr } = await supabase
         .from("items")
         .select("id,title,description,status,created_at,owner_id,reserved_interest_id,reserved_at,claimed_at")
@@ -89,12 +88,9 @@ export default function ManageItemPage() {
       if (itErr) throw new Error(itErr.message);
       setItem((it as Item) || null);
 
-      // interests
       const { data: ints, error: iErr } = await supabase
         .from("interests")
-        .select(
-          "id,item_id,user_id,status,earliest_pickup,time_window,note,created_at,accepted_at,accepted_expires_at,reserved_at,completed_at"
-        )
+        .select("id,item_id,user_id,status,earliest_pickup,time_window,note,created_at,accepted_at,accepted_expires_at,reserved_at,completed_at")
         .eq("item_id", id)
         .order("created_at", { ascending: true });
 
@@ -103,7 +99,6 @@ export default function ManageItemPage() {
       const list = (ints as InterestRow[]) || [];
       setInterests(list);
 
-      // profiles (only full_name)
       const uniqueUserIds = Array.from(new Set(list.map((x) => x.user_id)));
       if (uniqueUserIds.length > 0) {
         const { data: profs, error: pErr } = await supabase
@@ -112,8 +107,6 @@ export default function ManageItemPage() {
           .in("id", uniqueUserIds);
 
         if (pErr) {
-          // Not fatal; we can still show user_id short
-          console.log("profiles load:", pErr.message);
           setProfilesById({});
         } else {
           const map: Record<string, ProfileRow> = {};
@@ -133,14 +126,37 @@ export default function ManageItemPage() {
     }
   }
 
+  // ✅ ACCEPT: accept_interest RPC + ensure thread + system msg + redirect seller to thread
   async function acceptInterest(interestId: string) {
+    if (!item) return;
+
     setErr(null);
     setBusyAcceptId(interestId);
 
     try {
+      const acceptedInterest = interests.find((x) => x.id === interestId);
+      if (!acceptedInterest) throw new Error("Could not find the selected request.");
+
+      // 1) accept in DB
       const { error } = await supabase.rpc("accept_interest", { p_interest_id: interestId });
       if (error) throw new Error(error.message);
-      await loadAll();
+
+      // 2) create/find thread for seller(owner_id) & buyer(user_id)
+      const threadId = await ensureThread({
+        itemId: item.id,
+        ownerId: item.owner_id,
+        requesterId: acceptedInterest.user_id,
+      });
+
+      // 3) notify buyer inside chat (system message)
+      await insertSystemMessage({
+        threadId,
+        senderId: item.owner_id, // seller
+        body: "✅ Seller accepted your request. Please confirm pickup on the item page, then coordinate here.",
+      });
+
+      // 4) redirect seller to thread now
+      router.push(`/messages/${threadId}`);
     } catch (e: any) {
       setErr(e?.message || "Could not accept.");
     } finally {
@@ -165,10 +181,9 @@ export default function ManageItemPage() {
     }
   }
 
-  // live countdown refresh
   useEffect(() => {
     const t = setInterval(() => {
-      setInterests((prev) => [...prev]); // re-render for timers
+      setInterests((prev) => [...prev]);
     }, 1000);
     return () => clearInterval(t);
   }, []);
@@ -218,7 +233,6 @@ export default function ManageItemPage() {
 
       {item && (
         <div style={{ marginTop: 16, maxWidth: 980 }}>
-          {/* Item card */}
           <div style={{ background: "#0b1730", borderRadius: 14, padding: 16, border: "1px solid #0f223f" }}>
             <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>{item.title}</h1>
             <div style={{ marginTop: 10, opacity: 0.8 }}>{item.description || "—"}</div>
@@ -229,7 +243,6 @@ export default function ManageItemPage() {
               <Pill label={`Posted: ${new Date(item.created_at).toLocaleString()}`} />
             </div>
 
-            {/* Accepted notice */}
             {activeAccepted && itemStatus === "available" && (
               <div
                 style={{
@@ -250,7 +263,6 @@ export default function ManageItemPage() {
               </div>
             )}
 
-            {/* Reserved notice + Step 11 button */}
             {itemStatus === "reserved" && (
               <div
                 style={{
@@ -286,14 +298,9 @@ export default function ManageItemPage() {
               </div>
             )}
 
-            {itemStatus === "claimed" && (
-              <div style={{ marginTop: 14, opacity: 0.85 }}>
-                ✅ This item is claimed.
-              </div>
-            )}
+            {itemStatus === "claimed" && <div style={{ marginTop: 14, opacity: 0.85 }}>✅ This item is claimed.</div>}
           </div>
 
-          {/* Requests list */}
           <div style={{ marginTop: 14 }}>
             <h2 style={{ fontSize: 18, fontWeight: 900, margin: 0 }}>Requests</h2>
             <div style={{ marginTop: 10, opacity: 0.75 }}>
@@ -307,7 +314,6 @@ export default function ManageItemPage() {
                 {interests.map((r) => {
                   const prof = profilesById[r.user_id];
                   const display = prof?.full_name || `${r.user_id.slice(0, 8)}…`;
-
                   const timeLeft = r.status === "accepted" ? formatTimeLeft(r.accepted_expires_at) : null;
 
                   const alreadyLocked = itemStatus !== "available" || !!activeReserved || !!activeAccepted;
@@ -355,15 +361,6 @@ export default function ManageItemPage() {
                             background: canAccept ? "#052e16" : "transparent",
                             borderColor: canAccept ? "#14532d" : "#334155",
                           }}
-                          title={
-                            canAccept
-                              ? "Select this person"
-                              : alreadyLocked
-                              ? "Item already reserved/claimed or someone selected"
-                              : r.status !== "pending"
-                              ? "Not pending"
-                              : "Unavailable"
-                          }
                         >
                           {busyAcceptId === r.id ? "Selecting..." : "Accept"}
                         </button>

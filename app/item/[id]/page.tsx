@@ -4,6 +4,7 @@ export const dynamic = "force-dynamic";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
 
 type ItemRow = {
   id: string;
@@ -30,7 +31,6 @@ type MyInterestRow = {
 
 function formatExpiry(expiresAt: string | null) {
   if (!expiresAt) return "Until I cancel";
-
   const end = new Date(expiresAt);
   if (Number.isNaN(end.getTime())) return "Until I cancel";
 
@@ -65,8 +65,6 @@ export default function ItemDetailPage() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
   const [interestCount, setInterestCount] = useState(0);
-
-  // keep full interest state, not just boolean
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
   const mineInterested = !!myInterest?.id;
 
@@ -82,11 +80,6 @@ export default function ItemDetailPage() {
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
-
-  const myStatus = (myInterest?.status ?? "").toLowerCase();
-  const isAccepted = myStatus === "accepted";
-  const isConfirmed = myStatus === "confirmed";
-  const isPending = myStatus === "pending" || (mineInterested && !myStatus);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
@@ -110,14 +103,13 @@ export default function ItemDetailPage() {
       if (itErr) throw new Error(itErr.message);
       setItem(it as ItemRow);
 
-      const { count, error: cntErr } = await supabase
+      const { count } = await supabase
         .from("interests")
         .select("*", { count: "exact", head: true })
         .eq("item_id", itemId);
 
-      if (!cntErr) setInterestCount(count ?? 0);
+      setInterestCount(count ?? 0);
 
-      // my interest row (id + status)
       const { data: s } = await supabase.auth.getSession();
       const uid = s.session?.user?.id ?? null;
 
@@ -129,11 +121,8 @@ export default function ItemDetailPage() {
           .eq("user_id", uid)
           .maybeSingle();
 
-        if (!mineErr && mine) {
-          setMyInterest({ id: (mine as any).id, status: (mine as any).status ?? null });
-        } else {
-          setMyInterest(null);
-        }
+        if (!mineErr && mine) setMyInterest({ id: (mine as any).id, status: (mine as any).status ?? null });
+        else setMyInterest(null);
       } else {
         setMyInterest(null);
       }
@@ -142,14 +131,8 @@ export default function ItemDetailPage() {
       const anon = !!(it as any)?.is_anonymous;
 
       if (!anon && ownerId) {
-        const { data: prof, error: pErr } = await supabase
-          .from("profiles")
-          .select("full_name,user_role")
-          .eq("id", ownerId)
-          .single();
-
-        if (!pErr) setSeller(prof as SellerProfile);
-        else setSeller(null);
+        const { data: prof } = await supabase.from("profiles").select("full_name,user_role").eq("id", ownerId).single();
+        setSeller((prof as SellerProfile) || null);
       } else {
         setSeller(null);
       }
@@ -202,8 +185,9 @@ export default function ItemDetailPage() {
 
       setMyInterest({ id: (data as any).id, status: (data as any).status ?? "pending" });
       setInterestCount((c) => c + 1);
-      setInterestMsg("✅ Interest sent! Check Account page for updates.");
+      setInterestMsg("✅ Interest sent! Wait for seller acceptance.");
       setNote("");
+      setShowInterest(false);
     } catch (e: any) {
       setInterestMsg(e?.message || "Could not send interest.");
     } finally {
@@ -211,7 +195,6 @@ export default function ItemDetailPage() {
     }
   }
 
-  // STEP 1: Withdraw (Uninterested)
   async function withdrawInterest() {
     if (!item) return;
 
@@ -221,8 +204,8 @@ export default function ItemDetailPage() {
     }
 
     const st = (myInterest?.status ?? "").toLowerCase();
-    if (st === "accepted" || st === "confirmed") {
-      setInterestMsg("This request was accepted/confirmed. You can’t withdraw here.");
+    if (st === "accepted" || st === "reserved") {
+      setInterestMsg("This request is already accepted/reserved. You can’t withdraw here.");
       return;
     }
 
@@ -244,8 +227,8 @@ export default function ItemDetailPage() {
     }
   }
 
-  // STEP 1: NEW confirm function (buyer confirms after seller accepted)
-  async function confirmPickup() {
+  // ✅ Buyer confirm: reserve via RPC + ensure thread + system msg + redirect to chat thread
+  async function confirmPickupAndChat() {
     if (!item || !userId || !myInterest?.id) return;
 
     if (!isLoggedIn) {
@@ -253,9 +236,14 @@ export default function ItemDetailPage() {
       return;
     }
 
-    const st = (myInterest?.status ?? "").toLowerCase();
+    const st = (myInterest.status ?? "").toLowerCase();
     if (st !== "accepted") {
       setInterestMsg("You can confirm only after the seller accepts.");
+      return;
+    }
+
+    if (!item.owner_id) {
+      setInterestMsg("Missing seller id. Cannot start chat.");
       return;
     }
 
@@ -263,27 +251,33 @@ export default function ItemDetailPage() {
     setInterestMsg(null);
 
     try {
-      const { error } = await supabase
-        .from("interests")
-        .update({ status: "confirmed" })
-        .eq("id", myInterest.id)
-        .eq("user_id", userId);
+      // 1) reserve atomically
+      const { error: rpcErr } = await supabase.rpc("confirm_pickup", { p_interest_id: myInterest.id });
+      if (rpcErr) throw new Error(rpcErr.message);
 
-      if (error) throw new Error(error.message);
+      // 2) create/find thread
+      const threadId = await ensureThread({
+        itemId: item.id,
+        ownerId: item.owner_id,
+        requesterId: userId,
+      });
 
-      setMyInterest((prev) => (prev ? { ...prev, status: "confirmed" } : prev));
-      setInterestMsg("✅ Confirmed! Redirecting to messages...");
+      // 3) "notify" seller inside the thread
+      await insertSystemMessage({
+        threadId,
+        senderId: userId, // buyer
+        body: "✅ Buyer confirmed pickup. Let’s coordinate a time and place here.",
+      });
 
-      // change this if your messaging route is different
-      router.push("/messages");
+      // 4) go to chat
+      router.push(`/messages/${threadId}`);
     } catch (e: any) {
-      setInterestMsg(e?.message || "Could not confirm.");
+      setInterestMsg(e?.message || "Could not confirm pickup.");
     } finally {
       setSaving(false);
     }
   }
 
-  // main bootstrap: auth + item load + auth change listener
   useEffect(() => {
     syncAuth();
     loadItem();
@@ -297,7 +291,7 @@ export default function ItemDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId]);
 
-  // STEP 3: realtime updates — so acceptance/confirmation shows instantly
+  // ✅ realtime interest updates: buyer sees acceptance instantly
   useEffect(() => {
     if (!itemId || !userId) return;
 
@@ -308,8 +302,6 @@ export default function ItemDetailPage() {
         { event: "*", schema: "public", table: "interests", filter: `item_id=eq.${itemId}` },
         (payload) => {
           const row: any = payload.new;
-
-          // only react to MY row
           if (row?.user_id === userId) {
             setMyInterest({ id: row.id, status: row.status ?? null });
           }
@@ -324,6 +316,10 @@ export default function ItemDetailPage() {
 
   const expiryText = formatExpiry(item?.expires_at ?? null);
   const showSellerName = item && !item.is_anonymous && seller?.full_name;
+
+  const myStatus = (myInterest?.status ?? "").toLowerCase();
+  const isAccepted = myStatus === "accepted";
+  const isReserved = myStatus === "reserved";
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -418,7 +414,6 @@ export default function ItemDetailPage() {
             </div>
           </div>
 
-          {/* STEP 2: Buttons row includes Confirm button when accepted */}
           <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
             {/* Interested */}
             <button
@@ -433,7 +428,7 @@ export default function ItemDetailPage() {
               }}
               disabled={saving || mineInterested || (item.status ?? "available") !== "available"}
               style={{
-                background: !isLoggedIn ? "transparent" : mineInterested ? "#1f2937" : (item.status ?? "available") === "available" ? "#052e16" : "#111827",
+                background: !isLoggedIn ? "transparent" : mineInterested ? "#1f2937" : "#052e16",
                 border: "1px solid #334155",
                 color: "white",
                 padding: "10px 14px",
@@ -442,44 +437,41 @@ export default function ItemDetailPage() {
                 fontWeight: 900,
                 opacity: saving ? 0.75 : 1,
               }}
-              title={
-                !isLoggedIn
-                  ? "Login required"
-                  : mineInterested
-                  ? "You already sent a request"
-                  : (item.status ?? "available") !== "available"
-                  ? "Not available"
-                  : "Send a pickup-ready request"
-              }
             >
-              {!isLoggedIn ? "Interested (login required)" : mineInterested ? (isAccepted ? "Accepted ✅" : isConfirmed ? "Confirmed ✅" : "Request sent") : "Interested"}
+              {!isLoggedIn
+                ? "Interested (login required)"
+                : mineInterested
+                ? isReserved
+                  ? "Reserved ✅"
+                  : isAccepted
+                  ? "Accepted ✅"
+                  : "Request sent"
+                : "Interested"}
             </button>
 
             {/* Uninterested */}
             <button
               onClick={withdrawInterest}
-              disabled={saving || !mineInterested || isAccepted || isConfirmed}
-              title={!mineInterested ? "No request to remove" : isAccepted || isConfirmed ? "Accepted/confirmed cannot be withdrawn here" : "Remove your request"}
+              disabled={saving || !mineInterested || isAccepted || isReserved}
               style={{
                 background: "transparent",
                 border: "1px solid #334155",
                 color: "white",
                 padding: "10px 14px",
                 borderRadius: 10,
-                cursor: saving || !mineInterested || isAccepted || isConfirmed ? "not-allowed" : "pointer",
+                cursor: saving || !mineInterested || isAccepted || isReserved ? "not-allowed" : "pointer",
                 fontWeight: 900,
-                opacity: saving || !mineInterested || isAccepted || isConfirmed ? 0.55 : 1,
+                opacity: saving || !mineInterested || isAccepted || isReserved ? 0.55 : 1,
               }}
             >
               Uninterested
             </button>
 
-            {/* ✅ Confirm pickup (ONLY after accepted, disappears after confirmed) */}
-            {isAccepted && !isConfirmed && (
+            {/* ✅ Confirm pickup => go to thread */}
+            {isAccepted && (
               <button
-                onClick={confirmPickup}
+                onClick={confirmPickupAndChat}
                 disabled={saving}
-                title="Confirm you will pick up, then go to messages"
                 style={{
                   background: "#14532d",
                   border: "1px solid #166534",
@@ -554,7 +546,9 @@ export default function ItemDetailPage() {
                   </button>
                 </div>
 
-                <div style={{ marginTop: 12, opacity: 0.85 }}>Tell the lister when you can pick up. This helps them choose someone who will actually show up.</div>
+                <div style={{ marginTop: 12, opacity: 0.85 }}>
+                  Tell the lister when you can pick up. This helps them choose someone who will actually show up.
+                </div>
 
                 <div style={{ marginTop: 14 }}>
                   <label style={{ display: "block", fontWeight: 800, marginBottom: 6 }}>Earliest pickup</label>
@@ -658,9 +652,10 @@ export default function ItemDetailPage() {
             </div>
           )}
 
-          {/* Inline status */}
           {interestMsg && !showInterest && (
-            <div style={{ marginTop: 12, opacity: 0.9, border: "1px solid #334155", borderRadius: 12, padding: 10 }}>{interestMsg}</div>
+            <div style={{ marginTop: 12, opacity: 0.9, border: "1px solid #334155", borderRadius: 12, padding: 10 }}>
+              {interestMsg}
+            </div>
           )}
         </div>
       )}
