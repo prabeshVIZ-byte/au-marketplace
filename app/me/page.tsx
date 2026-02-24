@@ -54,7 +54,6 @@ export default function AccountPage() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
   const [profile, setProfile] = useState<ProfileRow | null>(null);
-
   const [tab, setTab] = useState<"listings" | "requests">("listings");
 
   const [myItems, setMyItems] = useState<MyItemRow[]>([]);
@@ -69,11 +68,14 @@ export default function AccountPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  // --- LOGIN UI STATE (NEW) ---
+  // --- LOGIN UI STATE (email + password) ---
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [loginEmail, setLoginEmail] = useState("");
-  const [sendingLink, setSendingLink] = useState(false);
+  const [loginPassword, setLoginPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
   const [loginMsg, setLoginMsg] = useState<string | null>(null);
-  const loginInputRef = useRef<HTMLInputElement | null>(null);
+  const loginEmailRef = useRef<HTMLInputElement | null>(null);
+  const loginPasswordRef = useRef<HTMLInputElement | null>(null);
 
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && isAshlandEmail(userEmail);
@@ -95,8 +97,7 @@ export default function AccountPage() {
 
     const { uid, email } = await syncAuth();
 
-    // If not logged in, DO NOT redirect anywhere.
-    // Just render the login view.
+    // Not logged in? Don't redirect. Just show login UI.
     if (!uid || !email || !isAshlandEmail(email)) {
       setProfile(null);
       setMyItems([]);
@@ -136,7 +137,7 @@ export default function AccountPage() {
       setMyItems(iData ?? []);
     }
 
-    // 3) my requests = interests joined to items
+    // 3) my requests
     const { data: rData, error: rErr } = await supabase
       .from("interests")
       .select("item_id,created_at,items:items(id,title,photo_url,status)")
@@ -161,7 +162,6 @@ export default function AccountPage() {
         .from("threads")
         .select("id", { count: "exact", head: true })
         .or(`owner_id.eq.${uid},requester_id.eq.${uid}`);
-
       if (!tErr) chats = count ?? 0;
     } catch {
       chats = 0;
@@ -176,8 +176,8 @@ export default function AccountPage() {
     setDrawerOpen(false);
     setLoginMsg(null);
     setLoginEmail("");
-    // stay on /me; loadAll will flip UI to login state
-    await loadAll();
+    setLoginPassword("");
+    await loadAll(); // flips UI back to login
   }
 
   async function deleteListing(id: string) {
@@ -193,54 +193,74 @@ export default function AccountPage() {
     setStats((s) => ({ ...s, listed: Math.max(0, s.listed - 1) }));
   }
 
-  // --- MAGIC LINK LOGIN (NEW) ---
-  async function sendMagicLink() {
+  // --- Email + password auth ---
+  async function doAuth() {
     setErr(null);
     setLoginMsg(null);
 
     const email = loginEmail.trim().toLowerCase();
+    const password = loginPassword;
+
     if (!email) {
-      setLoginMsg("Enter your Ashland email first.");
-      loginInputRef.current?.focus();
+      setLoginMsg("Enter your Ashland email.");
+      loginEmailRef.current?.focus();
       return;
     }
     if (!isAshlandEmail(email)) {
       setLoginMsg("Use your @ashland.edu email.");
-      loginInputRef.current?.focus();
+      loginEmailRef.current?.focus();
+      return;
+    }
+    if (!password || password.length < 6) {
+      setLoginMsg("Password must be at least 6 characters.");
+      loginPasswordRef.current?.focus();
       return;
     }
 
-    setSendingLink(true);
-    try {
-      const redirectTo =
-        typeof window !== "undefined" ? `${window.location.origin}/me` : undefined;
+    setAuthBusy(true);
 
-      const { error } = await supabase.auth.signInWithOtp({
-        email,
-        options: redirectTo ? { emailRedirectTo: redirectTo } : undefined,
-      });
+    if (authMode === "signin") {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      setAuthBusy(false);
 
       if (error) {
-        setSendingLink(false);
         setLoginMsg(error.message);
         return;
       }
 
-      setSendingLink(false);
-      setLoginMsg("Check your email for the login link (it may take ~10–30 seconds).");
-    } catch (e: any) {
-      setSendingLink(false);
-      setLoginMsg(e?.message || "Could not send login link.");
+      await loadAll();
+      router.push("/feed");
+      return;
+    }
+
+    // signup
+    const { error } = await supabase.auth.signUp({ email, password });
+    setAuthBusy(false);
+
+    if (error) {
+      setLoginMsg(error.message);
+      return;
+    }
+
+    // If you turned OFF "Confirm email", user is logged in immediately.
+    // If not, Supabase might require confirmation → you'll see no session.
+    await loadAll();
+
+    const { data } = await supabase.auth.getSession();
+    if (data.session) {
+      router.push("/feed");
+    } else {
+      setLoginMsg(
+        "Account created. If you turned OFF email confirmation in Supabase, you should be logged in immediately. If not, check Supabase Auth settings."
+      );
     }
   }
 
   useEffect(() => {
     loadAll();
-
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
       loadAll();
     });
-
     return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -253,31 +273,63 @@ export default function AccountPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const displayName =
-    (profile?.full_name ?? "").trim() ||
-    (userEmail ? userEmail.split("@")[0] : "") ||
-    "Account";
-
+  const displayName = (profile?.full_name ?? "").trim() || (userEmail ? userEmail.split("@")[0] : "") || "Account";
   const roleLabel = (profile?.user_role ?? "").trim() || "member";
 
   if (loading) {
-    return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        Loading…
-      </div>
-    );
+    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Loading…</div>;
   }
 
   // ============================
-  // NOT LOGGED IN VIEW (FIXED)
+  // NOT LOGGED IN VIEW
   // ============================
   if (!isLoggedIn) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
         <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Account</h1>
         <p style={{ opacity: 0.8, marginTop: 10 }}>
-          Log in with your <b>@ashland.edu</b> email to post, request, and message.
+          Use your <b>@ashland.edu</b> email to {authMode === "signin" ? "sign in" : "sign up"}.
         </p>
+
+        <div style={{ marginTop: 14, display: "flex", gap: 10 }}>
+          <button
+            type="button"
+            onClick={() => {
+              setAuthMode("signin");
+              setLoginMsg(null);
+            }}
+            style={{
+              borderRadius: 999,
+              border: authMode === "signin" ? "1px solid #16a34a" : "1px solid #334155",
+              background: authMode === "signin" ? "rgba(22,163,74,0.18)" : "transparent",
+              color: "white",
+              padding: "10px 12px",
+              cursor: "pointer",
+              fontWeight: 900,
+            }}
+          >
+            Sign in
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setAuthMode("signup");
+              setLoginMsg(null);
+            }}
+            style={{
+              borderRadius: 999,
+              border: authMode === "signup" ? "1px solid #16a34a" : "1px solid #334155",
+              background: authMode === "signup" ? "rgba(22,163,74,0.18)" : "transparent",
+              color: "white",
+              padding: "10px 12px",
+              cursor: "pointer",
+              fontWeight: 900,
+            }}
+          >
+            Sign up
+          </button>
+        </div>
 
         <div
           style={{
@@ -289,10 +341,12 @@ export default function AccountPage() {
             maxWidth: 520,
           }}
         >
-          <div style={{ fontWeight: 1000, marginBottom: 10 }}>Email login</div>
+          <div style={{ fontWeight: 1000, marginBottom: 10 }}>
+            {authMode === "signin" ? "Sign in" : "Create account"}
+          </div>
 
           <input
-            ref={loginInputRef}
+            ref={loginEmailRef}
             value={loginEmail}
             onChange={(e) => setLoginEmail(e.target.value)}
             placeholder="you@ashland.edu"
@@ -309,34 +363,53 @@ export default function AccountPage() {
               outline: "none",
               fontWeight: 700,
             }}
+          />
+
+          <input
+            ref={loginPasswordRef}
+            value={loginPassword}
+            onChange={(e) => setLoginPassword(e.target.value)}
+            placeholder="Password (min 6 chars)"
+            type="password"
+            autoComplete={authMode === "signin" ? "current-password" : "new-password"}
+            style={{
+              width: "100%",
+              height: 44,
+              borderRadius: 12,
+              border: "1px solid #334155",
+              background: "rgba(0,0,0,0.35)",
+              color: "white",
+              padding: "0 12px",
+              outline: "none",
+              fontWeight: 700,
+              marginTop: 10,
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") sendMagicLink();
+              if (e.key === "Enter") doAuth();
             }}
           />
 
           <button
-            onClick={sendMagicLink}
-            disabled={sendingLink}
+            onClick={doAuth}
+            disabled={authBusy}
             style={{
               marginTop: 12,
               width: "100%",
               height: 44,
               borderRadius: 12,
               border: "1px solid rgba(22,163,74,0.55)",
-              background: sendingLink ? "rgba(22,163,74,0.10)" : "rgba(22,163,74,0.18)",
+              background: authBusy ? "rgba(22,163,74,0.10)" : "rgba(22,163,74,0.18)",
               color: "white",
-              cursor: sendingLink ? "not-allowed" : "pointer",
+              cursor: authBusy ? "not-allowed" : "pointer",
               fontWeight: 1000,
             }}
           >
-            {sendingLink ? "Sending…" : "Send login link"}
+            {authBusy ? "Working…" : authMode === "signin" ? "Sign in" : "Sign up"}
           </button>
 
           {loginMsg && <div style={{ marginTop: 10, opacity: 0.9 }}>{loginMsg}</div>}
 
-          <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>
-            You can still browse the feed without logging in.
-          </div>
+          <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>You can still browse the feed without logging in.</div>
 
           <button
             onClick={() => router.push("/feed")}
@@ -360,7 +433,7 @@ export default function AccountPage() {
   }
 
   // ============================
-  // LOGGED IN VIEW (UNCHANGED)
+  // LOGGED IN VIEW (your account UI)
   // ============================
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
@@ -430,16 +503,7 @@ export default function AccountPage() {
           { label: "Requested", value: stats.requested },
           { label: "Chats", value: stats.chats },
         ].map((s) => (
-          <div
-            key={s.label}
-            style={{
-              borderRadius: 14,
-              border: "1px solid #0f223f",
-              background: "#0b1730",
-              padding: 12,
-              textAlign: "center",
-            }}
-          >
+          <div key={s.label} style={{ borderRadius: 14, border: "1px solid #0f223f", background: "#0b1730", padding: 12, textAlign: "center" }}>
             <div style={{ fontSize: 20, fontWeight: 1000 }}>{s.value}</div>
             <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>{s.label}</div>
           </div>
