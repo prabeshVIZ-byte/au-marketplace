@@ -11,7 +11,7 @@ type ProfileRow = {
   id: string;
   email: string | null;
   full_name: string | null;
-  user_role: string | null; // "student" | "faculty" etc
+  user_role: string | null;
   created_at?: string;
 };
 
@@ -66,6 +66,10 @@ function shortId(id: string) {
   return id.slice(0, 6) + "…" + id.slice(-4);
 }
 
+function isAshlandEmail(email: string) {
+  return email.trim().toLowerCase().endsWith("@ashland.edu");
+}
+
 function niceName(r: IncomingRequestRow) {
   const name = (r.requester?.full_name ?? "").trim();
   if (name) return name;
@@ -84,12 +88,22 @@ function fmtWhen(ts: string | null | undefined) {
 export default function AccountPage() {
   const router = useRouter();
 
+  // page state
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
+  // auth state
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
+  // logged-out auth UI (email+password)
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMsg, setAuthMsg] = useState<string | null>(null);
+
+  // data state
   const [profile, setProfile] = useState<ProfileRow | null>(null);
 
   // tabs: listings | my_requests | incoming
@@ -112,7 +126,7 @@ export default function AccountPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+    return !!userId && !!userEmail && isAshlandEmail(userEmail);
   }, [userId, userEmail]);
 
   const unseenIncomingCount = useMemo(() => {
@@ -141,9 +155,9 @@ export default function AccountPage() {
     if (pErr) {
       console.warn("profile load:", pErr.message);
       setProfile(null);
-    } else {
-      setProfile(pData ?? null);
+      return;
     }
+    setProfile(pData ?? null);
   }
 
   async function loadMyListings(uid: string) {
@@ -184,7 +198,7 @@ export default function AccountPage() {
     return rows;
   }
 
-  // ✅ Option A typing fix is HERE (.returns<IncomingRequestRow[]>())
+  // ✅ Option A typing fix: .returns<IncomingRequestRow[]>()
   async function loadIncomingRequests(uid: string) {
     setIncomingLoading(true);
 
@@ -201,7 +215,7 @@ export default function AccountPage() {
         requester:profiles(full_name,email,user_role)
       `
       )
-      // filter to only requests on items you own
+      // only requests on items you own
       .eq("items.owner_id", uid)
       // hide dismissed rows
       .is("owner_dismissed_at", null)
@@ -219,31 +233,27 @@ export default function AccountPage() {
     setIncomingLoading(false);
   }
 
-  async function markIncomingSeen(uid: string) {
-    // Mark all currently unseen incoming as seen.
+  async function markIncomingSeen() {
+    // mark all unseen incoming as seen
     const unseen = incomingRequests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at);
     if (unseen.length === 0) return;
 
-    // mark by (item_id,user_id)
-    const updates = unseen.map((r) => ({ item_id: r.item_id, user_id: r.user_id }));
+    const nowIso = new Date().toISOString();
 
-    // Supabase can't update with composite IN easily; do a best-effort loop (small volume)
-    // Keeps logic simple + safe.
     await Promise.all(
-      updates.map(async (x) => {
+      unseen.map(async (r) => {
         await supabase
           .from("interests")
-          .update({ owner_seen_at: new Date().toISOString() })
-          .eq("item_id", x.item_id)
-          .eq("user_id", x.user_id);
+          .update({ owner_seen_at: nowIso })
+          .eq("item_id", r.item_id)
+          .eq("user_id", r.user_id);
       })
     );
 
-    // update local state immediately
     setIncomingRequests((prev) =>
       prev.map((r) => {
         if (r.owner_seen_at || r.owner_dismissed_at) return r;
-        return { ...r, owner_seen_at: new Date().toISOString() };
+        return { ...r, owner_seen_at: nowIso };
       })
     );
   }
@@ -272,8 +282,8 @@ export default function AccountPage() {
 
     const { uid, email } = await syncAuth();
 
-    // if not logged in, show login view (your existing behavior)
-    if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
+    if (!uid || !email || !isAshlandEmail(email)) {
+      // logged out: reset data but keep auth UI
       setProfile(null);
       setMyItems([]);
       setMyRequests([]);
@@ -286,14 +296,12 @@ export default function AccountPage() {
     await loadProfile(uid);
 
     const [iRows, rRows] = await Promise.all([loadMyListings(uid), loadMyRequests(uid)]);
-
-    // incoming requests for your items
     await loadIncomingRequests(uid);
 
-    // stats
     const listed = iRows.length;
     const requested = rRows.length;
 
+    // chats: best-effort
     let chats = 0;
     try {
       const { count, error: tErr } = await supabase
@@ -313,6 +321,7 @@ export default function AccountPage() {
   async function signOut() {
     await supabase.auth.signOut();
     setDrawerOpen(false);
+    // keep you on /me; loadAll will switch UI
     await loadAll();
   }
 
@@ -327,6 +336,41 @@ export default function AccountPage() {
 
     setMyItems((prev) => prev.filter((x) => x.id !== id));
     setStats((s) => ({ ...s, listed: Math.max(0, s.listed - 1) }));
+  }
+
+  async function handleAuth() {
+    setAuthMsg(null);
+    setErr(null);
+
+    const email = authEmail.trim().toLowerCase();
+    if (!email) return setAuthMsg("Enter your email.");
+    if (!isAshlandEmail(email)) return setAuthMsg("Use your @ashland.edu email.");
+    if (authPassword.length < 6) return setAuthMsg("Password must be at least 6 characters.");
+
+    setAuthBusy(true);
+
+    if (authMode === "signin") {
+      const { error } = await supabase.auth.signInWithPassword({ email, password: authPassword });
+      setAuthBusy(false);
+
+      if (error) return setAuthMsg(error.message);
+
+      // session exists now → load dashboard data
+      await loadAll();
+      router.push("/me");
+      return;
+    }
+
+    // signup
+    const { error } = await supabase.auth.signUp({ email, password: authPassword });
+    setAuthBusy(false);
+
+    if (error) return setAuthMsg(error.message);
+
+    // If confirmations are OFF, session will exist immediately.
+    // If confirmations are ON, you won't be logged in yet.
+    await loadAll();
+    router.push("/me");
   }
 
   useEffect(() => {
@@ -356,38 +400,163 @@ export default function AccountPage() {
   const roleLabel = (profile?.user_role ?? "").trim() || "member";
 
   if (loading) {
-    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Loading…</div>;
-  }
-
-  // Not logged in view (keep simple; you already have your own auth UI elsewhere)
-  if (!isLoggedIn) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Account</h1>
-        <p style={{ opacity: 0.8, marginTop: 10 }}>Please log in with your @ashland.edu email.</p>
-
-        <button
-          onClick={() => router.push("/")}
-          style={{
-            marginTop: 14,
-            border: "1px solid #334155",
-            background: "transparent",
-            color: "white",
-            padding: "10px 12px",
-            borderRadius: 12,
-            cursor: "pointer",
-            fontWeight: 900,
-          }}
-        >
-          Go back
-        </button>
+        Loading…
       </div>
     );
   }
 
+  // ============================
+  // LOGGED OUT VIEW (FIXED)
+  // ============================
+  if (!isLoggedIn) {
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
+        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Account</h1>
+        <p style={{ opacity: 0.8, marginTop: 10 }}>
+          Sign in or sign up using your <b>@ashland.edu</b> email.
+        </p>
+
+        <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button
+            onClick={() => setAuthMode("signin")}
+            style={{
+              borderRadius: 999,
+              border: authMode === "signin" ? "1px solid #16a34a" : "1px solid #334155",
+              background: authMode === "signin" ? "rgba(22,163,74,0.18)" : "transparent",
+              color: "white",
+              padding: "10px 12px",
+              cursor: "pointer",
+              fontWeight: 900,
+            }}
+          >
+            Sign in
+          </button>
+
+          <button
+            onClick={() => setAuthMode("signup")}
+            style={{
+              borderRadius: 999,
+              border: authMode === "signup" ? "1px solid #16a34a" : "1px solid #334155",
+              background: authMode === "signup" ? "rgba(22,163,74,0.18)" : "transparent",
+              color: "white",
+              padding: "10px 12px",
+              cursor: "pointer",
+              fontWeight: 900,
+            }}
+          >
+            Sign up
+          </button>
+        </div>
+
+        <div
+          style={{
+            marginTop: 14,
+            borderRadius: 16,
+            border: "1px solid #0f223f",
+            background: "#0b1730",
+            padding: 14,
+            maxWidth: 520,
+          }}
+        >
+          <div style={{ fontWeight: 1000, marginBottom: 10 }}>
+            {authMode === "signin" ? "Welcome back" : "Create an account"}
+          </div>
+
+          <input
+            value={authEmail}
+            onChange={(e) => setAuthEmail(e.target.value)}
+            placeholder="you@ashland.edu"
+            autoComplete="email"
+            inputMode="email"
+            style={{
+              width: "100%",
+              height: 44,
+              borderRadius: 12,
+              border: "1px solid #334155",
+              background: "rgba(0,0,0,0.35)",
+              color: "white",
+              padding: "0 12px",
+              outline: "none",
+              fontWeight: 700,
+            }}
+          />
+
+          <input
+            value={authPassword}
+            onChange={(e) => setAuthPassword(e.target.value)}
+            placeholder="password"
+            type="password"
+            autoComplete={authMode === "signin" ? "current-password" : "new-password"}
+            style={{
+              marginTop: 10,
+              width: "100%",
+              height: 44,
+              borderRadius: 12,
+              border: "1px solid #334155",
+              background: "rgba(0,0,0,0.35)",
+              color: "white",
+              padding: "0 12px",
+              outline: "none",
+              fontWeight: 700,
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleAuth();
+            }}
+          />
+
+          <button
+            onClick={handleAuth}
+            disabled={authBusy}
+            style={{
+              marginTop: 12,
+              width: "100%",
+              height: 44,
+              borderRadius: 12,
+              border: "1px solid rgba(22,163,74,0.55)",
+              background: authBusy ? "rgba(22,163,74,0.10)" : "rgba(22,163,74,0.18)",
+              color: "white",
+              cursor: authBusy ? "not-allowed" : "pointer",
+              fontWeight: 1000,
+            }}
+          >
+            {authBusy ? "Working…" : authMode === "signin" ? "Sign in" : "Sign up"}
+          </button>
+
+          {authMsg && <div style={{ marginTop: 10, color: "#fca5a5", fontWeight: 900 }}>{authMsg}</div>}
+
+          <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>
+            You can still browse the feed without logging in.
+          </div>
+
+          <button
+            onClick={() => router.push("/feed")}
+            style={{
+              marginTop: 10,
+              width: "100%",
+              height: 44,
+              borderRadius: 12,
+              border: "1px solid #334155",
+              background: "transparent",
+              color: "white",
+              cursor: "pointer",
+              fontWeight: 900,
+            }}
+          >
+            Browse feed
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================
+  // LOGGED IN VIEW
+  // ============================
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
-      {/* Top header */}
+      {/* Header */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div
@@ -435,7 +604,7 @@ export default function AccountPage() {
         </button>
       </div>
 
-      {/* Stats row */}
+      {/* Stats */}
       <div
         style={{
           marginTop: 14,
@@ -469,7 +638,7 @@ export default function AccountPage() {
         ))}
       </div>
 
-      {/* Primary actions */}
+      {/* Actions */}
       <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
         <Link
           href="/create"
@@ -506,7 +675,6 @@ export default function AccountPage() {
 
       {/* Tabs */}
       <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
-        {/* Listings */}
         <button
           onClick={() => setTab("listings")}
           style={{
@@ -522,7 +690,6 @@ export default function AccountPage() {
           Listings
         </button>
 
-        {/* My Requests */}
         <button
           onClick={() => setTab("my_requests")}
           style={{
@@ -538,14 +705,10 @@ export default function AccountPage() {
           My requests
         </button>
 
-        {/* Requests for your items (with red dot) */}
         <button
           onClick={async () => {
             setTab("incoming");
-            if (userId) {
-              // mark seen as soon as you open the tab
-              await markIncomingSeen(userId);
-            }
+            await markIncomingSeen(); // mark seen when opened
           }}
           style={{
             borderRadius: 999,
@@ -577,7 +740,7 @@ export default function AccountPage() {
         </button>
       </div>
 
-      {/* ---------------- TAB: LISTINGS ---------------- */}
+      {/* LISTINGS */}
       {tab === "listings" && (
         <>
           <div style={{ marginTop: 14, opacity: 0.85 }}>
@@ -675,7 +838,7 @@ export default function AccountPage() {
         </>
       )}
 
-      {/* ---------------- TAB: MY REQUESTS ---------------- */}
+      {/* MY REQUESTS */}
       {tab === "my_requests" && (
         <>
           <div style={{ marginTop: 14, opacity: 0.85 }}>These are items you requested (your “Request Item” clicks).</div>
@@ -772,7 +935,7 @@ export default function AccountPage() {
         </>
       )}
 
-      {/* ---------------- TAB: INCOMING REQUESTS ---------------- */}
+      {/* INCOMING REQUESTS */}
       {tab === "incoming" && (
         <>
           <div style={{ marginTop: 14, opacity: 0.85 }}>
