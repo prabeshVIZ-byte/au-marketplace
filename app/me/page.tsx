@@ -35,13 +35,18 @@ type MyRequestRow = {
   } | null;
 };
 
+/**
+ * Incoming requests for YOUR items (someone clicked "Request item" on your listing).
+ * Backed by interests table, joined to items and requester profile.
+ *
+ * Requires interests.owner_seen_at and interests.owner_dismissed_at (nullable timestamptz).
+ */
 type IncomingRequestRow = {
   item_id: string;
   user_id: string;
   created_at: string | null;
   owner_seen_at: string | null;
   owner_dismissed_at: string | null;
-
   items: {
     id: string;
     title: string;
@@ -49,7 +54,6 @@ type IncomingRequestRow = {
     status: string | null;
     owner_id: string;
   } | null;
-
   requester: {
     full_name: string | null;
     email: string | null;
@@ -62,7 +66,15 @@ function shortId(id: string) {
   return id.slice(0, 6) + "…" + id.slice(-4);
 }
 
-function formatWhen(ts: string | null | undefined) {
+function niceName(r: IncomingRequestRow) {
+  const name = (r.requester?.full_name ?? "").trim();
+  if (name) return name;
+  const email = (r.requester?.email ?? "").trim();
+  if (email) return email.split("@")[0];
+  return "Someone";
+}
+
+function fmtWhen(ts: string | null | undefined) {
   if (!ts) return "";
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return "";
@@ -80,11 +92,15 @@ export default function AccountPage() {
 
   const [profile, setProfile] = useState<ProfileRow | null>(null);
 
-  const [tab, setTab] = useState<"listings" | "my_requests" | "requests_for_you">("listings");
+  // tabs: listings | my_requests | incoming
+  const [tab, setTab] = useState<"listings" | "my_requests" | "incoming">("listings");
 
   const [myItems, setMyItems] = useState<MyItemRow[]>([]);
   const [myRequests, setMyRequests] = useState<MyRequestRow[]>([]);
+
   const [incomingRequests, setIncomingRequests] = useState<IncomingRequestRow[]>([]);
+  const [incomingLoading, setIncomingLoading] = useState(false);
+  const [dismissingKey, setDismissingKey] = useState<string | null>(null);
 
   const [stats, setStats] = useState<{ listed: number; requested: number; chats: number }>({
     listed: 0,
@@ -94,14 +110,14 @@ export default function AccountPage() {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [dismissingKey, setDismissingKey] = useState<string | null>(null);
 
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
 
   const unseenIncomingCount = useMemo(() => {
-    return incomingRequests.filter((r) => !r.owner_dismissed_at && !r.owner_seen_at).length;
+    // unseen = owner_seen_at is null AND not dismissed
+    return incomingRequests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at).length;
   }, [incomingRequests]);
 
   async function syncAuth() {
@@ -114,90 +130,7 @@ export default function AccountPage() {
     return { uid, email };
   }
 
- async function loadIncomingRequests(uid: string) {
-  const { data, error } = await supabase
-    .from("interests")
-    .select(
-      `
-      item_id,
-      user_id,
-      created_at,
-      owner_seen_at,
-      owner_dismissed_at,
-      items:items!inner(id,title,photo_url,status,owner_id),
-      requester:profiles(full_name,email,user_role)
-    `
-    )
-    .eq("items.owner_id", uid)
-    .is("owner_dismissed_at", null)
-    .order("created_at", { ascending: false })
-    .returns<IncomingRequestRow[]>(); // ✅ important
-
-  if (error) {
-    console.warn("incoming requests load:", error.message);
-    setIncomingRequests([]);
-    return;
-  }
-
-  setIncomingRequests(data ?? []); // ✅ no cast needed
-}
-  async function markIncomingSeen(uid: string) {
-    // Mark all unseen incoming requests as seen
-    // We only update rows that are currently unseen (owner_seen_at is null) and not dismissed
-    const { error } = await supabase
-      .from("interests")
-      .update({ owner_seen_at: new Date().toISOString() })
-      .is("owner_seen_at", null)
-      .is("owner_dismissed_at", null)
-      // Only rows for items you own. Policy enforces this, but we also limit scope:
-      .in(
-        "item_id",
-        incomingRequests
-          .filter((r) => r.items?.owner_id === uid)
-          .map((r) => r.item_id)
-      );
-
-    if (error) {
-      console.warn("mark seen:", error.message);
-      return;
-    }
-
-    // Update UI instantly
-    setIncomingRequests((prev) =>
-      prev.map((r) => (r.owner_seen_at || r.owner_dismissed_at ? r : { ...r, owner_seen_at: new Date().toISOString() }))
-    );
-  }
-
-  async function dismissIncoming(itemId: string, requesterId: string) {
-    // Dismiss = hide it from inbox
-    const key = `${itemId}:${requesterId}`;
-    setDismissingKey(key);
-
-    const { error } = await supabase
-      .from("interests")
-      .update({ owner_dismissed_at: new Date().toISOString() })
-      .eq("item_id", itemId)
-      .eq("user_id", requesterId);
-
-    setDismissingKey(null);
-
-    if (error) return alert(error.message);
-
-    setIncomingRequests((prev) => prev.filter((r) => !(r.item_id === itemId && r.user_id === requesterId)));
-  }
-
-  async function loadAll() {
-    setLoading(true);
-    setErr(null);
-
-    const { uid, email } = await syncAuth();
-    if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
-      router.push("/me");
-      setLoading(false);
-      return;
-    }
-
-    // 1) profile
+  async function loadProfile(uid: string) {
     const { data: pData, error: pErr } = await supabase
       .from("profiles")
       .select("id,email,full_name,user_role,created_at")
@@ -211,8 +144,9 @@ export default function AccountPage() {
     } else {
       setProfile(pData ?? null);
     }
+  }
 
-    // 2) my listings
+  async function loadMyListings(uid: string) {
     const { data: iData, error: iErr } = await supabase
       .from("items")
       .select("id,title,description,status,created_at,photo_url")
@@ -223,11 +157,15 @@ export default function AccountPage() {
     if (iErr) {
       setMyItems([]);
       setErr(iErr.message);
-    } else {
-      setMyItems(iData ?? []);
+      return [];
     }
 
-    // 3) my requests (things I requested)
+    const rows = iData ?? [];
+    setMyItems(rows);
+    return rows;
+  }
+
+  async function loadMyRequests(uid: string) {
     const { data: rData, error: rErr } = await supabase
       .from("interests")
       .select("item_id,created_at,items:items(id,title,photo_url,status)")
@@ -238,16 +176,123 @@ export default function AccountPage() {
     if (rErr) {
       console.warn("my requests load:", rErr.message);
       setMyRequests([]);
-    } else {
-      setMyRequests(rData ?? []);
+      return [];
     }
 
-    // 4) incoming requests for your items (notifications)
+    const rows = rData ?? [];
+    setMyRequests(rows);
+    return rows;
+  }
+
+  // ✅ Option A typing fix is HERE (.returns<IncomingRequestRow[]>())
+  async function loadIncomingRequests(uid: string) {
+    setIncomingLoading(true);
+
+    const { data, error } = await supabase
+      .from("interests")
+      .select(
+        `
+        item_id,
+        user_id,
+        created_at,
+        owner_seen_at,
+        owner_dismissed_at,
+        items:items!inner(id,title,photo_url,status,owner_id),
+        requester:profiles(full_name,email,user_role)
+      `
+      )
+      // filter to only requests on items you own
+      .eq("items.owner_id", uid)
+      // hide dismissed rows
+      .is("owner_dismissed_at", null)
+      .order("created_at", { ascending: false })
+      .returns<IncomingRequestRow[]>();
+
+    if (error) {
+      console.warn("incoming requests load:", error.message);
+      setIncomingRequests([]);
+      setIncomingLoading(false);
+      return;
+    }
+
+    setIncomingRequests(data ?? []);
+    setIncomingLoading(false);
+  }
+
+  async function markIncomingSeen(uid: string) {
+    // Mark all currently unseen incoming as seen.
+    const unseen = incomingRequests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at);
+    if (unseen.length === 0) return;
+
+    // mark by (item_id,user_id)
+    const updates = unseen.map((r) => ({ item_id: r.item_id, user_id: r.user_id }));
+
+    // Supabase can't update with composite IN easily; do a best-effort loop (small volume)
+    // Keeps logic simple + safe.
+    await Promise.all(
+      updates.map(async (x) => {
+        await supabase
+          .from("interests")
+          .update({ owner_seen_at: new Date().toISOString() })
+          .eq("item_id", x.item_id)
+          .eq("user_id", x.user_id);
+      })
+    );
+
+    // update local state immediately
+    setIncomingRequests((prev) =>
+      prev.map((r) => {
+        if (r.owner_seen_at || r.owner_dismissed_at) return r;
+        return { ...r, owner_seen_at: new Date().toISOString() };
+      })
+    );
+  }
+
+  async function dismissIncoming(r: IncomingRequestRow) {
+    const key = `${r.item_id}:${r.user_id}`;
+    setDismissingKey(key);
+
+    const { error } = await supabase
+      .from("interests")
+      .update({ owner_dismissed_at: new Date().toISOString() })
+      .eq("item_id", r.item_id)
+      .eq("user_id", r.user_id);
+
+    setDismissingKey(null);
+
+    if (error) return alert(error.message);
+
+    // remove from UI
+    setIncomingRequests((prev) => prev.filter((x) => !(x.item_id === r.item_id && x.user_id === r.user_id)));
+  }
+
+  async function loadAll() {
+    setLoading(true);
+    setErr(null);
+
+    const { uid, email } = await syncAuth();
+
+    // if not logged in, show login view (your existing behavior)
+    if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
+      setProfile(null);
+      setMyItems([]);
+      setMyRequests([]);
+      setIncomingRequests([]);
+      setStats({ listed: 0, requested: 0, chats: 0 });
+      setLoading(false);
+      return;
+    }
+
+    await loadProfile(uid);
+
+    const [iRows, rRows] = await Promise.all([loadMyListings(uid), loadMyRequests(uid)]);
+
+    // incoming requests for your items
     await loadIncomingRequests(uid);
 
-    // 5) stats
-    const listed = (iData ?? []).length;
-    const requested = (rData ?? []).length;
+    // stats
+    const listed = iRows.length;
+    const requested = rRows.length;
 
     let chats = 0;
     try {
@@ -255,6 +300,7 @@ export default function AccountPage() {
         .from("threads")
         .select("id", { count: "exact", head: true })
         .or(`owner_id.eq.${uid},requester_id.eq.${uid}`);
+
       if (!tErr) chats = count ?? 0;
     } catch {
       chats = 0;
@@ -267,7 +313,7 @@ export default function AccountPage() {
   async function signOut() {
     await supabase.auth.signOut();
     setDrawerOpen(false);
-    router.push("/me");
+    await loadAll();
   }
 
   async function deleteListing(id: string) {
@@ -302,17 +348,6 @@ export default function AccountPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // When user opens "Requests for your items", mark as seen and clear dot
-  useEffect(() => {
-    (async () => {
-      if (tab !== "requests_for_you") return;
-      if (!userId) return;
-      if (unseenIncomingCount <= 0) return;
-      await markIncomingSeen(userId);
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
-
   const displayName =
     (profile?.full_name ?? "").trim() ||
     (userEmail ? userEmail.split("@")[0] : "") ||
@@ -324,6 +359,7 @@ export default function AccountPage() {
     return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Loading…</div>;
   }
 
+  // Not logged in view (keep simple; you already have your own auth UI elsewhere)
   if (!isLoggedIn) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -331,7 +367,7 @@ export default function AccountPage() {
         <p style={{ opacity: 0.8, marginTop: 10 }}>Please log in with your @ashland.edu email.</p>
 
         <button
-          onClick={() => router.push("/me")}
+          onClick={() => router.push("/")}
           style={{
             marginTop: 14,
             border: "1px solid #334155",
@@ -343,7 +379,7 @@ export default function AccountPage() {
             fontWeight: 900,
           }}
         >
-          Go to login
+          Go back
         </button>
       </div>
     );
@@ -414,7 +450,7 @@ export default function AccountPage() {
       >
         {[
           { label: "Listed", value: stats.listed },
-          { label: "My requests", value: stats.requested },
+          { label: "Requested", value: stats.requested },
           { label: "Chats", value: stats.chats },
         ].map((s) => (
           <div
@@ -470,52 +506,78 @@ export default function AccountPage() {
 
       {/* Tabs */}
       <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
-        {[
-          { key: "listings", label: "Listings" },
-          { key: "my_requests", label: "My requests" },
-          { key: "requests_for_you", label: "Requests for your items" },
-        ].map((t) => {
-          const active = tab === (t.key as any);
-          const showDot = t.key === "requests_for_you" && unseenIncomingCount > 0;
+        {/* Listings */}
+        <button
+          onClick={() => setTab("listings")}
+          style={{
+            borderRadius: 999,
+            border: tab === "listings" ? "1px solid #16a34a" : "1px solid #334155",
+            background: tab === "listings" ? "rgba(22,163,74,0.18)" : "transparent",
+            color: "white",
+            padding: "10px 12px",
+            cursor: "pointer",
+            fontWeight: 900,
+          }}
+        >
+          Listings
+        </button>
 
-          return (
-            <button
-              key={t.key}
-              onClick={() => setTab(t.key as any)}
+        {/* My Requests */}
+        <button
+          onClick={() => setTab("my_requests")}
+          style={{
+            borderRadius: 999,
+            border: tab === "my_requests" ? "1px solid #16a34a" : "1px solid #334155",
+            background: tab === "my_requests" ? "rgba(22,163,74,0.18)" : "transparent",
+            color: "white",
+            padding: "10px 12px",
+            cursor: "pointer",
+            fontWeight: 900,
+          }}
+        >
+          My requests
+        </button>
+
+        {/* Requests for your items (with red dot) */}
+        <button
+          onClick={async () => {
+            setTab("incoming");
+            if (userId) {
+              // mark seen as soon as you open the tab
+              await markIncomingSeen(userId);
+            }
+          }}
+          style={{
+            borderRadius: 999,
+            border: tab === "incoming" ? "1px solid #16a34a" : "1px solid #334155",
+            background: tab === "incoming" ? "rgba(22,163,74,0.18)" : "transparent",
+            color: "white",
+            padding: "10px 12px",
+            cursor: "pointer",
+            fontWeight: 900,
+            position: "relative",
+          }}
+        >
+          Requests for your items
+          {unseenIncomingCount > 0 && (
+            <span
               style={{
-                position: "relative",
+                display: "inline-block",
+                width: 9,
+                height: 9,
                 borderRadius: 999,
-                border: active ? "1px solid #16a34a" : "1px solid #334155",
-                background: active ? "rgba(22,163,74,0.18)" : "transparent",
-                color: "white",
-                padding: "10px 12px",
-                cursor: "pointer",
-                fontWeight: 900,
+                background: "#ef4444",
+                marginLeft: 8,
+                boxShadow: "0 0 0 3px rgba(239,68,68,0.20)",
               }}
-            >
-              {t.label}
-              {showDot && (
-                <span
-                  style={{
-                    position: "absolute",
-                    top: 6,
-                    right: 6,
-                    width: 10,
-                    height: 10,
-                    borderRadius: 999,
-                    background: "#ef4444",
-                    boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
-                  }}
-                  aria-label="New requests"
-                  title="New requests"
-                />
-              )}
-            </button>
-          );
-        })}
+              aria-label="New requests"
+              title="New requests"
+            />
+          )}
+        </button>
       </div>
 
-      {/* LISTINGS */}
+      {/* ---------------- TAB: LISTINGS ---------------- */}
       {tab === "listings" && (
         <>
           <div style={{ marginTop: 14, opacity: 0.85 }}>
@@ -613,7 +675,7 @@ export default function AccountPage() {
         </>
       )}
 
-      {/* MY REQUESTS */}
+      {/* ---------------- TAB: MY REQUESTS ---------------- */}
       {tab === "my_requests" && (
         <>
           <div style={{ marginTop: 14, opacity: 0.85 }}>These are items you requested (your “Request Item” clicks).</div>
@@ -710,31 +772,46 @@ export default function AccountPage() {
         </>
       )}
 
-      {/* REQUESTS FOR YOUR ITEMS (INBOX) */}
-      {tab === "requests_for_you" && (
+      {/* ---------------- TAB: INCOMING REQUESTS ---------------- */}
+      {tab === "incoming" && (
         <>
           <div style={{ marginTop: 14, opacity: 0.85 }}>
-            People who requested your listings. Click one to jump straight to that item’s management screen.
+            These are requests people sent to <b>your</b> listings.
+          </div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button
+              onClick={() => {
+                if (userId) loadIncomingRequests(userId);
+              }}
+              disabled={incomingLoading}
+              style={{
+                border: "1px solid #334155",
+                background: "transparent",
+                color: "white",
+                padding: "10px 12px",
+                borderRadius: 12,
+                cursor: incomingLoading ? "not-allowed" : "pointer",
+                fontWeight: 900,
+                opacity: incomingLoading ? 0.8 : 1,
+              }}
+            >
+              {incomingLoading ? "Refreshing…" : "Refresh"}
+            </button>
           </div>
 
           {incomingRequests.length === 0 ? (
             <div style={{ marginTop: 14, border: "1px solid #0f223f", background: "#0b1730", borderRadius: 16, padding: 14 }}>
-              <div style={{ fontWeight: 1000 }}>No one has requested your items yet.</div>
-              <div style={{ opacity: 0.8, marginTop: 6 }}>When someone clicks “Request item”, it will show up here.</div>
+              <div style={{ fontWeight: 1000 }}>No incoming requests.</div>
+              <div style={{ opacity: 0.8, marginTop: 6 }}>When someone requests your item, it will show up here.</div>
             </div>
           ) : (
             <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
               {incomingRequests.map((r) => {
-                const it = r.items;
-                const req = r.requester;
-
-                const requesterName =
-                  (req?.full_name ?? "").trim() ||
-                  (req?.email ? req.email.split("@")[0] : "") ||
-                  "Someone";
-
                 const key = `${r.item_id}:${r.user_id}`;
-                const isUnseen = !r.owner_seen_at && !r.owner_dismissed_at;
+                const itemTitle = r.items?.title ?? "Unknown item";
+                const who = niceName(r);
+                const when = fmtWhen(r.created_at);
 
                 return (
                   <div
@@ -762,47 +839,29 @@ export default function AccountPage() {
                         justifyContent: "center",
                         color: "#94a3b8",
                         flexShrink: 0,
-                        position: "relative",
                       }}
-                      title={it?.title ?? "Item"}
                     >
-                      {it?.photo_url ? (
+                      {r.items?.photo_url ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={it.photo_url} alt={it.title ?? "Item"} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        <img src={r.items.photo_url} alt={itemTitle} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                       ) : (
                         "—"
-                      )}
-
-                      {isUnseen && (
-                        <span
-                          style={{
-                            position: "absolute",
-                            top: 6,
-                            right: 6,
-                            width: 10,
-                            height: 10,
-                            borderRadius: 999,
-                            background: "#ef4444",
-                            boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
-                          }}
-                          title="New"
-                        />
                       )}
                     </div>
 
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 1000, fontSize: 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {requesterName} requested <span style={{ opacity: 0.92 }}>{it?.title ?? "your item"}</span>
+                        {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
                       </div>
 
                       <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>
-                        {req?.user_role ? <span style={{ marginRight: 8 }}>{req.user_role}</span> : null}
-                        {req?.email ? <span style={{ marginRight: 8 }}>{req.email}</span> : null}
-                        <span>Requested: <b>{formatWhen(r.created_at) || "—"}</b></span>
+                        Item: <span style={{ fontWeight: 900 }}>{shortId(r.item_id)}</span>
+                        {when ? ` • Requested: ${when}` : ""}
+                        {r.owner_seen_at ? " • Seen" : " • New"}
                       </div>
                     </div>
 
-                    <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                       <button
                         onClick={() => router.push(`/manage/${r.item_id}`)}
                         style={{
@@ -816,11 +875,11 @@ export default function AccountPage() {
                           whiteSpace: "nowrap",
                         }}
                       >
-                        View
+                        Open
                       </button>
 
                       <button
-                        onClick={() => dismissIncoming(r.item_id, r.user_id)}
+                        onClick={() => dismissIncoming(r)}
                         disabled={dismissingKey === key}
                         style={{
                           border: "1px solid #7f1d1d",
@@ -830,9 +889,10 @@ export default function AccountPage() {
                           borderRadius: 12,
                           cursor: dismissingKey === key ? "not-allowed" : "pointer",
                           fontWeight: 900,
-                          opacity: dismissingKey === key ? 0.7 : 1,
+                          opacity: dismissingKey === key ? 0.75 : 1,
                           whiteSpace: "nowrap",
                         }}
+                        title="Dismiss notification"
                       >
                         {dismissingKey === key ? "…" : "Dismiss"}
                       </button>
@@ -880,26 +940,6 @@ export default function AccountPage() {
             </div>
 
             <div style={{ padding: 14, display: "grid", gap: 10 }}>
-              <button
-                onClick={() => {
-                  setDrawerOpen(false);
-                  setTab("requests_for_you");
-                }}
-                style={{
-                  width: "100%",
-                  border: "1px solid #334155",
-                  background: "transparent",
-                  color: "white",
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  textAlign: "left",
-                }}
-              >
-                Requests for your items {unseenIncomingCount > 0 ? `• ${unseenIncomingCount} new` : ""}
-              </button>
-
               <button
                 onClick={() => {
                   setDrawerOpen(false);
