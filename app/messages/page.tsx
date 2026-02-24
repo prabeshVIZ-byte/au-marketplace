@@ -100,7 +100,7 @@ export default function MessagesPage() {
       if (otherIds.length > 0) {
         const { data: pData, error: pErr } = await supabase
           .from("profiles")
-          .select("id,full_name,owner_role")
+          .select("id,full_name,user_role")
           .in("id", otherIds);
 
         if (pErr) throw pErr;
@@ -108,7 +108,7 @@ export default function MessagesPage() {
         for (const p of (pData as any[]) || []) {
           const id = String(p.id);
           const nm = (p.full_name ?? "Campus user") as string;
-          const role = (p.owner_role ?? null) as string | null;
+          const role = (p.user_role ?? null) as string | null;
           profileMap[id] = { name: String(nm), role: role ? String(role) : null };
         }
       }
