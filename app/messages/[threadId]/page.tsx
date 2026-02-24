@@ -2,176 +2,238 @@
 
 export const dynamic = "force-dynamic";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-type ThreadHeader = {
+type ProfileRow = {
   id: string;
+  full_name: string | null;
+  user_role: string | null; // "student" | "faculty" (in your DB it's text)
+};
+
+type ItemRow = {
+  id: string;
+  title: string;
+  photo_url: string | null;
+  status: string | null;
+};
+
+type ThreadRow = {
+  id: string;
+  item_id: string;
   owner_id: string;
   requester_id: string;
-  item: {
-    id: string;
-    title: string;
-    photo_url: string | null;
-    status: string | null;
-  };
+  created_at: string;
+  items: ItemRow | null; // joined
 };
 
-type OtherUser = {
+type MessageRow = {
   id: string;
-  name: string;
-  role: string | null;
-};
-
-type Message = {
-  id: string;
+  thread_id: string;
   sender_id: string;
   body: string;
   created_at: string;
 };
-
-function fmtTime(ts: string) {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
 
 export default function ThreadPage() {
   const router = useRouter();
   const params = useParams();
   const threadId = params?.threadId as string;
 
+  // auth
   const [userId, setUserId] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  const [header, setHeader] = useState<ThreadHeader | null>(null);
-  const [other, setOther] = useState<OtherUser | null>(null);
+  // data
+  const [thread, setThread] = useState<ThreadRow | null>(null);
+  const [otherProfile, setOtherProfile] = useState<ProfileRow | null>(null);
+  const [messages, setMessages] = useState<MessageRow[]>([]);
 
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [text, setText] = useState("");
+  // ui
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
 
-  const otherLabel = useMemo(() => {
-    if (!other) return "Campus user";
-    return other.role ? `${other.name} (${other.role})` : other.name;
-  }, [other]);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  const isAshland = useMemo(() => {
+    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  }, [userId, userEmail]);
+
+  function scrollToBottom() {
+    requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
+  }
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
-    setUserId(data.session?.user?.id ?? null);
-    return data.session?.user?.id ?? null;
+    const session = data.session;
+    setUserId(session?.user?.id ?? null);
+    setUserEmail(session?.user?.email ?? null);
   }
 
-  async function loadHeader(uid: string) {
-    // thread + item
+  async function loadAll() {
+    setLoading(true);
+    setErr(null);
+
+    // Must have session
+    const { data: s } = await supabase.auth.getSession();
+    const uid = s.session?.user?.id ?? null;
+    const email = s.session?.user?.email ?? null;
+
+    if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
+      router.push("/me");
+      return;
+    }
+
+    // 1) load thread + joined item
     const { data: tData, error: tErr } = await supabase
       .from("threads")
-      .select("id,owner_id,requester_id,items:items(id,title,photo_url,status)")
+      .select("id,item_id,owner_id,requester_id,created_at, items:items(id,title,photo_url,status)")
       .eq("id", threadId)
       .single();
 
-    if (tErr) throw tErr;
+    if (tErr) {
+      setErr(tErr.message || "Error loading conversation.");
+      setThread(null);
+      setOtherProfile(null);
+      setMessages([]);
+      setLoading(false);
+      return;
+    }
 
-    const t = tData as any;
+    const t = tData as unknown as ThreadRow;
+    setThread(t);
 
-    const itemObj = t.items ?? null; // joined object
-
-    const mapped: ThreadHeader = {
-      id: String(t.id),
-      owner_id: String(t.owner_id),
-      requester_id: String(t.requester_id),
-      item: {
-        id: String(itemObj?.id ?? ""),
-        title: String(itemObj?.title ?? "Listing"),
-        photo_url: itemObj?.photo_url ? String(itemObj.photo_url) : null,
-        status: itemObj?.status ? String(itemObj.status) : null,
-      },
-    };
-
-    setHeader(mapped);
-
-    // other person profile
-    const otherId = mapped.owner_id === uid ? mapped.requester_id : mapped.owner_id;
+    // 2) load the OTHER person profile
+    const otherId = t.owner_id === uid ? t.requester_id : t.owner_id;
 
     const { data: pData, error: pErr } = await supabase
       .from("profiles")
       .select("id,full_name,user_role")
       .eq("id", otherId)
-      .maybeSingle();
+      .single();
 
     if (pErr) {
-      setOther({ id: otherId, name: "Campus user", role: null });
-      return;
+      // don't hard fail chat if profile missing
+      setOtherProfile(null);
+    } else {
+      setOtherProfile(pData as ProfileRow);
     }
 
-    const p = (pData as any) ?? null;
-    const nm = String((p?.full_name ?? "Campus user") as any);
-    const role = p?.user_role ? String(p.user_role) : null;
-
-    setOther({ id: otherId, name: nm, role });
-  }
-
-  async function loadMessages() {
-    const { data, error } = await supabase
+    // 3) load messages
+    const { data: mData, error: mErr } = await supabase
       .from("messages")
-      .select("id,sender_id,body,created_at")
+      .select("id,thread_id,sender_id,body,created_at")
       .eq("thread_id", threadId)
       .order("created_at", { ascending: true });
 
-    if (!error) setMessages((data as Message[]) || []);
+    if (mErr) {
+      setErr(mErr.message || "Error loading messages.");
+      setMessages([]);
+      setLoading(false);
+      return;
+    }
+
+    setMessages((mData as MessageRow[]) || []);
+    setLoading(false);
+
+    // Scroll to bottom after initial load
+    setTimeout(scrollToBottom, 50);
   }
 
   async function sendMessage() {
-    if (!text.trim() || !userId) return;
-    setSending(true);
+    if (!isAshland || !userId) {
+      router.push("/me");
+      return;
+    }
+    if (!thread) return;
 
     const body = text.trim();
+    if (!body) return;
 
-    const { error } = await supabase.from("messages").insert([
-      { thread_id: threadId, sender_id: userId, body },
-    ]);
+    setSending(true);
+    setErr(null);
+
+    // optimistic
+    const temp: MessageRow = {
+      id: `temp-${Date.now()}`,
+      thread_id: thread.id,
+      sender_id: userId,
+      body,
+      created_at: new Date().toISOString(),
+    };
+
+    setMessages((prev) => [...prev, temp]);
+    setText("");
+    scrollToBottom();
+
+    const { data, error } = await supabase
+      .from("messages")
+      .insert([{ thread_id: thread.id, sender_id: userId, body }])
+      .select("id,thread_id,sender_id,body,created_at")
+      .single();
 
     setSending(false);
 
-    if (error) return alert(error.message);
+    if (error) {
+      // remove optimistic
+      setMessages((prev) => prev.filter((x) => x.id !== temp.id));
+      setErr(error.message);
+      return;
+    }
 
-    setText("");
-    loadMessages();
+    // replace temp with real row
+    const real = data as MessageRow;
+    setMessages((prev) => prev.map((x) => (x.id === temp.id ? real : x)));
+    scrollToBottom();
   }
 
+  // realtime (optional but nice)
   useEffect(() => {
-    (async () => {
-      setLoading(true);
-      try {
-        const uid = await syncAuth();
-        if (!uid) {
-          setLoading(false);
-          return;
-        }
-        await loadHeader(uid);
-        await loadMessages();
-      } catch (e: any) {
-        alert(e?.message || "Failed to load conversation.");
-      } finally {
-        setLoading(false);
-      }
-    })();
+    if (!threadId) return;
 
     const channel = supabase
-      .channel("realtime-thread-" + threadId)
+      .channel(`messages-${threadId}`)
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "messages", filter: `thread_id=eq.${threadId}` },
-        () => loadMessages()
+        (payload) => {
+          const row = payload.new as MessageRow;
+          setMessages((prev) => {
+            // avoid dupes if we already inserted/received it
+            if (prev.some((m) => m.id === row.id)) return prev;
+            return [...prev, row].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+          });
+          scrollToBottom();
+        }
       )
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
+  }, [threadId]);
+
+  useEffect(() => {
+    (async () => {
+      await syncAuth();
+      await loadAll();
+    })();
+
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      syncAuth();
+      loadAll();
+    });
+
+    return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
+
+  if (!isAshland) {
+    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Checking access…</div>;
+  }
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
@@ -179,165 +241,186 @@ export default function ThreadPage() {
         onClick={() => router.push("/messages")}
         style={{
           border: "1px solid #334155",
-          padding: "8px 12px",
-          borderRadius: 10,
           background: "transparent",
           color: "white",
-          fontWeight: 950,
-          marginBottom: 14,
+          padding: "10px 12px",
+          borderRadius: 12,
           cursor: "pointer",
+          fontWeight: 900,
         }}
       >
         ← Back
       </button>
 
-      {/* Header */}
-      <div
-        style={{
-          display: "flex",
-          gap: 14,
-          alignItems: "center",
-          padding: 14,
-          borderRadius: 18,
-          border: "1px solid #0f223f",
-          background: "rgba(11,23,48,0.75)",
-          position: "sticky",
-          top: 12,
-          zIndex: 5,
-          backdropFilter: "blur(10px)",
-          WebkitBackdropFilter: "blur(10px)",
-        }}
-      >
+      <h1 style={{ marginTop: 16, fontSize: 28, fontWeight: 900 }}>Conversation</h1>
+
+      {err && <p style={{ color: "#f87171", marginTop: 10 }}>{err}</p>}
+      {loading && <p style={{ opacity: 0.8, marginTop: 10 }}>Loading…</p>}
+
+      {/* Sticky context header */}
+      {!loading && thread && (
         <div
           style={{
-            width: 62,
-            height: 62,
-            borderRadius: 16,
-            border: "1px solid rgba(148,163,184,0.25)",
-            overflow: "hidden",
-            background: "#0b1730",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "#94a3b8",
-            flexShrink: 0,
+            position: "sticky",
+            top: 0,
+            zIndex: 10,
+            background: "black",
+            paddingTop: 8,
+            paddingBottom: 12,
+            borderBottom: "1px solid #0f223f",
+            marginBottom: 14,
           }}
         >
-          {header?.item.photo_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={header.item.photo_url} alt="Item" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-          ) : (
-            <span style={{ fontWeight: 950 }}>No</span>
-          )}
-        </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: 14,
+              borderRadius: 14,
+              background: "#0b1730",
+              border: "1px solid #0f223f",
+            }}
+          >
+            {thread.items?.photo_url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={thread.items.photo_url}
+                alt={thread.items.title}
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 12,
+                  objectFit: "cover",
+                  border: "1px solid #0f223f",
+                  flexShrink: 0,
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 12,
+                  border: "1px dashed #334155",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "#94a3b8",
+                  fontSize: 12,
+                  flexShrink: 0,
+                }}
+              >
+                No photo
+              </div>
+            )}
 
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, opacity: 0.75, fontWeight: 950 }}>Item</div>
-          <div style={{ fontSize: 18, fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {header?.item.title ?? "Conversation"}
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontWeight: 900, fontSize: 18, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {thread.items?.title || "Listing"}
+              </div>
+
+              <div style={{ opacity: 0.85, marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                Talking with: <b>{otherProfile?.full_name || "Campus user"}</b>{" "}
+                <span style={{ opacity: 0.7 }}>• {otherProfile?.user_role || "student"}</span>
+              </div>
+
+              <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={() => router.push(`/item/${thread.item_id}`)}
+                  style={{
+                    border: "1px solid #334155",
+                    background: "transparent",
+                    color: "white",
+                    padding: "8px 10px",
+                    borderRadius: 10,
+                    cursor: "pointer",
+                    fontWeight: 900,
+                  }}
+                >
+                  View item
+                </button>
+              </div>
+            </div>
           </div>
-
-          <div style={{ marginTop: 6, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <span
-              style={{
-                fontSize: 12,
-                padding: "5px 10px",
-                borderRadius: 999,
-                border: "1px solid rgba(148,163,184,0.25)",
-                background: "rgba(0,0,0,0.25)",
-                fontWeight: 900,
-              }}
-            >
-              Status: {header?.item.status ?? "—"}
-            </span>
-
-            <span
-              style={{
-                fontSize: 12,
-                padding: "5px 10px",
-                borderRadius: 999,
-                border: "1px solid rgba(22,163,74,0.35)",
-                background: "rgba(22,163,74,0.12)",
-                fontWeight: 950,
-              }}
-            >
-              With: {otherLabel}
-            </span>
-          </div>
         </div>
+      )}
+
+      {/* Messages */}
+      <div style={{ marginTop: 12 }}>
+        {messages.map((m) => {
+          const isMe = !!userId && m.sender_id === userId;
+          const time = new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+          return (
+            <div key={m.id} style={{ display: "flex", justifyContent: isMe ? "flex-end" : "flex-start", marginTop: 10 }}>
+              <div
+                style={{
+                  maxWidth: "min(640px, 78vw)",
+                  padding: "10px 12px",
+                  borderRadius: 16,
+                  borderTopRightRadius: isMe ? 6 : 16,
+                  borderTopLeftRadius: isMe ? 16 : 6,
+                  background: isMe ? "rgba(22,163,74,0.25)" : "#0b1730",
+                  border: "1px solid #0f223f",
+                  color: "white",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  fontWeight: 600,
+                }}
+              >
+                <div style={{ opacity: 0.95 }}>{m.body}</div>
+                <div style={{ opacity: 0.55, fontSize: 12, marginTop: 6, textAlign: "right" }}>{time}</div>
+              </div>
+            </div>
+          );
+        })}
+        <div ref={bottomRef} />
       </div>
 
-      <h2 style={{ marginTop: 18, fontSize: 22, fontWeight: 950 }}>Conversation</h2>
+      {/* Composer */}
+      <div style={{ marginTop: 16, display: "flex", gap: 10, alignItems: "center" }}>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              sendMessage();
+            }
+          }}
+          placeholder="Type a message..."
+          style={{
+            flex: 1,
+            height: 48,
+            borderRadius: 12,
+            border: "1px solid #0f223f",
+            background: "#0b1730",
+            color: "white",
+            padding: "0 12px",
+            outline: "none",
+          }}
+        />
 
-      {loading ? (
-        <p style={{ opacity: 0.75 }}>Loading…</p>
-      ) : (
-        <>
-          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-            {messages.length === 0 && <div style={{ opacity: 0.75 }}>No messages yet. Say hi 👋</div>}
-
-            {messages.map((m) => {
-              const mine = m.sender_id === userId;
-              return (
-                <div key={m.id} style={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "78%" }}>
-                  <div
-                    style={{
-                      background: mine ? "#052e16" : "#0b1730",
-                      border: "1px solid rgba(148,163,184,0.18)",
-                      padding: "10px 12px",
-                      borderRadius: 16,
-                      fontSize: 14,
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-word",
-                    }}
-                  >
-                    {m.body}
-                  </div>
-                  <div style={{ marginTop: 4, fontSize: 11, opacity: 0.6, textAlign: mine ? "right" : "left" }}>
-                    {fmtTime(m.created_at)}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <div style={{ marginTop: 18, display: "flex", gap: 10, alignItems: "center" }}>
-            <input
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder={other ? `Message ${other.name}...` : "Type a message..."}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") sendMessage();
-              }}
-              style={{
-                flex: 1,
-                padding: "12px 12px",
-                borderRadius: 14,
-                border: "1px solid #334155",
-                background: "#0b1730",
-                color: "white",
-                outline: "none",
-              }}
-            />
-            <button
-              onClick={sendMessage}
-              disabled={sending}
-              style={{
-                padding: "12px 16px",
-                borderRadius: 14,
-                border: "1px solid #16a34a",
-                background: sending ? "rgba(22,163,74,0.15)" : "#052e16",
-                color: "white",
-                fontWeight: 950,
-                cursor: sending ? "not-allowed" : "pointer",
-                opacity: sending ? 0.8 : 1,
-              }}
-            >
-              {sending ? "Sending…" : "Send"}
-            </button>
-          </div>
-        </>
-      )}
+        <button
+          onClick={sendMessage}
+          disabled={sending}
+          style={{
+            height: 48,
+            padding: "0 16px",
+            borderRadius: 12,
+            border: "1px solid #16a34a",
+            background: sending ? "rgba(22,163,74,0.25)" : "#052e16",
+            color: "white",
+            cursor: sending ? "not-allowed" : "pointer",
+            fontWeight: 900,
+            opacity: sending ? 0.8 : 1,
+          }}
+        >
+          {sending ? "Sending…" : "Send"}
+        </button>
+      </div>
     </div>
   );
 }
