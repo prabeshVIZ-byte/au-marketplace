@@ -96,7 +96,7 @@ export default function ThreadPage() {
 
     const { data: pData, error: pErr } = await supabase
       .from("profiles")
-      .select("id,full_name,name,owner_role")
+      .select("id,full_name,owner_role")
       .eq("id", otherId)
       .maybeSingle();
 
@@ -106,7 +106,7 @@ export default function ThreadPage() {
     }
 
     const p = (pData as any) ?? null;
-    const nm = String((p?.full_name ?? p?.name ?? "Campus user") as any);
+    const nm = String((p?.full_name ?? "Campus user") as any);
     const role = p?.owner_role ? String(p.owner_role) : null;
 
     setOther({ id: otherId, name: nm, role });
