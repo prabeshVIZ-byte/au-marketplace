@@ -9,12 +9,12 @@ export default function BottomNav() {
   const items = [
     { href: "/feed", label: "Feed", icon: "🏠" },
     { href: "/create", label: "List", icon: "➕" },
-    { href: "/messages", label: "Messages", icon: "💬" }, // ✅ NEW
+    { href: "/messages", label: "Messages", icon: "💬" },
     { href: "/my-items", label: "My", icon: "📦" },
     { href: "/me", label: "Account", icon: "👤" },
   ];
 
-  const NAV_HEIGHT = 88;
+  const NAV_HEIGHT = 84;
 
   return (
     <div
@@ -45,12 +45,12 @@ export default function BottomNav() {
       >
         <div
           style={{
-            maxWidth: 900,
+            maxWidth: 980,
             margin: "0 auto",
             width: "100%",
             display: "grid",
-            gridTemplateColumns: "repeat(5, 1fr)", // ✅ 5 tabs
-            gap: 8, // slightly tighter for 5
+            gridTemplateColumns: "repeat(5, 1fr)",
+            gap: 8,
             alignItems: "center",
           }}
         >
@@ -61,8 +61,9 @@ export default function BottomNav() {
               <Link
                 key={it.href}
                 href={it.href}
+                aria-label={it.label}
                 style={{
-                  height: 56,
+                  height: 54,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -72,19 +73,46 @@ export default function BottomNav() {
                   border: active ? "1px solid #16a34a" : "1px solid #334155",
                   background: active ? "rgba(22,163,74,0.18)" : "transparent",
                   fontWeight: 900,
-                  gap: 6, // slightly tighter
                   userSelect: "none",
                   WebkitTapHighlightColor: "transparent",
                   touchAction: "manipulation",
-                  padding: "0 6px", // helps labels fit
+                  padding: "0 10px",
+                  minWidth: 0,
                 }}
               >
-                <span style={{ fontSize: 18 }}>{it.icon}</span>
-                <span style={{ fontSize: 13 }}>{it.label}</span>
+                {/* icon */}
+                <span style={{ fontSize: 18, lineHeight: 1 }}>{it.icon}</span>
+
+                {/* label: desktop shows always, mobile shows only for active */}
+                <span className={`navLabel ${active ? "showOnMobile" : ""}`}>{it.label}</span>
               </Link>
             );
           })}
         </div>
+
+        {/* Inline CSS so you don't need to touch global files */}
+        <style jsx>{`
+          .navLabel {
+            margin-left: 8px;
+            font-size: 13px;
+            white-space: nowrap;
+          }
+
+          /* Mobile: hide labels by default */
+          @media (max-width: 480px) {
+            .navLabel {
+              display: none;
+              margin-left: 0;
+            }
+            /* Only show label for active tab */
+            .showOnMobile {
+              display: inline;
+              margin-left: 6px;
+              font-size: 12px;
+              opacity: 0.95;
+            }
+          }
+        `}</style>
       </footer>
     </div>
   );
