@@ -3,10 +3,21 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-export default function BottomNav() {
-  const pathname = usePathname();
+type NavItem = {
+  href: string;
+  label: string;
+  icon: string;
+};
 
-  const items = [
+function isActive(pathname: string, href: string) {
+  // Active if exact match OR nested route under it (e.g. /messages/123)
+  return pathname === href || pathname.startsWith(href + "/");
+}
+
+export default function BottomNav() {
+  const pathname = usePathname() || "/";
+
+  const items: NavItem[] = [
     { href: "/feed", label: "Feed", icon: "🏠" },
     { href: "/create", label: "List", icon: "➕" },
     { href: "/messages", label: "Messages", icon: "💬" },
@@ -54,12 +65,13 @@ export default function BottomNav() {
           }}
         >
           {items.map((it) => {
-            const active = pathname === it.href || (it.href !== "/feed" && pathname?.startsWith(it.href));
+            const active = isActive(pathname, it.href);
 
             return (
               <Link
                 key={it.href}
                 href={it.href}
+                aria-current={active ? "page" : undefined}
                 style={{
                   height: 56,
                   display: "flex",
@@ -77,7 +89,7 @@ export default function BottomNav() {
                   touchAction: "manipulation",
                 }}
               >
-                <span style={{ fontSize: 18 }}>{it.icon}</span>
+                <span style={{ fontSize: 18, lineHeight: 1 }}>{it.icon}</span>
                 <span style={{ fontSize: 14 }}>{it.label}</span>
               </Link>
             );
