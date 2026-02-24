@@ -74,7 +74,6 @@ function niceName(r: IncomingRequestRow) {
   if (name) return name;
   const email = (r.requester?.email ?? "").trim();
   if (email) return email.split("@")[0];
-  // fallback
   return `User ${shortId(r.user_id)}`;
 }
 
@@ -196,16 +195,9 @@ export default function AccountPage() {
     return rows;
   }
 
-  /**
-   * Incoming requests (people requesting items you own).
-   * IMPORTANT: If this is empty but interests exist in DB, it's almost always RLS.
-   */
   async function loadIncomingRequests(uid: string) {
     setIncomingLoading(true);
 
-    // This syntax is the most reliable when your FK names/relations are picky:
-    // - items:items!inner(...) ensures join exists
-    // - requester:profiles(...) requires a relationship from interests.user_id -> profiles.id
     const { data, error } = await supabase
       .from("interests")
       .select(
@@ -355,13 +347,10 @@ export default function AccountPage() {
       return;
     }
 
-    // signup
     const { error } = await supabase.auth.signUp({ email, password: authPassword });
     setAuthBusy(false);
     if (error) return setAuthMsg(error.message);
 
-    // If email confirmations are OFF in Supabase Auth settings, you're logged in immediately.
-    // If confirmations are ON, you must turn them OFF for your "no confirmation" flow.
     await loadAll();
   }
 
@@ -384,14 +373,17 @@ export default function AccountPage() {
 
   const displayName =
     (profile?.full_name ?? "").trim() || (userEmail ? userEmail.split("@")[0] : "") || "Account";
-
   const roleLabel = (profile?.user_role ?? "").trim() || "member";
 
   if (loading) {
-    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Loading…</div>;
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+        Loading…
+      </div>
+    );
   }
 
-  // ---------------- LOGGED OUT VIEW (THIS FIXES YOUR “CAN’T LOG BACK IN” PROBLEM) ----------------
+  // ---------------- LOGGED OUT VIEW ----------------
   if (!isLoggedIn) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
@@ -655,33 +647,11 @@ export default function AccountPage() {
 
       {/* Tabs */}
       <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <button
-          onClick={() => setTab("listings")}
-          style={{
-            borderRadius: 999,
-            border: tab === "listings" ? "1px solid #16a34a" : "1px solid #334155",
-            background: tab === "listings" ? "rgba(22,163,74,0.18)" : "transparent",
-            color: "white",
-            padding: "10px 12px",
-            cursor: "pointer",
-            fontWeight: 900,
-          }}
-        >
+        <button onClick={() => setTab("listings")} style={tabBtn(tab === "listings")}>
           Listings
         </button>
 
-        <button
-          onClick={() => setTab("my_requests")}
-          style={{
-            borderRadius: 999,
-            border: tab === "my_requests" ? "1px solid #16a34a" : "1px solid #334155",
-            background: tab === "my_requests" ? "rgba(22,163,74,0.18)" : "transparent",
-            color: "white",
-            padding: "10px 12px",
-            cursor: "pointer",
-            fontWeight: 900,
-          }}
-        >
+        <button onClick={() => setTab("my_requests")} style={tabBtn(tab === "my_requests")}>
           My requests
         </button>
 
@@ -690,16 +660,7 @@ export default function AccountPage() {
             setTab("incoming");
             await markIncomingSeen();
           }}
-          style={{
-            borderRadius: 999,
-            border: tab === "incoming" ? "1px solid #16a34a" : "1px solid #334155",
-            background: tab === "incoming" ? "rgba(22,163,74,0.18)" : "transparent",
-            color: "white",
-            padding: "10px 12px",
-            cursor: "pointer",
-            fontWeight: 900,
-            position: "relative",
-          }}
+          style={{ ...tabBtn(tab === "incoming"), position: "relative" }}
         >
           Requests for your items
           {unseenIncomingCount > 0 && (
@@ -724,7 +685,7 @@ export default function AccountPage() {
       {tab === "listings" && (
         <>
           <div style={{ marginTop: 14, opacity: 0.85 }}>
-            Your listings are public in the feed. Use <b>Edit</b> to manage requests / status.
+            Your listings are public in the feed. Use <b>Edit</b> to change details, or <b>Manage</b> to handle requests.
           </div>
 
           {myItems.length === 0 ? (
@@ -776,13 +737,15 @@ export default function AccountPage() {
                     Status: <b>{item.status ?? "—"}</b>
                   </div>
 
-                  <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                  {/* ✅ EDIT vs MANAGE split */}
+                  <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
                     <button
-                      onClick={() => router.push(`/manage/${item.id}`)}
+                      onClick={() => router.push(`/item/${item.id}/edit`)}
                       style={{
                         flex: 1,
-                        border: "1px solid #334155",
-                        background: "transparent",
+                        minWidth: 120,
+                        border: "1px solid #16a34a",
+                        background: "rgba(22,163,74,0.14)",
                         color: "white",
                         padding: "10px 12px",
                         borderRadius: 12,
@@ -794,10 +757,28 @@ export default function AccountPage() {
                     </button>
 
                     <button
+                      onClick={() => router.push(`/manage/${item.id}`)}
+                      style={{
+                        flex: 1,
+                        minWidth: 120,
+                        border: "1px solid #334155",
+                        background: "transparent",
+                        color: "white",
+                        padding: "10px 12px",
+                        borderRadius: 12,
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
+                    >
+                      Manage
+                    </button>
+
+                    <button
                       onClick={() => deleteListing(item.id)}
                       disabled={deletingId === item.id}
                       style={{
                         flex: 1,
+                        minWidth: 120,
                         border: "1px solid #7f1d1d",
                         background: deletingId === item.id ? "#7f1d1d" : "transparent",
                         color: "white",
@@ -827,19 +808,7 @@ export default function AccountPage() {
             <div style={{ marginTop: 14, border: "1px solid #0f223f", background: "#0b1730", borderRadius: 16, padding: 14 }}>
               <div style={{ fontWeight: 1000 }}>No requests yet.</div>
               <div style={{ opacity: 0.8, marginTop: 6 }}>Go to the feed and request an item.</div>
-              <button
-                onClick={() => router.push("/feed")}
-                style={{
-                  marginTop: 12,
-                  border: "1px solid #334155",
-                  background: "transparent",
-                  color: "white",
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
-              >
+              <button onClick={() => router.push("/feed")} style={outlineBtn}>
                 Browse feed
               </button>
             </div>
@@ -892,19 +861,7 @@ export default function AccountPage() {
                       </div>
                     </div>
 
-                    <button
-                      onClick={() => router.push(`/item/${r.item_id}`)}
-                      style={{
-                        border: "1px solid #334155",
-                        background: "transparent",
-                        color: "white",
-                        padding: "10px 12px",
-                        borderRadius: 12,
-                        cursor: "pointer",
-                        fontWeight: 900,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
+                    <button onClick={() => router.push(`/item/${r.item_id}`)} style={{ ...outlineBtn, whiteSpace: "nowrap" }}>
                       View
                     </button>
                   </div>
@@ -929,13 +886,8 @@ export default function AccountPage() {
               }}
               disabled={incomingLoading}
               style={{
-                border: "1px solid #334155",
-                background: "transparent",
-                color: "white",
-                padding: "10px 12px",
-                borderRadius: 12,
+                ...outlineBtn,
                 cursor: incomingLoading ? "not-allowed" : "pointer",
-                fontWeight: 900,
                 opacity: incomingLoading ? 0.8 : 1,
               }}
             >
@@ -1007,19 +959,7 @@ export default function AccountPage() {
                     </div>
 
                     <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      <button
-                        onClick={() => router.push(`/manage/${r.item_id}`)}
-                        style={{
-                          border: "1px solid #334155",
-                          background: "transparent",
-                          color: "white",
-                          padding: "10px 12px",
-                          borderRadius: 12,
-                          cursor: "pointer",
-                          fontWeight: 900,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
+                      <button onClick={() => router.push(`/manage/${r.item_id}`)} style={{ ...outlineBtn, whiteSpace: "nowrap" }}>
                         Open
                       </button>
 
@@ -1027,13 +967,9 @@ export default function AccountPage() {
                         onClick={() => dismissIncoming(r)}
                         disabled={dismissingKey === key}
                         style={{
+                          ...outlineBtn,
                           border: "1px solid #7f1d1d",
-                          background: "transparent",
-                          color: "white",
-                          padding: "10px 12px",
-                          borderRadius: 12,
                           cursor: dismissingKey === key ? "not-allowed" : "pointer",
-                          fontWeight: 900,
                           opacity: dismissingKey === key ? 0.75 : 1,
                           whiteSpace: "nowrap",
                         }}
@@ -1052,7 +988,10 @@ export default function AccountPage() {
 
       {/* Drawer */}
       {drawerOpen && (
-        <div onClick={() => setDrawerOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 9998 }}>
+        <div
+          onClick={() => setDrawerOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 9998 }}
+        >
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
@@ -1128,3 +1067,26 @@ export default function AccountPage() {
     </div>
   );
 }
+
+function tabBtn(active: boolean): React.CSSProperties {
+  return {
+    borderRadius: 999,
+    border: active ? "1px solid #16a34a" : "1px solid #334155",
+    background: active ? "rgba(22,163,74,0.18)" : "transparent",
+    color: "white",
+    padding: "10px 12px",
+    cursor: "pointer",
+    fontWeight: 900,
+  };
+}
+
+const outlineBtn: React.CSSProperties = {
+  marginTop: 12,
+  border: "1px solid #334155",
+  background: "transparent",
+  color: "white",
+  padding: "10px 12px",
+  borderRadius: 12,
+  cursor: "pointer",
+  fontWeight: 900,
+};
