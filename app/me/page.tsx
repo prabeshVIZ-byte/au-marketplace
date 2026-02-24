@@ -2,7 +2,7 @@
 
 export const dynamic = "force-dynamic";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
@@ -11,7 +11,7 @@ type ProfileRow = {
   id: string;
   email: string | null;
   full_name: string | null;
-  user_role: string | null; // "student" | "faculty" etc
+  user_role: string | null;
   created_at?: string;
 };
 
@@ -40,6 +40,10 @@ function shortId(id: string) {
   return id.slice(0, 6) + "…" + id.slice(-4);
 }
 
+function isAshlandEmail(email: string) {
+  return email.trim().toLowerCase().endsWith("@ashland.edu");
+}
+
 export default function AccountPage() {
   const router = useRouter();
 
@@ -65,8 +69,14 @@ export default function AccountPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
+  // --- LOGIN UI STATE (NEW) ---
+  const [loginEmail, setLoginEmail] = useState("");
+  const [sendingLink, setSendingLink] = useState(false);
+  const [loginMsg, setLoginMsg] = useState<string | null>(null);
+  const loginInputRef = useRef<HTMLInputElement | null>(null);
+
   const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+    return !!userId && !!userEmail && isAshlandEmail(userEmail);
   }, [userId, userEmail]);
 
   async function syncAuth() {
@@ -84,8 +94,14 @@ export default function AccountPage() {
     setErr(null);
 
     const { uid, email } = await syncAuth();
-    if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
-      router.push("/me"); // stays here, but your /me page is the login page too in your flow
+
+    // If not logged in, DO NOT redirect anywhere.
+    // Just render the login view.
+    if (!uid || !email || !isAshlandEmail(email)) {
+      setProfile(null);
+      setMyItems([]);
+      setMyRequests([]);
+      setStats({ listed: 0, requested: 0, chats: 0 });
       setLoading(false);
       return;
     }
@@ -99,7 +115,6 @@ export default function AccountPage() {
       .returns<ProfileRow>();
 
     if (pErr) {
-      // don't kill the page if profile missing
       console.warn("profile load:", pErr.message);
       setProfile(null);
     } else {
@@ -122,7 +137,6 @@ export default function AccountPage() {
     }
 
     // 3) my requests = interests joined to items
-    // (This is the clean “request item” mechanism you already have.)
     const { data: rData, error: rErr } = await supabase
       .from("interests")
       .select("item_id,created_at,items:items(id,title,photo_url,status)")
@@ -131,7 +145,6 @@ export default function AccountPage() {
       .returns<MyRequestRow[]>();
 
     if (rErr) {
-      // don’t hard-fail; show empty requests
       console.warn("requests load:", rErr.message);
       setMyRequests([]);
     } else {
@@ -142,7 +155,6 @@ export default function AccountPage() {
     const listed = (iData ?? []).length;
     const requested = (rData ?? []).length;
 
-    // chats: try threads table if you have it; otherwise 0
     let chats = 0;
     try {
       const { count, error: tErr } = await supabase
@@ -162,7 +174,10 @@ export default function AccountPage() {
   async function signOut() {
     await supabase.auth.signOut();
     setDrawerOpen(false);
-    router.push("/me");
+    setLoginMsg(null);
+    setLoginEmail("");
+    // stay on /me; loadAll will flip UI to login state
+    await loadAll();
   }
 
   async function deleteListing(id: string) {
@@ -176,6 +191,47 @@ export default function AccountPage() {
 
     setMyItems((prev) => prev.filter((x) => x.id !== id));
     setStats((s) => ({ ...s, listed: Math.max(0, s.listed - 1) }));
+  }
+
+  // --- MAGIC LINK LOGIN (NEW) ---
+  async function sendMagicLink() {
+    setErr(null);
+    setLoginMsg(null);
+
+    const email = loginEmail.trim().toLowerCase();
+    if (!email) {
+      setLoginMsg("Enter your Ashland email first.");
+      loginInputRef.current?.focus();
+      return;
+    }
+    if (!isAshlandEmail(email)) {
+      setLoginMsg("Use your @ashland.edu email.");
+      loginInputRef.current?.focus();
+      return;
+    }
+
+    setSendingLink(true);
+    try {
+      const redirectTo =
+        typeof window !== "undefined" ? `${window.location.origin}/me` : undefined;
+
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: redirectTo ? { emailRedirectTo: redirectTo } : undefined,
+      });
+
+      if (error) {
+        setSendingLink(false);
+        setLoginMsg(error.message);
+        return;
+      }
+
+      setSendingLink(false);
+      setLoginMsg("Check your email for the login link (it may take ~10–30 seconds).");
+    } catch (e: any) {
+      setSendingLink(false);
+      setLoginMsg(e?.message || "Could not send login link.");
+    }
   }
 
   useEffect(() => {
@@ -212,31 +268,100 @@ export default function AccountPage() {
     );
   }
 
+  // ============================
+  // NOT LOGGED IN VIEW (FIXED)
+  // ============================
   if (!isLoggedIn) {
     return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
         <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Account</h1>
-        <p style={{ opacity: 0.8, marginTop: 10 }}>Please log in with your @ashland.edu email.</p>
+        <p style={{ opacity: 0.8, marginTop: 10 }}>
+          Log in with your <b>@ashland.edu</b> email to post, request, and message.
+        </p>
 
-        <button
-          onClick={() => router.push("/me")}
+        <div
           style={{
             marginTop: 14,
-            border: "1px solid #334155",
-            background: "transparent",
-            color: "white",
-            padding: "10px 12px",
-            borderRadius: 12,
-            cursor: "pointer",
-            fontWeight: 900,
+            borderRadius: 16,
+            border: "1px solid #0f223f",
+            background: "#0b1730",
+            padding: 14,
+            maxWidth: 520,
           }}
         >
-          Go to login
-        </button>
+          <div style={{ fontWeight: 1000, marginBottom: 10 }}>Email login</div>
+
+          <input
+            ref={loginInputRef}
+            value={loginEmail}
+            onChange={(e) => setLoginEmail(e.target.value)}
+            placeholder="you@ashland.edu"
+            autoComplete="email"
+            inputMode="email"
+            style={{
+              width: "100%",
+              height: 44,
+              borderRadius: 12,
+              border: "1px solid #334155",
+              background: "rgba(0,0,0,0.35)",
+              color: "white",
+              padding: "0 12px",
+              outline: "none",
+              fontWeight: 700,
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") sendMagicLink();
+            }}
+          />
+
+          <button
+            onClick={sendMagicLink}
+            disabled={sendingLink}
+            style={{
+              marginTop: 12,
+              width: "100%",
+              height: 44,
+              borderRadius: 12,
+              border: "1px solid rgba(22,163,74,0.55)",
+              background: sendingLink ? "rgba(22,163,74,0.10)" : "rgba(22,163,74,0.18)",
+              color: "white",
+              cursor: sendingLink ? "not-allowed" : "pointer",
+              fontWeight: 1000,
+            }}
+          >
+            {sendingLink ? "Sending…" : "Send login link"}
+          </button>
+
+          {loginMsg && <div style={{ marginTop: 10, opacity: 0.9 }}>{loginMsg}</div>}
+
+          <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>
+            You can still browse the feed without logging in.
+          </div>
+
+          <button
+            onClick={() => router.push("/feed")}
+            style={{
+              marginTop: 10,
+              width: "100%",
+              height: 44,
+              borderRadius: 12,
+              border: "1px solid #334155",
+              background: "transparent",
+              color: "white",
+              cursor: "pointer",
+              fontWeight: 900,
+            }}
+          >
+            Browse feed
+          </button>
+        </div>
       </div>
     );
   }
 
+  // ============================
+  // LOGGED IN VIEW (UNCHANGED)
+  // ============================
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
       {/* Top header */}
@@ -356,7 +481,7 @@ export default function AccountPage() {
 
       {err && <p style={{ color: "#f87171", marginTop: 12 }}>{err}</p>}
 
-      {/* Tabs (IG style) */}
+      {/* Tabs */}
       <div style={{ marginTop: 16, display: "flex", gap: 10 }}>
         {[
           { key: "listings", label: "Listings" },
@@ -383,7 +508,7 @@ export default function AccountPage() {
         })}
       </div>
 
-      {/* Tab content */}
+      {/* Listings tab */}
       {tab === "listings" && (
         <>
           <div style={{ marginTop: 14, opacity: 0.85 }}>
@@ -391,37 +516,14 @@ export default function AccountPage() {
           </div>
 
           {myItems.length === 0 ? (
-            <div
-              style={{
-                marginTop: 14,
-                border: "1px solid #0f223f",
-                background: "#0b1730",
-                borderRadius: 16,
-                padding: 14,
-              }}
-            >
+            <div style={{ marginTop: 14, border: "1px solid #0f223f", background: "#0b1730", borderRadius: 16, padding: 14 }}>
               <div style={{ fontWeight: 1000 }}>No listings yet.</div>
               <div style={{ opacity: 0.8, marginTop: 6 }}>Create your first listing to start exchanging items.</div>
             </div>
           ) : (
-            <div
-              style={{
-                marginTop: 14,
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-                gap: 14,
-              }}
-            >
+            <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
               {myItems.map((item) => (
-                <div
-                  key={item.id}
-                  style={{
-                    background: "#0b1730",
-                    padding: 14,
-                    borderRadius: 16,
-                    border: "1px solid #0f223f",
-                  }}
-                >
+                <div key={item.id} style={{ background: "#0b1730", padding: 14, borderRadius: 16, border: "1px solid #0f223f" }}>
                   {item.photo_url ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
@@ -456,9 +558,7 @@ export default function AccountPage() {
                   )}
 
                   <div style={{ fontSize: 18, fontWeight: 1000 }}>{item.title}</div>
-                  <div style={{ opacity: 0.78, marginTop: 6, fontSize: 13 }}>
-                    {item.description ? item.description : "—"}
-                  </div>
+                  <div style={{ opacity: 0.78, marginTop: 6, fontSize: 13 }}>{item.description ? item.description : "—"}</div>
 
                   <div style={{ opacity: 0.78, marginTop: 10, fontSize: 13 }}>
                     Status: <b>{item.status ?? "—"}</b>
@@ -506,22 +606,13 @@ export default function AccountPage() {
         </>
       )}
 
+      {/* Requests tab */}
       {tab === "requests" && (
         <>
-          <div style={{ marginTop: 14, opacity: 0.85 }}>
-            These are items you requested (your “Request Item” clicks).
-          </div>
+          <div style={{ marginTop: 14, opacity: 0.85 }}>These are items you requested (your “Request Item” clicks).</div>
 
           {myRequests.length === 0 ? (
-            <div
-              style={{
-                marginTop: 14,
-                border: "1px solid #0f223f",
-                background: "#0b1730",
-                borderRadius: 16,
-                padding: 14,
-              }}
-            >
+            <div style={{ marginTop: 14, border: "1px solid #0f223f", background: "#0b1730", borderRadius: 16, padding: 14 }}>
               <div style={{ fontWeight: 1000 }}>No requests yet.</div>
               <div style={{ opacity: 0.8, marginTop: 6 }}>Go to the feed and request an item to start a request.</div>
               <button
@@ -614,15 +705,7 @@ export default function AccountPage() {
 
       {/* Drawer */}
       {drawerOpen && (
-        <div
-          onClick={() => setDrawerOpen(false)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.55)",
-            zIndex: 9998,
-          }}
-        >
+        <div onClick={() => setDrawerOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 9998 }}>
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
@@ -672,7 +755,7 @@ export default function AccountPage() {
                   textAlign: "left",
                 }}
               >
-                Requests (move here)
+                Requests
               </button>
 
               <button
