@@ -3,9 +3,10 @@
 export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+
+/* ---------------- Types ---------------- */
 
 type ProfileRow = {
   id: string;
@@ -36,11 +37,15 @@ type MyRequestRow = {
 };
 
 type IncomingRequestRow = {
+  // ✅ include interests.id so we can hard-delete the notification row
+  id: string;
   item_id: string;
   user_id: string;
   created_at: string | null;
   owner_seen_at: string | null;
   owner_dismissed_at: string | null;
+  status: string | null;
+
   items: {
     id: string;
     title: string;
@@ -48,12 +53,15 @@ type IncomingRequestRow = {
     status: string | null;
     owner_id: string;
   } | null;
+
   requester: {
     full_name: string | null;
     email: string | null;
     user_role: string | null;
   } | null;
 };
+
+/* ---------------- Helpers ---------------- */
 
 function shortId(id: string) {
   if (!id) return "";
@@ -67,8 +75,10 @@ function isAshlandEmail(email: string) {
 function niceName(r: IncomingRequestRow) {
   const name = (r.requester?.full_name ?? "").trim();
   if (name) return name;
+
   const email = (r.requester?.email ?? "").trim();
   if (email) return email.split("@")[0];
+
   return `User ${shortId(r.user_id)}`;
 }
 
@@ -82,6 +92,8 @@ function fmtWhen(ts: string | null | undefined) {
 function normStatus(s: string | null | undefined) {
   return (s ?? "").trim().toLowerCase();
 }
+
+/* ---------------- Page ---------------- */
 
 export default function AccountPage() {
   const router = useRouter();
@@ -104,14 +116,13 @@ export default function AccountPage() {
   // data state
   const [profile, setProfile] = useState<ProfileRow | null>(null);
 
-  // tabs (NEW)
+  // tabs
   const [tab, setTab] = useState<"listings" | "my_interests" | "requests" | "history">("listings");
 
   const [myItems, setMyItems] = useState<MyItemRow[]>([]);
   const [myRequests, setMyRequests] = useState<MyRequestRow[]>([]);
   const [incomingRequests, setIncomingRequests] = useState<IncomingRequestRow[]>([]);
   const [incomingLoading, setIncomingLoading] = useState(false);
-  const [dismissingKey, setDismissingKey] = useState<string | null>(null);
 
   const [stats, setStats] = useState<{ listed: number; requested: number; chats: number }>({
     listed: 0,
@@ -121,6 +132,7 @@ export default function AccountPage() {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingNotifId, setDeletingNotifId] = useState<string | null>(null);
 
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && isAshlandEmail(userEmail);
@@ -203,74 +215,98 @@ export default function AccountPage() {
     return rows;
   }
 
+  /**
+   * ✅ Incoming requests: only interests for items YOU own.
+   * ✅ No FK-name guessing. 2-step query is stable.
+   */
   async function loadIncomingRequests(uid: string) {
-  setIncomingLoading(true);
+    setIncomingLoading(true);
 
-  // 1) Get interests for items YOU own (join through interests.item_id -> items.id)
-  // NOTE: the FK name may be interests_item_id_fkey (most common). If yours differs,
-  // Supabase will show the correct name in the error message. Replace it accordingly.
-  const { data: base, error } = await supabase
-    .from("interests")
-    .select(
-      `
-      item_id,
-      user_id,
-      created_at,
-      owner_seen_at,
-      owner_dismissed_at,
-      items:items!interests_item_id_fkey(id,title,photo_url,status,owner_id)
-    `
-    )
-    .eq("items.owner_id", uid)
-    .is("owner_dismissed_at", null)
-    .order("created_at", { ascending: false });
+    try {
+      // 1) owned item ids
+      const { data: owned, error: ownedErr } = await supabase.from("items").select("id").eq("owner_id", uid);
 
-  if (error) {
-    console.warn("incoming requests load:", error.message);
-    setIncomingRequests([]);
-    setIncomingLoading(false);
-    return;
-  }
+      if (ownedErr) {
+        console.warn("incoming requests: owned items load:", ownedErr.message);
+        setIncomingRequests([]);
+        setIncomingLoading(false);
+        return;
+      }
 
-  const rowsRaw = base ?? [];
-  const rows = rowsRaw.map((r: any) => ({
-    item_id: String(r.item_id),
-    user_id: String(r.user_id),
-    created_at: r.created_at !== undefined && r.created_at !== null ? String(r.created_at) : null,
-    owner_seen_at: r.owner_seen_at !== undefined && r.owner_seen_at !== null ? String(r.owner_seen_at) : null,
-    owner_dismissed_at: r.owner_dismissed_at !== undefined && r.owner_dismissed_at !== null ? String(r.owner_dismissed_at) : null,
-    items: Array.isArray(r.items) && r.items.length > 0
-      ? {
-          id: String(r.items[0].id),
-          title: String(r.items[0].title),
-          photo_url: r.items[0].photo_url !== undefined && r.items[0].photo_url !== null ? String(r.items[0].photo_url) : null,
-          status: r.items[0].status !== undefined && r.items[0].status !== null ? String(r.items[0].status) : null,
-          owner_id: String(r.items[0].owner_id),
-        }
-      : r.items && typeof r.items === "object"
-      ? {
-          id: String(r.items.id),
-          title: String(r.items.title),
-          photo_url: r.items.photo_url !== undefined && r.items.photo_url !== null ? String(r.items.photo_url) : null,
-          status: r.items.status !== undefined && r.items.status !== null ? String(r.items.status) : null,
-          owner_id: String(r.items.owner_id),
-        }
-      : null,
-  }));
+      const ownedIds = (owned ?? []).map((x: any) => x.id).filter(Boolean);
 
-  // 2) Fetch requester profiles separately (no FK guessing)
-  const userIds = Array.from(new Set(rows.map((r) => r.user_id).filter(Boolean)));
-  let profMap: Record<string, { full_name: string | null; email: string | null; user_role: string | null }> = {};
+      if (ownedIds.length === 0) {
+        setIncomingRequests([]);
+        setIncomingLoading(false);
+        return;
+      }
 
-  if (userIds.length > 0) {
-    const { data: profs, error: pErr } = await supabase
-      .from("profiles")
-      .select("id,full_name,email,user_role")
-      .in("id", userIds);
+      // 2) interests for those items (include interests.id + status)
+      const { data: ints, error: intsErr } = await supabase
+        .from("interests")
+        .select("id,item_id,user_id,created_at,owner_seen_at,owner_dismissed_at,status")
+        .in("item_id", ownedIds)
+        .is("owner_dismissed_at", null)
+        .order("created_at", { ascending: false });
 
-    if (pErr) {
-      console.warn("incoming requester profiles load:", pErr.message);
-    } else {
+      if (intsErr) {
+        console.warn("incoming requests: interests load:", intsErr.message);
+        setIncomingRequests([]);
+        setIncomingLoading(false);
+        return;
+      }
+
+      const interestRows = (ints ?? []) as Array<{
+        id: string;
+        item_id: string;
+        user_id: string;
+        created_at: string | null;
+        owner_seen_at: string | null;
+        owner_dismissed_at: string | null;
+        status: string | null;
+      }>;
+
+      if (interestRows.length === 0) {
+        setIncomingRequests([]);
+        setIncomingLoading(false);
+        return;
+      }
+
+      // 3) item details
+      const uniqueItemIds = Array.from(new Set(interestRows.map((r) => r.item_id)));
+
+      const { data: itemsData, error: itemsErr } = await supabase
+        .from("items")
+        .select("id,title,photo_url,status,owner_id")
+        .in("id", uniqueItemIds);
+
+      if (itemsErr) console.warn("incoming requests: items load:", itemsErr.message);
+
+      const itemMap: Record<
+        string,
+        { id: string; title: string; photo_url: string | null; status: string | null; owner_id: string }
+      > = {};
+      (itemsData ?? []).forEach((it: any) => {
+        itemMap[it.id] = {
+          id: String(it.id),
+          title: String(it.title ?? ""),
+          photo_url: it.photo_url ?? null,
+          status: it.status ?? null,
+          owner_id: String(it.owner_id ?? ""),
+        };
+      });
+
+      // 4) requester profiles
+      const uniqueUserIds = Array.from(new Set(interestRows.map((r) => r.user_id)));
+
+      const { data: profs, error: profErr } = await supabase
+        .from("profiles")
+        .select("id,full_name,email,user_role")
+        .in("id", uniqueUserIds);
+
+      if (profErr) console.warn("incoming requests: profiles load:", profErr.message);
+
+      const profMap: Record<string, { full_name: string | null; email: string | null; user_role: string | null }> = {};
       (profs ?? []).forEach((p: any) => {
         profMap[p.id] = {
           full_name: p.full_name ?? null,
@@ -278,35 +314,45 @@ export default function AccountPage() {
           user_role: p.user_role ?? null,
         };
       });
+
+      // 5) merge + hard guardrail (prevents “items I didn’t upload”)
+      const merged: IncomingRequestRow[] = interestRows
+        .map((r) => {
+          const it = itemMap[r.item_id] ?? null;
+          const req = profMap[r.user_id] ?? null;
+
+          return {
+            id: String(r.id),
+            item_id: String(r.item_id),
+            user_id: String(r.user_id),
+            created_at: r.created_at ?? null,
+            owner_seen_at: r.owner_seen_at ?? null,
+            owner_dismissed_at: r.owner_dismissed_at ?? null,
+            status: r.status ?? null,
+            items: it,
+            requester: req,
+          };
+        })
+        .filter((r) => r.items?.owner_id === uid);
+
+      setIncomingRequests(merged);
+      setIncomingLoading(false);
+    } catch (e: any) {
+      console.warn("incoming requests load:", e?.message || e);
+      setIncomingRequests([]);
+      setIncomingLoading(false);
     }
   }
-
-  // 3) Merge into your IncomingRequestRow shape
-  const merged: IncomingRequestRow[] = rows.map((r) => ({
-    item_id: r.item_id,
-    user_id: r.user_id,
-    created_at: r.created_at,
-    owner_seen_at: r.owner_seen_at,
-    owner_dismissed_at: r.owner_dismissed_at,
-    items: r.items,
-    requester: profMap[r.user_id] ?? null,
-  }));
-
-  setIncomingRequests(merged);
-  setIncomingLoading(false);
-}
 
   async function markIncomingSeen() {
     const unseen = incomingRequests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at);
     if (unseen.length === 0) return;
 
     const nowIso = new Date().toISOString();
+    const ids = unseen.map((r) => r.id).filter(Boolean);
 
-    await Promise.all(
-      unseen.map(async (r) => {
-        await supabase.from("interests").update({ owner_seen_at: nowIso }).eq("item_id", r.item_id).eq("user_id", r.user_id);
-      })
-    );
+    // ✅ update by interests.id (safer)
+    await supabase.from("interests").update({ owner_seen_at: nowIso }).in("id", ids);
 
     setIncomingRequests((prev) =>
       prev.map((r) => {
@@ -316,20 +362,22 @@ export default function AccountPage() {
     );
   }
 
-  async function dismissIncoming(r: IncomingRequestRow) {
-    const key = `${r.item_id}:${r.user_id}`;
-    setDismissingKey(key);
+  /**
+   * ✅ "Delete" notification = HARD DELETE from interests table.
+   * After this, it cannot come back.
+   */
+  async function deleteNotification(r: IncomingRequestRow) {
+    if (!confirm("Delete this request notification? This will remove the request.")) return;
 
-    const { error } = await supabase
-      .from("interests")
-      .update({ owner_dismissed_at: new Date().toISOString() })
-      .eq("item_id", r.item_id)
-      .eq("user_id", r.user_id);
+    setDeletingNotifId(r.id);
 
-    setDismissingKey(null);
+    const { error } = await supabase.from("interests").delete().eq("id", r.id);
+
+    setDeletingNotifId(null);
+
     if (error) return alert(error.message);
 
-    setIncomingRequests((prev) => prev.filter((x) => !(x.item_id === r.item_id && x.user_id === r.user_id)));
+    setIncomingRequests((prev) => prev.filter((x) => x.id !== r.id));
   }
 
   async function loadAll() {
@@ -353,7 +401,6 @@ export default function AccountPage() {
     const [iRows, rRows] = await Promise.all([loadMyListings(uid), loadMyRequests(uid)]);
     await loadIncomingRequests(uid);
 
-    // stats (keep your logic)
     const listed = iRows.length;
     const requested = rRows.length;
 
@@ -441,7 +488,8 @@ export default function AccountPage() {
     return <div style={pageWrap}>Loading…</div>;
   }
 
-  // ---------------- LOGGED OUT VIEW ----------------
+  /* ---------------- LOGGED OUT ---------------- */
+
   if (!isLoggedIn) {
     return (
       <div style={{ ...pageWrap, paddingBottom: 120 }}>
@@ -499,22 +547,99 @@ export default function AccountPage() {
     );
   }
 
-  // ---------------- LOGGED IN VIEW ----------------
+  /* ---------------- LOGGED IN ---------------- */
+
   return (
     <div style={{ ...pageWrap, paddingBottom: 120 }}>
-      {/* ✅ Compact sticky header */}
-      <div style={stickyHeader}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+      <style jsx>{`
+        /* ✅ Fix the phone UI: make header + tabs never collide */
+        .header {
+          position: sticky;
+          top: 0;
+          z-index: 50;
+          background: rgba(0, 0, 0, 0.92);
+          backdrop-filter: blur(10px);
+          border-bottom: 1px solid #0f223f;
+          padding-bottom: 10px;
+        }
+
+        .topRow {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        /* This keeps the tab bar from getting "cut" under the menu button */
+        .tabs {
+          display: flex;
+          gap: 10px;
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          padding-bottom: 8px;
+          padding-right: 56px; /* ✅ space so last pill isn't hidden by iOS overlay/scrollbar feel */
+        }
+        .tabs::-webkit-scrollbar {
+          display: none;
+        }
+
+        /* ✅ Request row: stack nicely on phone */
+        .reqRow {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+        }
+        .reqMain {
+          flex: 1;
+          min-width: 220px;
+        }
+        .reqActions {
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          flex-shrink: 0;
+        }
+
+        @media (max-width: 420px) {
+          .reqActions {
+            width: 100%;
+            justify-content: flex-end;
+          }
+        }
+      `}</style>
+
+      <div className="header">
+        <div className="topRow">
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
             <div style={avatar} title={displayName}>
               {displayName.slice(0, 1).toUpperCase()}
             </div>
 
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 18, fontWeight: 1000, lineHeight: 1.1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <div
+                style={{
+                  fontSize: 18,
+                  fontWeight: 1000,
+                  lineHeight: 1.1,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
                 {displayName}
               </div>
-              <div style={{ opacity: 0.75, fontSize: 12, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <div
+                style={{
+                  opacity: 0.75,
+                  fontSize: 12,
+                  marginTop: 2,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
                 {roleLabel} • {userEmail}
               </div>
             </div>
@@ -524,10 +649,11 @@ export default function AccountPage() {
             ☰
           </button>
         </div>
+
         {err && <div style={{ marginTop: 10, color: "#f87171", fontWeight: 900 }}>{err}</div>}
 
-        {/* ✅ Horizontal scroll tab bar (no stacking on phone) */}
-        <div style={tabBar}>
+        {/* ✅ Tabs */}
+        <div className="tabs" style={{ marginTop: 10 }}>
           <button onClick={() => setTab("listings")} style={tabPill(tab === "listings")}>
             Listings
           </button>
@@ -551,6 +677,7 @@ export default function AccountPage() {
       </div>
 
       {/* CONTENT */}
+
       {tab === "listings" && (
         <>
           <div style={sectionHint}>Active listings only (not picked up).</div>
@@ -635,49 +762,55 @@ export default function AccountPage() {
           </div>
 
           {incomingRequests.length === 0 ? (
-            <EmptyBox title="No incoming requests." body="If you KNOW requests exist but this is empty, it’s likely RLS blocking owners from reading interests." />
+            <EmptyBox title="No incoming requests." body="When someone requests your item, it will appear here." />
           ) : (
             <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
               {incomingRequests.map((r) => {
-                const key = `${r.item_id}:${r.user_id}`;
-                const itemTitle = r.items?.title ?? "Unknown item";
+                const itemTitle = r.items?.title?.trim() ? r.items.title : "Unknown item";
                 const who = niceName(r);
                 const when = fmtWhen(r.created_at);
+                const deleting = deletingNotifId === r.id;
 
                 return (
-                  <div key={key} style={rowCard}>
-                    <Thumb photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={rowTitle}>
-                        {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
-                      </div>
-                      <div style={rowMeta}>
-                        Item: <span style={{ fontWeight: 900 }}>{shortId(r.item_id)}</span>
-                        {when ? ` • Requested: ${when}` : ""}
-                        {r.owner_seen_at ? " • Seen" : " • New"}
-                      </div>
-                    </div>
+                  <div key={r.id} style={rowCard}>
+                    <div className="reqRow">
+                      <Thumb photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
 
-                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      <button onClick={() => router.push(`/manage/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}>
-                        Open
-                      </button>
+                      <div className="reqMain">
+                        <div style={rowTitle}>
+                          {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
+                        </div>
+                        <div style={rowMeta}>
+                          Item: <span style={{ fontWeight: 900 }}>{shortId(r.item_id)}</span>
+                          {when ? ` • Requested: ${when}` : ""}
+                          {r.owner_seen_at ? " • Seen" : " • New"}
+                          {r.status ? ` • ${r.status}` : ""}
+                        </div>
+                      </div>
 
-                      <button
-                        onClick={() => dismissIncoming(r)}
-                        disabled={dismissingKey === key}
-                        style={{
-                          ...outlineBtn,
-                          marginTop: 0,
-                          border: "1px solid #7f1d1d",
-                          cursor: dismissingKey === key ? "not-allowed" : "pointer",
-                          opacity: dismissingKey === key ? 0.75 : 1,
-                          whiteSpace: "nowrap",
-                        }}
-                        title="Dismiss notification"
-                      >
-                        {dismissingKey === key ? "…" : "Dismiss"}
-                      </button>
+                      <div className="reqActions">
+                        {/* Keep your routing. If your manage route doesn't exist, change to /item/${r.item_id} */}
+                        <button onClick={() => router.push(`/manage/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}>
+                          Open
+                        </button>
+
+                        {/* ✅ HARD DELETE notification */}
+                        <button
+                          onClick={() => deleteNotification(r)}
+                          disabled={deleting}
+                          style={{
+                            ...outlineBtn,
+                            marginTop: 0,
+                            border: "1px solid #7f1d1d",
+                            cursor: deleting ? "not-allowed" : "pointer",
+                            opacity: deleting ? 0.75 : 1,
+                            whiteSpace: "nowrap",
+                          }}
+                          title="Delete notification"
+                        >
+                          {deleting ? "Deleting…" : "Delete"}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -740,7 +873,6 @@ export default function AccountPage() {
                 Messages
               </button>
 
-              {/* ✅ NEW: My pickups lives here (new page route) */}
               <button
                 onClick={() => {
                   setDrawerOpen(false);
@@ -762,11 +894,9 @@ export default function AccountPage() {
   );
 }
 
-/* ---------------- UI helpers/components ---------------- */
+/* ---------------- Components ---------------- */
 
 function CardRail({ children }: { children: React.ReactNode }) {
-  // Phone: horizontal scroll rail
-  // Desktop: grid
   return (
     <div>
       <div style={railMobile}>{children}</div>
@@ -825,7 +955,6 @@ function ItemCard({
           </button>
         </div>
       ) : (
-        // ✅ history: no actions
         <div style={{ marginTop: 10, opacity: 0.7, fontSize: 12 }}>Completed ✅</div>
       )}
     </div>
@@ -864,16 +993,6 @@ const pageWrap: React.CSSProperties = {
   padding: 16,
 };
 
-const stickyHeader: React.CSSProperties = {
-  position: "sticky",
-  top: 0,
-  zIndex: 50,
-  background: "rgba(0,0,0,0.90)",
-  backdropFilter: "blur(8px)",
-  paddingBottom: 12,
-  borderBottom: "1px solid #0f223f",
-};
-
 const avatar: React.CSSProperties = {
   width: 44,
   height: 44,
@@ -897,99 +1016,6 @@ const iconBtn: React.CSSProperties = {
   color: "white",
   cursor: "pointer",
   fontWeight: 900,
-};
-
-const statsRow: React.CSSProperties = {
-  marginTop: 10,
-  border: "1px solid #0f223f",
-  background: "#020617",
-  borderRadius: 16,
-  padding: 10,
-  display: "grid",
-  gridTemplateColumns: "repeat(3, 1fr)",
-  gap: 8,
-};
-
-const statTile: React.CSSProperties = {
-  borderRadius: 14,
-  border: "1px solid #0f223f",
-  background: "#0b1730",
-  padding: 10,
-  textAlign: "center",
-  position: "relative",
-  minHeight: 64,
-};
-
-const statValue: React.CSSProperties = {
-  fontSize: 18,
-  fontWeight: 1000,
-};
-
-const statLabel: React.CSSProperties = {
-  opacity: 0.8,
-  fontSize: 12,
-  marginTop: 4,
-};
-
-const statActions: React.CSSProperties = {
-  position: "absolute",
-  right: 8,
-  top: 8,
-  display: "flex",
-  gap: 6,
-};
-
-const miniIconBtn: React.CSSProperties = {
-  width: 28,
-  height: 28,
-  borderRadius: 10,
-  border: "1px solid #334155",
-  background: "rgba(22,163,74,0.12)",
-  color: "white",
-  cursor: "pointer",
-  fontWeight: 1000,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-};
-
-const tabBar: React.CSSProperties = {
-  marginTop: 10,
-  display: "flex",
-  gap: 10,
-  overflowX: "auto",
-  WebkitOverflowScrolling: "touch",
-  paddingBottom: 6,
-};
-
-function tabPill(active: boolean): React.CSSProperties {
-  return {
-    flex: "0 0 auto",
-    borderRadius: 999,
-    border: active ? "1px solid #16a34a" : "1px solid #334155",
-    background: active ? "rgba(22,163,74,0.18)" : "transparent",
-    color: "white",
-    padding: "10px 12px",
-    cursor: "pointer",
-    fontWeight: 900,
-    whiteSpace: "nowrap",
-  };
-}
-
-const dot: React.CSSProperties = {
-  display: "inline-block",
-  width: 8,
-  height: 8,
-  borderRadius: 999,
-  background: "#ef4444",
-  marginLeft: 8,
-  boxShadow: "0 0 0 3px rgba(239,68,68,0.20)",
-};
-
-const sectionHint: React.CSSProperties = {
-  marginTop: 14,
-  opacity: 0.78,
-  fontSize: 13,
 };
 
 const panel: React.CSSProperties = {
@@ -1045,6 +1071,36 @@ const outlineBtn: React.CSSProperties = {
   borderRadius: 12,
   cursor: "pointer",
   fontWeight: 900,
+};
+
+function tabPill(active: boolean): React.CSSProperties {
+  return {
+    flex: "0 0 auto",
+    borderRadius: 999,
+    border: active ? "1px solid #16a34a" : "1px solid #334155",
+    background: active ? "rgba(22,163,74,0.18)" : "transparent",
+    color: "white",
+    padding: "10px 12px",
+    cursor: "pointer",
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+  };
+}
+
+const dot: React.CSSProperties = {
+  display: "inline-block",
+  width: 8,
+  height: 8,
+  borderRadius: 999,
+  background: "#ef4444",
+  marginLeft: 8,
+  boxShadow: "0 0 0 3px rgba(239,68,68,0.20)",
+};
+
+const sectionHint: React.CSSProperties = {
+  marginTop: 14,
+  opacity: 0.78,
+  fontSize: 13,
 };
 
 const railMobile: React.CSSProperties = {
@@ -1166,9 +1222,6 @@ const rowCard: React.CSSProperties = {
   background: "#0b1730",
   borderRadius: 16,
   padding: 14,
-  display: "flex",
-  gap: 12,
-  alignItems: "center",
 };
 
 const thumbWrap: React.CSSProperties = {
@@ -1220,13 +1273,3 @@ const drawerBtn: React.CSSProperties = {
   fontWeight: 900,
   textAlign: "left",
 };
-
-/**
- * Desktop-only grid: we can enable it via a tiny media query trick:
- * You can remove this if you later move to CSS/Tailwind.
- */
-if (typeof window !== "undefined") {
-  const w = window.innerWidth;
-  // NOTE: we keep it simple: show grid on wider screens
-  // (React inline styles can't do media queries cleanly)
-}
