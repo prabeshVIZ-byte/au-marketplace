@@ -48,57 +48,6 @@ function isAvailableNow(row: FeedRow) {
   return t > Date.now();
 }
 
-function ChipRow({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: { label: string; value: string }[];
-}) {
-  return (
-    <div style={{ marginBottom: 12 }}>
-      <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 8 }}>{label}</div>
-      <div
-        style={{
-          display: "flex",
-          gap: 10,
-          overflowX: "auto",
-          paddingBottom: 6,
-          WebkitOverflowScrolling: "touch",
-        }}
-      >
-        {options.map((opt) => {
-          const active = value === opt.value;
-          return (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => onChange(opt.value)}
-              style={{
-                flex: "0 0 auto",
-                borderRadius: 999,
-                border: active ? "1px solid rgba(52,211,153,0.45)" : "1px solid rgba(148,163,184,0.22)",
-                background: active ? "rgba(16,185,129,0.14)" : "rgba(255,255,255,0.04)",
-                color: active ? "rgba(209,250,229,0.95)" : "rgba(255,255,255,0.82)",
-                padding: "10px 14px",
-                cursor: "pointer",
-                fontWeight: 900,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {opt.label}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 function statusBadge(status: string | null) {
   const st = (status ?? "available").toLowerCase();
   const base = {
@@ -156,7 +105,7 @@ export default function FeedPage() {
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState<string>("");
 
-  // filters (horizontal chips)
+  // filters (LOGIC UNCHANGED)
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
   const [availabilityFilter, setAvailabilityFilter] = useState<"all" | "available" | "expiring_3d">("all");
@@ -291,6 +240,7 @@ export default function FeedPage() {
     return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
   }, [items]);
 
+  // ✅ LOGIC UNCHANGED (still uses availabilityFilter even though UI won’t show it)
   const filteredItems = useMemo(() => {
     const now = Date.now();
     const threeDays = 3 * 24 * 60 * 60 * 1000;
@@ -361,69 +311,99 @@ export default function FeedPage() {
       {err && <p style={{ color: "#f87171", marginTop: 12 }}>{err}</p>}
       {loading && <p style={{ marginTop: 12, opacity: 0.8 }}>Loading…</p>}
 
-      {/* filter bar like "store" UI */}
+      {/* ✅ NEW: Compact filter bar (UI ONLY) */}
       <div
         style={{
           marginTop: 18,
-          borderRadius: 18,
-          border: "1px solid rgba(148,163,184,0.15)",
-          background: "rgba(255,255,255,0.04)",
-          padding: 14,
+          display: "flex",
+          alignItems: "center",
+          gap: 14,
+          flexWrap: "wrap",
         }}
       >
-        <ChipRow
-          label="Category"
-          value={categoryFilter}
-          onChange={setCategoryFilter}
-          options={categories.map((c) => ({
-            value: c,
-            label: c === "all" ? "All" : c[0].toUpperCase() + c.slice(1),
-          }))}
-        />
-
-        <ChipRow
-          label="Lister type"
-          value={roleFilter}
-          onChange={(v) => setRoleFilter(v as any)}
-          options={[
-            { value: "all", label: "All" },
-            { value: "student", label: "Student" },
-            { value: "faculty", label: "Faculty" },
-          ]}
-        />
-
-        <ChipRow
-          label="Availability"
-          value={availabilityFilter}
-          onChange={(v) => setAvailabilityFilter(v as any)}
-          options={[
-            { value: "all", label: "All" },
-            { value: "available", label: "Available now" },
-            { value: "expiring_3d", label: "Expiring ≤ 3 days" },
-          ]}
-        />
-
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <button
-            type="button"
-            onClick={() => {
-              setCategoryFilter("all");
-              setRoleFilter("all");
-              setAvailabilityFilter("all");
-            }}
+        {/* Lister type dropdown (same roleFilter state) */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ fontSize: 12, opacity: 0.75, fontWeight: 900 }}>Lister</div>
+          <select
+            value={roleFilter}
+            onChange={(e) => setRoleFilter(e.target.value as any)}
             style={{
-              borderRadius: 12,
+              background: "rgba(255,255,255,0.04)",
               border: "1px solid rgba(148,163,184,0.25)",
-              background: "transparent",
               color: "white",
               padding: "10px 12px",
-              cursor: "pointer",
+              borderRadius: 12,
               fontWeight: 900,
+              cursor: "pointer",
+              outline: "none",
+              minWidth: 170,
             }}
           >
-            Reset filters
-          </button>
+            <option value="all">All</option>
+            <option value="student">Student</option>
+            <option value="faculty">Faculty</option>
+          </select>
         </div>
+
+        {/* Category pills (same categoryFilter state) */}
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            overflowX: "auto",
+            paddingBottom: 6,
+            WebkitOverflowScrolling: "touch",
+            flex: "1 1 auto",
+          }}
+        >
+          {categories.map((c) => {
+            const active = categoryFilter === c;
+            const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
+
+            return (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setCategoryFilter(c)}
+                style={{
+                  flex: "0 0 auto",
+                  borderRadius: 999,
+                  border: active ? "1px solid rgba(52,211,153,0.45)" : "1px solid rgba(148,163,184,0.22)",
+                  background: active ? "rgba(16,185,129,0.14)" : "rgba(255,255,255,0.04)",
+                  color: active ? "rgba(209,250,229,0.95)" : "rgba(255,255,255,0.82)",
+                  padding: "10px 14px",
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Reset (same logic; also resets availabilityFilter even though UI doesn’t show it) */}
+        <button
+          type="button"
+          onClick={() => {
+            setCategoryFilter("all");
+            setRoleFilter("all");
+            setAvailabilityFilter("all");
+          }}
+          style={{
+            borderRadius: 12,
+            border: "1px solid rgba(148,163,184,0.25)",
+            background: "transparent",
+            color: "white",
+            padding: "10px 12px",
+            cursor: "pointer",
+            fontWeight: 900,
+            whiteSpace: "nowrap",
+          }}
+        >
+          Reset
+        </button>
       </div>
 
       <div style={{ marginTop: 16, display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
@@ -433,7 +413,7 @@ export default function FeedPage() {
         </div>
       </div>
 
-      {/* store-like cards */}
+      {/* cards */}
       <div
         style={{
           display: "grid",
@@ -459,7 +439,13 @@ export default function FeedPage() {
               }}
             >
               {/* image */}
-              <div style={{ position: "relative", height: 220, background: "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))" }}>
+              <div
+                style={{
+                  position: "relative",
+                  height: 220,
+                  background: "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))",
+                }}
+              >
                 {item.photo_url ? (
                   <button
                     type="button"
@@ -467,7 +453,14 @@ export default function FeedPage() {
                       setOpenImg(item.photo_url!);
                       setOpenTitle(item.title);
                     }}
-                    style={{ padding: 0, border: "none", background: "transparent", cursor: "pointer", width: "100%", height: "100%" }}
+                    style={{
+                      padding: 0,
+                      border: "none",
+                      background: "transparent",
+                      cursor: "pointer",
+                      width: "100%",
+                      height: "100%",
+                    }}
                     aria-label="Open photo"
                     title="Open photo"
                   >
@@ -557,7 +550,11 @@ export default function FeedPage() {
                     style={{
                       width: "100%",
                       border: "1px solid rgba(52,211,153,0.25)",
-                      background: isLoggedIn ? (mine ? "rgba(16,185,129,0.16)" : "rgba(16,185,129,0.24)") : "rgba(255,255,255,0.03)",
+                      background: isLoggedIn
+                        ? mine
+                          ? "rgba(16,185,129,0.16)"
+                          : "rgba(16,185,129,0.24)"
+                        : "rgba(255,255,255,0.03)",
                       color: "rgba(255,255,255,0.9)",
                       padding: "10px 12px",
                       borderRadius: 14,
@@ -616,7 +613,9 @@ export default function FeedPage() {
                 borderBottom: "1px solid rgba(148,163,184,0.15)",
               }}
             >
-              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{openTitle || "Photo"}</div>
+              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {openTitle || "Photo"}
+              </div>
               <button
                 type="button"
                 onClick={() => setOpenImg(null)}
@@ -638,7 +637,14 @@ export default function FeedPage() {
             <img
               src={openImg}
               alt={openTitle || "Full photo"}
-              style={{ width: "100%", height: "auto", maxHeight: "80vh", objectFit: "contain", display: "block", background: "black" }}
+              style={{
+                width: "100%",
+                height: "auto",
+                maxHeight: "80vh",
+                objectFit: "contain",
+                display: "block",
+                background: "black",
+              }}
             />
           </div>
         </div>
