@@ -23,13 +23,23 @@ type Category =
 
 type PickupLocation = "College Quad" | "Safety Service Office" | "Dining Hall";
 type ExpireChoice = "7" | "14" | "30" | "never";
+type Condition = "new" | "like_new" | "good" | "fair";
+
+const NAV_HEIGHT = 86; // adjust to your bottom nav height
+const STICKY_BAR_HEIGHT = 74; // sticky Post bar height
+const MAX_PHOTO_MB = 6;
 
 function getExt(filename: string) {
   const parts = filename.split(".");
   return parts.length > 1 ? (parts.pop() || "jpg").toLowerCase() : "jpg";
 }
-function isImage(file: File) {
-  return file.type?.startsWith("image/");
+function isAllowedImage(file: File) {
+  const allowed = ["image/jpeg", "image/png", "image/webp"];
+  return allowed.includes(file.type);
+}
+function clampText(s: string, max: number) {
+  if (s.length <= max) return s;
+  return s.slice(0, max);
 }
 
 export default function CreatePage() {
@@ -42,14 +52,21 @@ export default function CreatePage() {
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileComplete, setProfileComplete] = useState(false);
 
-  // form
+  // core form
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
   const [category, setCategory] = useState<Category>("books");
+  const [condition, setCondition] = useState<Condition>("good");
+
   const [pickupLocation, setPickupLocation] = useState<PickupLocation>("College Quad");
+  const [availabilityNote, setAvailabilityNote] = useState(""); // when / meetup window
+
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [expireChoice, setExpireChoice] = useState<ExpireChoice>("7");
+
+  // optional “market price” (NOT what you charge; just reference)
+  const [marketPrice, setMarketPrice] = useState(""); // store as numeric if your DB supports
 
   // photo
   const [file, setFile] = useState<File | null>(null);
@@ -62,6 +79,43 @@ export default function CreatePage() {
   const isAllowed = useMemo(() => {
     return !!email && email.toLowerCase().endsWith("@ashland.edu");
   }, [email]);
+
+  const cleanTitle = useMemo(() => title.trim(), [title]);
+  const cleanDesc = useMemo(() => {
+    const d = description.trim();
+    return d.length ? d : null;
+  }, [description]);
+
+  const cleanAvailability = useMemo(() => {
+    const a = availabilityNote.trim();
+    return a.length ? a : null;
+  }, [availabilityNote]);
+
+  const parsedMarketPrice = useMemo(() => {
+    // empty => null
+    const raw = marketPrice.trim();
+    if (!raw) return null;
+
+    // allow “20” or “20.50”
+    const num = Number(raw);
+    if (!Number.isFinite(num) || num < 0) return "INVALID";
+    // avoid crazy values
+    if (num > 100000) return "INVALID";
+    return num;
+  }, [marketPrice]);
+
+  const canSubmit = useMemo(() => {
+    if (!isAllowed || !userId) return false;
+    if (!profileComplete) return false;
+    if (cleanTitle.length < 3) return false;
+    if (parsedMarketPrice === "INVALID") return false;
+    if (file) {
+      const tooBig = file.size > MAX_PHOTO_MB * 1024 * 1024;
+      if (tooBig) return false;
+      if (!isAllowedImage(file)) return false;
+    }
+    return true;
+  }, [isAllowed, userId, profileComplete, cleanTitle, parsedMarketPrice, file]);
 
   // 1) Auth
   useEffect(() => {
@@ -91,7 +145,7 @@ export default function CreatePage() {
     };
   }, []);
 
-  // 2) Profile check (IMPORTANT: maybeSingle so new users don’t error)
+  // 2) Profile check
   useEffect(() => {
     let mounted = true;
 
@@ -143,30 +197,27 @@ export default function CreatePage() {
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
+  function validateBeforeSubmit(): string | null {
+    if (!isAllowed || !userId) return "You must be logged in with @ashland.edu.";
+    if (!profileComplete) return "Please complete your profile first.";
+    if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
+    if (parsedMarketPrice === "INVALID") return "Market price must be a valid number (e.g., 20 or 20.50).";
+    if (file) {
+      const tooBig = file.size > MAX_PHOTO_MB * 1024 * 1024;
+      if (tooBig) return `Photo is too large. Max ${MAX_PHOTO_MB}MB.`;
+      if (!isAllowedImage(file)) return "Please upload jpg/png/webp.";
+    }
+    return null;
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setMsg(null);
 
-    if (!isAllowed || !userId) {
-      router.push("/me");
-      return;
-    }
-    if (!profileComplete) {
-      router.push("/me");
-      return;
-    }
-
-    const cleanTitle = title.trim();
-    const cleanDescRaw = description.trim();
-    const cleanDesc = cleanDescRaw.length === 0 ? null : cleanDescRaw;
-
-    if (cleanTitle.length < 3) {
-      setMsg("Title must be at least 3 characters.");
-      return;
-    }
-
-    if (file && !isImage(file)) {
-      setMsg("Please upload an image file (jpg/png/webp).");
+    const errText = validateBeforeSubmit();
+    if (errText) {
+      setMsg(errText);
+      if (!isAllowed || !userId || !profileComplete) router.push("/me");
       return;
     }
 
@@ -178,18 +229,31 @@ export default function CreatePage() {
     setSaving(true);
 
     try {
-      // Create item
+      /**
+       * IMPORTANT DB NOTE:
+       * This code assumes your "items" table has these columns:
+       * - user_id (uuid)      <-- REQUIRED to enforce ownership + RLS
+       * - condition (text)
+       * - availability_note (text, nullable)
+       * - market_price (numeric, nullable)  <-- optional reference price
+       *
+       * If your table does NOT have them, you must add them or remove from insert.
+       */
       const { data: created, error: createErr } = await supabase
         .from("items")
         .insert([
           {
+            user_id: userId, // ✅ OWNER — do not skip this
             title: cleanTitle,
             description: cleanDesc,
             status: "available",
             photo_url: null,
             category,
+            condition,
             pickup_location: pickupLocation,
+            availability_note: cleanAvailability,
             is_anonymous: isAnonymous,
+            market_price: parsedMarketPrice === "INVALID" ? null : parsedMarketPrice, // should never be INVALID here
             expires_at: expiresAt,
           },
         ])
@@ -230,7 +294,6 @@ export default function CreatePage() {
       const publicUrl = pub.publicUrl;
 
       const { error: updateErr } = await supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId);
-
       if (updateErr) {
         setMsg(`Photo uploaded, but items.photo_url update failed: ${updateErr.message}`);
         router.push(`/item/${itemId}`);
@@ -253,7 +316,7 @@ export default function CreatePage() {
     }
   }
 
-  // UI
+  // UI states
   if (authLoading || profileLoading) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -295,7 +358,6 @@ export default function CreatePage() {
         <p style={{ opacity: 0.85, marginTop: 0 }}>
           Before posting, please set your <b>full name</b> and choose <b>Student/Faculty</b>.
         </p>
-
         <button
           onClick={() => router.push("/me")}
           style={{
@@ -316,8 +378,18 @@ export default function CreatePage() {
     );
   }
 
+  // Form UI
   return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "black",
+        color: "white",
+        padding: 24,
+        // ✅ make room for BOTH sticky post bar + bottom nav
+        paddingBottom: NAV_HEIGHT + STICKY_BAR_HEIGHT + 28,
+      }}
+    >
       <button
         onClick={() => router.push("/feed")}
         style={{
@@ -333,37 +405,55 @@ export default function CreatePage() {
         ← Back to feed
       </button>
 
-      <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>List New Item</h1>
+      <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 6 }}>List New Item</h1>
+      <p style={{ marginTop: 0, marginBottom: 14, opacity: 0.82, maxWidth: 520 }}>
+        Tip: clear title + photo = more replies. This is a <b>free exchange</b>; you can optionally add a <b>market price</b> for context.
+      </p>
 
       <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 520 }}>
-        <input
-          type="text"
-          placeholder="Item title"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          style={{
-            padding: 10,
-            borderRadius: 10,
-            border: "1px solid #333",
-            background: "#111",
-            color: "white",
-          }}
-        />
+        {/* TITLE */}
+        <div>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>Title</div>
+          <input
+            type="text"
+            placeholder='Example: "Calculus Textbook (good condition)"'
+            value={title}
+            onChange={(e) => setTitle(clampText(e.target.value, 80))}
+            style={{
+              width: "100%",
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #333",
+              background: "#111",
+              color: "white",
+              outline: "none",
+            }}
+          />
+          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>{cleanTitle.length}/80</div>
+        </div>
 
-        <textarea
-          placeholder="Description (optional)"
-          rows={4}
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          style={{
-            padding: 10,
-            borderRadius: 10,
-            border: "1px solid #333",
-            background: "#111",
-            color: "white",
-          }}
-        />
+        {/* DESCRIPTION */}
+        <div>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>Description (optional)</div>
+          <textarea
+            placeholder="What is it? Any flaws? What’s included?"
+            rows={4}
+            value={description}
+            onChange={(e) => setDescription(clampText(e.target.value, 600))}
+            style={{
+              width: "100%",
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #333",
+              background: "#111",
+              color: "white",
+              outline: "none",
+            }}
+          />
+          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>{description.length}/600</div>
+        </div>
 
+        {/* CATEGORY */}
         <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
           <div style={{ fontWeight: 900, marginBottom: 10 }}>Category</div>
           <select
@@ -395,6 +485,56 @@ export default function CreatePage() {
           </select>
         </div>
 
+        {/* CONDITION */}
+        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
+          <div style={{ fontWeight: 900, marginBottom: 10 }}>Condition</div>
+          <select
+            value={condition}
+            onChange={(e) => setCondition(e.target.value as Condition)}
+            style={{
+              width: "100%",
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #334155",
+              background: "black",
+              color: "white",
+            }}
+          >
+            <option value="new">New</option>
+            <option value="like_new">Like new</option>
+            <option value="good">Good</option>
+            <option value="fair">Fair</option>
+          </select>
+        </div>
+
+        {/* MARKET PRICE (OPTIONAL) */}
+        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>Market price (optional)</div>
+          <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
+            Not what you charge — just a reference so people know what it’s worth.
+          </div>
+          <input
+            inputMode="decimal"
+            placeholder="Example: 40"
+            value={marketPrice}
+            onChange={(e) => setMarketPrice(e.target.value)}
+            style={{
+              width: "100%",
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #334155",
+              background: "black",
+              color: "white",
+            }}
+          />
+          {parsedMarketPrice === "INVALID" && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "#f87171" }}>
+              Enter a valid number (e.g., 20 or 20.50).
+            </div>
+          )}
+        </div>
+
+        {/* PICKUP */}
         <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
           <div style={{ fontWeight: 900, marginBottom: 10 }}>Pickup location</div>
           <select
@@ -415,8 +555,35 @@ export default function CreatePage() {
           </select>
         </div>
 
+        {/* AVAILABILITY */}
         <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>Post anonymously</div>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>Availability (optional)</div>
+          <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
+            Reduce back-and-forth. Example: “Today after 6pm” or “Weekdays 2–5”.
+          </div>
+          <input
+            type="text"
+            placeholder='Example: "Weekdays after 4pm"'
+            value={availabilityNote}
+            onChange={(e) => setAvailabilityNote(clampText(e.target.value, 120))}
+            style={{
+              width: "100%",
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #334155",
+              background: "black",
+              color: "white",
+            }}
+          />
+          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>{availabilityNote.length}/120</div>
+        </div>
+
+        {/* ANONYMOUS */}
+        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>Post anonymously</div>
+          <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
+            Your name is hidden from others, but your Ashland login is still verified.
+          </div>
           <button
             type="button"
             onClick={() => setIsAnonymous((v) => !v)}
@@ -435,8 +602,9 @@ export default function CreatePage() {
           </button>
         </div>
 
+        {/* EXPIRES */}
         <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>Expires</div>
+          <div style={{ fontWeight: 900, marginBottom: 10 }}>Auto-archive</div>
           <select
             value={expireChoice}
             onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
@@ -456,15 +624,25 @@ export default function CreatePage() {
           </select>
         </div>
 
+        {/* PHOTO */}
         <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>Photo (optional)</div>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>Photo (optional)</div>
+          <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
+            Photos usually get more replies. (Max {MAX_PHOTO_MB}MB, jpg/png/webp)
+          </div>
 
           {previewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
               src={previewUrl}
               alt="Preview"
-              style={{ width: "100%", height: 240, objectFit: "cover", borderRadius: 12, border: "1px solid #0f223f" }}
+              style={{
+                width: "100%",
+                height: 240,
+                objectFit: "cover",
+                borderRadius: 12,
+                border: "1px solid #0f223f",
+              }}
             />
           ) : (
             <div
@@ -483,7 +661,32 @@ export default function CreatePage() {
             </div>
           )}
 
-          <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} style={{ marginTop: 12 }} />
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            onChange={(e) => {
+              const f = e.target.files?.[0] ?? null;
+              setMsg(null);
+              if (!f) {
+                setFile(null);
+                return;
+              }
+              const tooBig = f.size > MAX_PHOTO_MB * 1024 * 1024;
+              if (tooBig) {
+                setFile(null);
+                setMsg(`Photo is too large. Max ${MAX_PHOTO_MB}MB.`);
+                return;
+              }
+              if (!isAllowedImage(f)) {
+                setFile(null);
+                setMsg("Please upload jpg/png/webp.");
+                return;
+              }
+              setFile(f);
+            }}
+            style={{ marginTop: 12 }}
+          />
+
           {file && (
             <button
               type="button"
@@ -506,23 +709,55 @@ export default function CreatePage() {
 
         {msg && <p style={{ color: "#f87171", margin: 0 }}>{msg}</p>}
 
-        <button
-          type="submit"
-          disabled={saving}
-          style={{
-            background: saving ? "#14532d" : "#16a34a",
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "none",
-            color: "white",
-            cursor: saving ? "not-allowed" : "pointer",
-            opacity: saving ? 0.7 : 1,
-            fontWeight: 900,
-          }}
-        >
-          {saving ? "Posting…" : "Post Item"}
-        </button>
+        {/* NOTE: actual submit button is in sticky bar below to avoid bottom-nav overlap */}
       </form>
+
+      {/* ✅ Sticky submit bar (solves overlap + boosts conversion) */}
+      <div
+        style={{
+          position: "fixed",
+          left: 0,
+          right: 0,
+          bottom: NAV_HEIGHT, // sits ABOVE your bottom nav
+          height: STICKY_BAR_HEIGHT,
+          background: "rgba(0,0,0,0.92)",
+          borderTop: "1px solid #0f223f",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "10px 16px",
+          zIndex: 50,
+          backdropFilter: "blur(8px)",
+        }}
+      >
+        <div style={{ width: "100%", maxWidth: 520, display: "flex", gap: 10, alignItems: "center" }}>
+          <div style={{ flex: 1, fontSize: 12, opacity: 0.75 }}>
+            {cleanTitle.length < 3 ? "Add a clearer title to post." : "Ready to post. You can edit later."}
+          </div>
+
+          <button
+            onClick={(e) => {
+              // submit the form programmatically
+              const form = document.querySelector("form");
+              if (form) form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+            }}
+            disabled={saving || !canSubmit}
+            style={{
+              background: saving || !canSubmit ? "#14532d" : "#16a34a",
+              padding: "12px 16px",
+              borderRadius: 12,
+              border: "none",
+              color: "white",
+              cursor: saving || !canSubmit ? "not-allowed" : "pointer",
+              opacity: saving || !canSubmit ? 0.6 : 1,
+              fontWeight: 900,
+              minWidth: 140,
+            }}
+          >
+            {saving ? "Posting…" : "Post Item"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
