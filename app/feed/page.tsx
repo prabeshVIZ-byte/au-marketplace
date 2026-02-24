@@ -146,7 +146,7 @@ export default function FeedPage() {
     // ✅ IMPORTANT: owner_id must exist in v_feed_items and be selected
     const { data, error } = await supabase
       .from("v_feed_items")
-      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role,owner_id")
+      .select("id,title,description,category,status,created_at,photo_url,expires_at,owner_role,interest_count,owner_id")
       .order("created_at", { ascending: false });
 
     if (error) {

@@ -1,8 +1,9 @@
+// /app/item/[id]/page.tsx
 "use client";
 export const dynamic = "force-dynamic";
 
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter, useParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
 
@@ -50,50 +51,6 @@ function formatExpiry(expiresAt: string | null) {
   return end.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
-function pillStyle() {
-  return {
-    fontSize: 12,
-    fontWeight: 950,
-    padding: "7px 10px",
-    borderRadius: 999,
-    background: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(148,163,184,0.18)",
-    color: "rgba(255,255,255,0.85)",
-    whiteSpace: "nowrap" as const,
-  };
-}
-
-function statusPill(status: string | null) {
-  const st = (status ?? "available").toLowerCase();
-  const base = pillStyle();
-
-  if (st === "reserved") {
-    return {
-      ...base,
-      border: "1px solid rgba(96,165,250,0.35)",
-      background: "rgba(59,130,246,0.16)",
-      color: "rgba(191,219,254,0.95)",
-    };
-  }
-  if (st === "available") {
-    return {
-      ...base,
-      border: "1px solid rgba(52,211,153,0.35)",
-      background: "rgba(16,185,129,0.14)",
-      color: "rgba(209,250,229,0.95)",
-    };
-  }
-  if (st === "expired") {
-    return {
-      ...base,
-      border: "1px solid rgba(248,113,113,0.35)",
-      background: "rgba(239,68,68,0.12)",
-      color: "rgba(254,202,202,0.95)",
-    };
-  }
-  return base;
-}
-
 export default function ItemDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -110,34 +67,28 @@ export default function ItemDetailPage() {
 
   const [interestCount, setInterestCount] = useState(0);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
+  const mineInterested = !!myInterest?.id;
 
   const [saving, setSaving] = useState(false);
 
-  // interest modal
+  // request modal
   const [showInterest, setShowInterest] = useState(false);
   const [earliestPickup, setEarliestPickup] = useState<"today" | "tomorrow" | "weekend">("today");
   const [timeWindow, setTimeWindow] = useState<"morning" | "afternoon" | "evening">("afternoon");
   const [note, setNote] = useState("");
   const [interestMsg, setInterestMsg] = useState<string | null>(null);
 
-  // photo modal (same UX as feed)
+  // photo modal (like feed)
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState<string>("");
-
-  const mineInterested = !!myInterest?.id;
 
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
 
-  const isOwner = useMemo(() => {
-    if (!item?.owner_id || !userId) return false;
-    return item.owner_id === userId;
-  }, [item?.owner_id, userId]);
-
-  const myStatus = (myInterest?.status ?? "").toLowerCase();
-  const isAccepted = myStatus === "accepted";
-  const isReserved = myStatus === "reserved";
+  const isMineListing = useMemo(() => {
+    return !!userId && !!item?.owner_id && item.owner_id === userId;
+  }, [userId, item?.owner_id]);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
@@ -161,12 +112,8 @@ export default function ItemDetailPage() {
       if (itErr) throw new Error(itErr.message);
       setItem(it as ItemRow);
 
-      const { count, error: cntErr } = await supabase
-        .from("interests")
-        .select("*", { count: "exact", head: true })
-        .eq("item_id", itemId);
-
-      if (!cntErr) setInterestCount(count ?? 0);
+      const { count } = await supabase.from("interests").select("*", { count: "exact", head: true }).eq("item_id", itemId);
+      setInterestCount(count ?? 0);
 
       const { data: s } = await supabase.auth.getSession();
       const uid = s.session?.user?.id ?? null;
@@ -189,14 +136,8 @@ export default function ItemDetailPage() {
       const anon = !!(it as any)?.is_anonymous;
 
       if (!anon && ownerId) {
-        const { data: prof, error: pErr } = await supabase
-          .from("profiles")
-          .select("full_name,user_role")
-          .eq("id", ownerId)
-          .single();
-
-        if (!pErr) setSeller(prof as SellerProfile);
-        else setSeller(null);
+        const { data: prof } = await supabase.from("profiles").select("full_name,user_role").eq("id", ownerId).single();
+        setSeller((prof as SellerProfile) || null);
       } else {
         setSeller(null);
       }
@@ -218,9 +159,8 @@ export default function ItemDetailPage() {
       return;
     }
 
-    if (item.owner_id && item.owner_id === userId) {
-      setInterestMsg("You can’t request your own listing.");
-      setShowInterest(false);
+    if (isMineListing) {
+      setInterestMsg("This is your listing.");
       return;
     }
 
@@ -246,7 +186,7 @@ export default function ItemDetailPage() {
       if (error) {
         const msg = error.message.toLowerCase();
         if (msg.includes("duplicate") || msg.includes("unique")) {
-          setInterestMsg("You already sent a request for this item.");
+          setInterestMsg("You already sent an interest request for this item.");
           await loadItem();
           return;
         }
@@ -255,7 +195,7 @@ export default function ItemDetailPage() {
 
       setMyInterest({ id: (data as any).id, status: (data as any).status ?? "pending" });
       setInterestCount((c) => c + 1);
-      setInterestMsg("✅ Request sent. Wait for seller acceptance.");
+      setInterestMsg("✅ Request sent! Wait for seller acceptance.");
       setNote("");
       setShowInterest(false);
     } catch (e: any) {
@@ -332,7 +272,7 @@ export default function ItemDetailPage() {
       await insertSystemMessage({
         threadId,
         senderId: userId,
-        body: `✅ Pickup confirmed for “${item.title}”. Let’s coordinate time & location here.`,
+        body: `✅ Pickup confirmed for "${item.title}". Let’s coordinate time + place here.`,
       });
 
       router.push(`/messages/${threadId}`);
@@ -343,7 +283,6 @@ export default function ItemDetailPage() {
     }
   }
 
-  // auth + load
   useEffect(() => {
     syncAuth();
     loadItem();
@@ -357,22 +296,16 @@ export default function ItemDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId]);
 
-  // realtime: update my interest quickly
+  // realtime interest updates so buyer sees acceptance instantly
   useEffect(() => {
     if (!itemId || !userId) return;
 
     const channel = supabase
       .channel(`interest-${itemId}-${userId}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "interests", filter: `item_id=eq.${itemId}` },
-        (payload) => {
-          const row: any = payload.new;
-          if (row?.user_id === userId) {
-            setMyInterest({ id: row.id, status: row.status ?? null });
-          }
-        }
-      )
+      .on("postgres_changes", { event: "*", schema: "public", table: "interests", filter: `item_id=eq.${itemId}` }, (payload) => {
+        const row: any = payload.new;
+        if (row?.user_id === userId) setMyInterest({ id: row.id, status: row.status ?? null });
+      })
       .subscribe();
 
     return () => {
@@ -380,7 +313,7 @@ export default function ItemDetailPage() {
     };
   }, [itemId, userId]);
 
-  // escape closes image modal
+  // esc closes photo modal
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") setOpenImg(null);
@@ -392,99 +325,63 @@ export default function ItemDetailPage() {
   const expiryText = formatExpiry(item?.expires_at ?? null);
   const showSellerName = item && !item.is_anonymous && seller?.full_name;
 
-  const canRequest =
-    !!item &&
-    (item.status ?? "available") === "available" &&
-    isLoggedIn &&
-    !isOwner &&
-    !mineInterested &&
-    !saving;
+  const myStatus = (myInterest?.status ?? "").toLowerCase();
+  const isAccepted = myStatus === "accepted";
+  const isReserved = myStatus === "reserved";
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 110 }}>
-      {/* top bar */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <button
-          onClick={() => router.push("/feed")}
-          style={{
-            background: "transparent",
-            color: "white",
-            border: "1px solid rgba(148,163,184,0.25)",
-            padding: "10px 12px",
-            borderRadius: 12,
-            cursor: "pointer",
-            fontWeight: 900,
-          }}
-        >
-          ← Back
-        </button>
+      <button
+        onClick={() => router.push("/feed")}
+        style={{
+          marginBottom: 16,
+          background: "transparent",
+          color: "white",
+          border: "1px solid rgba(148,163,184,0.25)",
+          padding: "8px 12px",
+          borderRadius: 12,
+          cursor: "pointer",
+          fontWeight: 900,
+        }}
+      >
+        ← Back
+      </button>
 
-        {isOwner && item ? (
-          <button
-            onClick={() => router.push(`/manage/${item.id}`)}
-            style={{
-              background: "rgba(255,255,255,0.04)",
-              color: "white",
-              border: "1px solid rgba(148,163,184,0.25)",
-              padding: "10px 12px",
-              borderRadius: 12,
-              cursor: "pointer",
-              fontWeight: 950,
-              whiteSpace: "nowrap",
-            }}
-          >
-            Manage requests
-          </button>
-        ) : (
-          <button
-            onClick={() => router.push("/messages")}
-            style={{
-              background: "transparent",
-              color: "white",
-              border: "1px solid rgba(148,163,184,0.25)",
-              padding: "10px 12px",
-              borderRadius: 12,
-              cursor: "pointer",
-              fontWeight: 900,
-              whiteSpace: "nowrap",
-            }}
-          >
-            Messages
-          </button>
-        )}
-      </div>
-
-      {err && <p style={{ color: "#f87171", marginTop: 12 }}>{err}</p>}
-      {loading && <p style={{ marginTop: 12, opacity: 0.8 }}>Loading…</p>}
+      {err && <p style={{ color: "#f87171" }}>{err}</p>}
+      {loading && <p style={{ opacity: 0.85 }}>Loading…</p>}
 
       {!loading && item && (
-        <div style={{ maxWidth: 980, marginTop: 14 }}>
-          {/* HEADER: compact + non-intimidating */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <div style={{ fontSize: 34, fontWeight: 950, letterSpacing: -0.4 }}>{item.title}</div>
+        <div style={{ maxWidth: 920 }}>
+          {/* Top header (less wordy) */}
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <h1 style={{ fontSize: 34, fontWeight: 950, margin: 0, letterSpacing: -0.2 }}>{item.title}</h1>
 
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <span style={statusPill(item.status)}>{(item.status ?? "available").toLowerCase()}</span>
-              {item.category ? <span style={pillStyle()}>Category: {item.category}</span> : null}
-              {item.pickup_location ? <span style={pillStyle()}>Pickup: {item.pickup_location}</span> : null}
-              <span style={pillStyle()}>Requests: {interestCount}</span>
-              <span style={pillStyle()}>
-                {item.expires_at ? `Until: ${new Date(item.expires_at).toLocaleString()}` : "De-list: manual"}{" "}
-                <span style={{ opacity: 0.75 }}>({expiryText})</span>
-              </span>
-              <span style={pillStyle()}>
-                Seller:{" "}
-                <b>
-                  {item.is_anonymous ? "Anonymous" : showSellerName ? seller!.full_name : "Ashland user"}
-                </b>
-                {!item.is_anonymous && seller?.user_role ? (
-                  <span style={{ opacity: 0.75 }}> • {seller.user_role}</span>
-                ) : null}
-              </span>
+            <div style={{ opacity: 0.75, fontWeight: 900, fontSize: 13 }}>
+              {(item.status ?? "available").toLowerCase()}
+              {item.expires_at ? (
+                <>
+                  {" "}
+                  • {new Date(item.expires_at).toLocaleDateString()} <span style={{ opacity: 0.75 }}>({expiryText})</span>
+                </>
+              ) : (
+                <span style={{ opacity: 0.75 }}> • Until delisted</span>
+              )}
             </div>
           </div>
 
-          {/* IMAGE: clickable -> modal like feed */}
+          {/* Compact meta row */}
+          <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", opacity: 0.9 }}>
+            {item.category ? <Pill label={`Category: ${item.category}`} /> : <Pill label="Category: —" />}
+            {item.pickup_location ? <Pill label={`Pickup: ${item.pickup_location}`} /> : <Pill label="Pickup: —" />}
+            <Pill
+              label={`Seller: ${
+                item.is_anonymous ? "Anonymous" : showSellerName ? seller!.full_name! : "Ashland user"
+              }${!item.is_anonymous && seller?.user_role ? ` (${seller.user_role})` : ""}`}
+            />
+            <Pill label={`${interestCount} interested`} />
+          </div>
+
+          {/* Image (click to open like feed) */}
           <div style={{ marginTop: 14 }}>
             {item.photo_url ? (
               <button
@@ -499,10 +396,10 @@ export default function ItemDetailPage() {
                   background: "transparent",
                   cursor: "pointer",
                   width: "100%",
-                  maxWidth: 980,
+                  display: "block",
                 }}
-                title="Open photo"
                 aria-label="Open photo"
+                title="Open photo"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
@@ -510,7 +407,6 @@ export default function ItemDetailPage() {
                   alt={item.title}
                   style={{
                     width: "100%",
-                    maxWidth: 980,
                     height: 440,
                     objectFit: "cover",
                     borderRadius: 16,
@@ -523,15 +419,13 @@ export default function ItemDetailPage() {
               <div
                 style={{
                   width: "100%",
-                  maxWidth: 980,
                   height: 260,
                   borderRadius: 16,
-                  border: "1px dashed rgba(148,163,184,0.25)",
+                  border: "1px dashed rgba(148,163,184,0.35)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  color: "rgba(255,255,255,0.55)",
-                  background: "rgba(255,255,255,0.03)",
+                  color: "rgba(148,163,184,0.8)",
                 }}
               >
                 No photo
@@ -539,120 +433,99 @@ export default function ItemDetailPage() {
             )}
           </div>
 
-          {/* DESCRIPTION */}
+          {/* Description */}
           <div
             style={{
               marginTop: 14,
               background: "rgba(255,255,255,0.04)",
-              border: "1px solid rgba(148,163,184,0.16)",
+              border: "1px solid rgba(148,163,184,0.15)",
               borderRadius: 16,
               padding: 14,
             }}
           >
             <div style={{ fontWeight: 950, marginBottom: 8 }}>Description</div>
-            <div style={{ opacity: 0.88, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
-              {item.description && item.description.trim().toLowerCase() !== "until i cancel"
-                ? item.description
-                : "—"}
+            <div style={{ opacity: 0.9, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
+              {item.description && item.description.trim().toLowerCase() !== "until i cancel" ? item.description : "—"}
             </div>
           </div>
 
-          {/* ACTIONS */}
+          {/* Actions */}
           <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            {/* Owner shouldn’t request */}
-            {isOwner ? (
-              <div
+            {/* Request / Status */}
+            <button
+              onClick={() => {
+                if (!isLoggedIn) {
+                  router.push("/me");
+                  return;
+                }
+                if (isMineListing) {
+                  setInterestMsg("This is your listing.");
+                  return;
+                }
+                if (mineInterested) return;
+                setInterestMsg(null);
+                setShowInterest(true);
+              }}
+              disabled={saving || mineInterested || (item.status ?? "available") !== "available" || isMineListing}
+              style={{
+                background: isMineListing ? "rgba(255,255,255,0.03)" : mineInterested ? "rgba(255,255,255,0.06)" : "rgba(16,185,129,0.24)",
+                border: "1px solid rgba(148,163,184,0.25)",
+                color: "white",
+                padding: "10px 14px",
+                borderRadius: 12,
+                cursor: saving || mineInterested || isMineListing ? "not-allowed" : "pointer",
+                fontWeight: 950,
+                opacity: saving ? 0.75 : 1,
+              }}
+            >
+              {isMineListing
+                ? "Your listing"
+                : !isLoggedIn
+                ? "Request (login required)"
+                : mineInterested
+                ? isReserved
+                  ? "Reserved ✅"
+                  : isAccepted
+                  ? "Accepted ✅"
+                  : "Requested"
+                : "Request item"}
+            </button>
+
+            {/* Withdraw */}
+            <button
+              onClick={withdrawInterest}
+              disabled={saving || !mineInterested || isAccepted || isReserved}
+              style={{
+                background: "transparent",
+                border: "1px solid rgba(148,163,184,0.25)",
+                color: "white",
+                padding: "10px 14px",
+                borderRadius: 12,
+                cursor: saving || !mineInterested || isAccepted || isReserved ? "not-allowed" : "pointer",
+                fontWeight: 950,
+                opacity: saving || !mineInterested || isAccepted || isReserved ? 0.55 : 1,
+              }}
+            >
+              Withdraw
+            </button>
+
+            {/* Confirm pickup */}
+            {isAccepted && (
+              <button
+                onClick={confirmPickupAndChat}
+                disabled={saving}
                 style={{
-                  border: "1px solid rgba(148,163,184,0.22)",
-                  background: "rgba(255,255,255,0.03)",
-                  padding: "10px 12px",
-                  borderRadius: 14,
-                  fontWeight: 900,
-                  opacity: 0.9,
+                  background: "rgba(34,197,94,0.25)",
+                  border: "1px solid rgba(34,197,94,0.35)",
+                  color: "white",
+                  padding: "10px 14px",
+                  borderRadius: 12,
+                  cursor: saving ? "not-allowed" : "pointer",
+                  fontWeight: 950,
                 }}
               >
-                You listed this item.
-              </div>
-            ) : (
-              <>
-                <button
-                  onClick={() => {
-                    if (!isLoggedIn) {
-                      router.push("/me");
-                      return;
-                    }
-                    if (mineInterested) return;
-                    setInterestMsg(null);
-                    setShowInterest(true);
-                  }}
-                  disabled={!canRequest}
-                  style={{
-                    border: "1px solid rgba(52,211,153,0.25)",
-                    background: mineInterested ? "rgba(255,255,255,0.05)" : "rgba(16,185,129,0.18)",
-                    color: "white",
-                    padding: "10px 14px",
-                    borderRadius: 14,
-                    cursor: canRequest ? "pointer" : "not-allowed",
-                    fontWeight: 950,
-                    opacity: canRequest ? 1 : 0.6,
-                  }}
-                  title={
-                    !isLoggedIn
-                      ? "Login required"
-                      : mineInterested
-                      ? "You already requested"
-                      : (item.status ?? "available") !== "available"
-                      ? "Not available"
-                      : "Send a request"
-                  }
-                >
-                  {!isLoggedIn
-                    ? "Request (login required)"
-                    : mineInterested
-                    ? isReserved
-                      ? "Reserved ✅"
-                      : isAccepted
-                      ? "Accepted ✅"
-                      : "Requested"
-                    : "Request item"}
-                </button>
-
-                <button
-                  onClick={withdrawInterest}
-                  disabled={saving || !mineInterested || isAccepted || isReserved}
-                  style={{
-                    background: "transparent",
-                    border: "1px solid rgba(148,163,184,0.25)",
-                    color: "white",
-                    padding: "10px 14px",
-                    borderRadius: 14,
-                    cursor: saving || !mineInterested || isAccepted || isReserved ? "not-allowed" : "pointer",
-                    fontWeight: 900,
-                    opacity: saving || !mineInterested || isAccepted || isReserved ? 0.55 : 1,
-                  }}
-                >
-                  Cancel request
-                </button>
-
-                {isAccepted && (
-                  <button
-                    onClick={confirmPickupAndChat}
-                    disabled={saving}
-                    style={{
-                      background: "rgba(16,185,129,0.24)",
-                      border: "1px solid rgba(52,211,153,0.35)",
-                      color: "white",
-                      padding: "10px 14px",
-                      borderRadius: 14,
-                      cursor: saving ? "not-allowed" : "pointer",
-                      fontWeight: 950,
-                      opacity: saving ? 0.75 : 1,
-                    }}
-                  >
-                    Confirm pickup & chat ✅
-                  </button>
-                )}
-              </>
+                Confirm pickup ✅
+              </button>
             )}
 
             <button
@@ -662,23 +535,23 @@ export default function ItemDetailPage() {
                 border: "1px solid rgba(148,163,184,0.25)",
                 color: "white",
                 padding: "10px 14px",
-                borderRadius: 14,
+                borderRadius: 12,
                 cursor: "pointer",
-                fontWeight: 900,
+                fontWeight: 950,
               }}
             >
               Account
             </button>
           </div>
 
-          {/* Messages */}
-          {interestMsg && (
-            <div style={{ marginTop: 12, border: "1px solid rgba(148,163,184,0.2)", borderRadius: 14, padding: 12, opacity: 0.92 }}>
+          {/* Inline status */}
+          {interestMsg && !showInterest && (
+            <div style={{ marginTop: 12, opacity: 0.92, border: "1px solid rgba(148,163,184,0.25)", borderRadius: 12, padding: 10 }}>
               {interestMsg}
             </div>
           )}
 
-          {/* INTEREST MODAL */}
+          {/* Request modal */}
           {showInterest && (
             <div
               onClick={() => setShowInterest(false)}
@@ -699,7 +572,7 @@ export default function ItemDetailPage() {
                   width: "100%",
                   maxWidth: 520,
                   borderRadius: 18,
-                  border: "1px solid rgba(148,163,184,0.22)",
+                  border: "1px solid rgba(148,163,184,0.25)",
                   background: "rgba(2,6,23,0.98)",
                   padding: 16,
                 }}
@@ -722,8 +595,8 @@ export default function ItemDetailPage() {
                   </button>
                 </div>
 
-                <div style={{ marginTop: 10, opacity: 0.82 }}>
-                  Quick details so the lister picks someone who will actually show up.
+                <div style={{ marginTop: 10, opacity: 0.8 }}>
+                  Quick pickup info so the lister can choose someone who will actually show up.
                 </div>
 
                 <div style={{ marginTop: 14 }}>
@@ -787,6 +660,12 @@ export default function ItemDetailPage() {
                   />
                 </div>
 
+                {interestMsg && (
+                  <div style={{ marginTop: 12, border: "1px solid rgba(148,163,184,0.25)", borderRadius: 12, padding: 10, opacity: 0.9 }}>
+                    {interestMsg}
+                  </div>
+                )}
+
                 <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end" }}>
                   <button
                     onClick={() => setShowInterest(false)}
@@ -807,8 +686,8 @@ export default function ItemDetailPage() {
                     onClick={submitInterest}
                     disabled={saving}
                     style={{
-                      background: "rgba(16,185,129,0.22)",
-                      border: "1px solid rgba(52,211,153,0.35)",
+                      background: "rgba(16,185,129,0.24)",
+                      border: "1px solid rgba(52,211,153,0.25)",
                       color: "white",
                       padding: "10px 12px",
                       borderRadius: 12,
@@ -824,7 +703,7 @@ export default function ItemDetailPage() {
             </div>
           )}
 
-          {/* FULLSCREEN IMAGE MODAL (copied UX from feed) */}
+          {/* fullscreen image modal (like feed) */}
           {openImg && (
             <div
               onClick={() => setOpenImg(null)}
@@ -898,5 +777,23 @@ export default function ItemDetailPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function Pill({ label }: { label: string }) {
+  return (
+    <span
+      style={{
+        fontSize: 12,
+        fontWeight: 950,
+        padding: "7px 10px",
+        borderRadius: 999,
+        background: "rgba(255,255,255,0.04)",
+        border: "1px solid rgba(148,163,184,0.15)",
+        opacity: 0.95,
+      }}
+    >
+      {label}
+    </span>
   );
 }
