@@ -1,293 +1,298 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-type ItemMini =
-  | {
-      id: string;
-      title: string;
-      photo_url: string | null;
-      status: string | null;
-    }
-  | {
-      id: string;
-      title: string;
-      photo_url: string | null;
-      status: string | null;
-    }[];
-
-type ThreadRow = {
-  id: string;
-  item_id: string;
-  owner_id: string;
-  requester_id: string;
-  created_at: string;
-  items?: ItemMini | null; // can be object or array depending on join typing
+type InboxCard = {
+  threadId: string;
+  itemId: string;
+  itemTitle: string;
+  itemPhotoUrl: string | null;
+  itemStatus: string | null;
+  otherId: string;
+  otherName: string;
+  otherRole: string | null;
+  lastBody: string;
+  lastAt: string | null;
 };
 
-type MessageRow = {
-  id: string;
-  thread_id: string;
-  sender_id: string;
-  body: string;
-  created_at: string;
-};
-
-function shortId(id: string) {
-  if (!id) return "";
-  return `${id.slice(0, 6)}…${id.slice(-4)}`;
+function fmtTime(ts: string | null) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 export default function MessagesPage() {
   const router = useRouter();
 
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  const [threads, setThreads] = useState<ThreadRow[]>([]);
-  const [lastByThread, setLastByThread] = useState<Record<string, MessageRow | undefined>>({});
+  const [cards, setCards] = useState<InboxCard[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
-  const isAshland = !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  const isLoggedIn = useMemo(() => {
+    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  }, [userId, userEmail]);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
-    setUserId(data.session?.user?.id ?? null);
-    setUserEmail(data.session?.user?.email ?? null);
+    const s = data.session;
+    setUserId(s?.user?.id ?? null);
+    setUserEmail(s?.user?.email ?? null);
   }
 
   async function loadInbox(uid: string) {
+    setLoading(true);
     setErr(null);
 
-    // 1) Load threads + item info
-    const { data: tData, error: tErr } = await supabase
-      .from("threads")
-      .select("id,item_id,owner_id,requester_id,created_at,items:items(id,title,photo_url,status)")
-      .or(`owner_id.eq.${uid},requester_id.eq.${uid}`)
-      .order("created_at", { ascending: false });
+    try {
+      // 1) threads with item info
+      // NOTE: we deliberately treat join payload as "any" then map it to stable UI types.
+      const { data: tData, error: tErr } = await supabase
+        .from("threads")
+        .select("id,item_id,owner_id,requester_id,created_at,items:items(id,title,photo_url,status)")
+        .or(`owner_id.eq.${uid},requester_id.eq.${uid}`)
+        .order("created_at", { ascending: false });
 
-    if (tErr) throw tErr;
+      if (tErr) throw tErr;
 
-    const tRows = (((tData as unknown) as ThreadRow[]) || []) as ThreadRow[];
-    setThreads(tRows);
+      const threads = (tData as any[]) || [];
+      const threadIds = threads.map((t) => t.id);
 
-    // 2) Load last messages for those threads (one query)
-    const threadIds = tRows.map((t) => t.id);
-    if (threadIds.length === 0) {
-      setLastByThread({});
-      return;
+      if (threadIds.length === 0) {
+        setCards([]);
+        setLoading(false);
+        return;
+      }
+
+      // 2) last message per thread (we pull all messages for those threads, newest first, then keep first per thread)
+      const { data: mData, error: mErr } = await supabase
+        .from("messages")
+        .select("id,thread_id,body,created_at")
+        .in("thread_id", threadIds)
+        .order("created_at", { ascending: false });
+
+      if (mErr) throw mErr;
+
+      const lastByThread: Record<string, { body: string; created_at: string }> = {};
+      for (const m of (mData as any[]) || []) {
+        const tid = String(m.thread_id);
+        if (!lastByThread[tid]) {
+          lastByThread[tid] = { body: String(m.body ?? ""), created_at: String(m.created_at ?? "") };
+        }
+      }
+
+      // 3) fetch profiles for "other person" ids (one query)
+      const otherIds = Array.from(
+        new Set(
+          threads.map((t) => (t.owner_id === uid ? t.requester_id : t.owner_id)).filter(Boolean).map((x) => String(x))
+        )
+      );
+
+      const profileMap: Record<string, { name: string; role: string | null }> = {};
+
+      if (otherIds.length > 0) {
+        const { data: pData, error: pErr } = await supabase
+          .from("profiles")
+          .select("id,full_name,name,owner_role")
+          .in("id", otherIds);
+
+        if (pErr) throw pErr;
+
+        for (const p of (pData as any[]) || []) {
+          const id = String(p.id);
+          const nm = (p.full_name ?? p.name ?? "Campus user") as string;
+          const role = (p.owner_role ?? null) as string | null;
+          profileMap[id] = { name: String(nm), role: role ? String(role) : null };
+        }
+      }
+
+      // 4) map -> cards
+      const mapped: InboxCard[] = threads.map((t) => {
+        const itemsObj = t.items ?? null; // joined item object (not array)
+        const itemTitle = itemsObj?.title ? String(itemsObj.title) : "Listing";
+        const itemPhotoUrl = itemsObj?.photo_url ? String(itemsObj.photo_url) : null;
+        const itemStatus = itemsObj?.status ? String(itemsObj.status) : null;
+
+        const otherId = String(t.owner_id === uid ? t.requester_id : t.owner_id);
+        const other = profileMap[otherId];
+
+        const last = lastByThread[String(t.id)] ?? null;
+
+        return {
+          threadId: String(t.id),
+          itemId: String(t.item_id),
+          itemTitle,
+          itemPhotoUrl,
+          itemStatus,
+          otherId,
+          otherName: other?.name ?? "Campus user",
+          otherRole: other?.role ?? null,
+          lastBody: last?.body ?? "No messages yet.",
+          lastAt: last?.created_at ?? null,
+        };
+      });
+
+      // Sort by last message time, fallback to thread created_at
+      mapped.sort((a, b) => {
+        const at = a.lastAt ? new Date(a.lastAt).getTime() : 0;
+        const bt = b.lastAt ? new Date(b.lastAt).getTime() : 0;
+        return bt - at;
+      });
+
+      setCards(mapped);
+    } catch (e: any) {
+      setErr(e?.message || "Error loading inbox.");
+      setCards([]);
+    } finally {
+      setLoading(false);
     }
-
-    const { data: mData, error: mErr } = await supabase
-      .from("messages")
-      .select("id,thread_id,sender_id,body,created_at")
-      .in("thread_id", threadIds)
-      .order("created_at", { ascending: false });
-
-    if (mErr) throw mErr;
-
-    const latest: Record<string, MessageRow | undefined> = {};
-    for (const m of ((mData as MessageRow[]) || []) as MessageRow[]) {
-      // because ordered DESC, the first time we see thread_id is newest msg
-      if (!latest[m.thread_id]) latest[m.thread_id] = m;
-    }
-    setLastByThread(latest);
   }
 
   useEffect(() => {
     (async () => {
-      setLoading(true);
       await syncAuth();
-
       const { data } = await supabase.auth.getSession();
-      const uid = data.session?.user?.id ?? null;
-      const email = data.session?.user?.email ?? null;
+      const s = data.session;
+      const uid = s?.user?.id ?? null;
+      const email = s?.user?.email ?? null;
 
       if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
         setLoading(false);
         return;
       }
-
-      try {
-        await loadInbox(uid);
-      } catch (e: any) {
-        setErr(e?.message || "Failed to load inbox.");
-      } finally {
-        setLoading(false);
-      }
+      await loadInbox(uid);
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      syncAuth();
-      supabase.auth.getSession().then(({ data }) => {
-        const uid = data.session?.user?.id ?? null;
-        const email = data.session?.user?.email ?? null;
+    const { data: sub } = supabase.auth.onAuthStateChange(async () => {
+      await syncAuth();
+      const { data } = await supabase.auth.getSession();
+      const s = data.session;
+      const uid = s?.user?.id ?? null;
+      const email = s?.user?.email ?? null;
 
-        if (uid && email && email.toLowerCase().endsWith("@ashland.edu")) {
-          loadInbox(uid).catch(() => {});
-        } else {
-          setThreads([]);
-          setLastByThread({});
-        }
-      });
+      if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
+        setCards([]);
+        setLoading(false);
+        return;
+      }
+      await loadInbox(uid);
     });
 
     return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const rows = useMemo(() => {
-    const uid = userId;
-    return threads.map((t) => {
-      const otherId = uid ? (t.owner_id === uid ? t.requester_id : t.owner_id) : t.requester_id;
-      const last = lastByThread[t.id];
-      return { t, otherId, last };
-    });
-  }, [threads, lastByThread, userId]);
-
-  if (loading) {
+  if (!isLoggedIn) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        <div style={{ opacity: 0.8 }}>Loading…</div>
-      </div>
-    );
-  }
-
-  if (!isAshland || !userId) {
-    return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Messages</h1>
-        <p style={{ marginTop: 10, opacity: 0.75, maxWidth: 640 }}>
-          Messaging is available after a seller accepts your request. Please log in with your <b>@ashland.edu</b> email to view conversations.
-        </p>
-
-        <button
-          onClick={() => router.push("/me")}
-          style={{
-            marginTop: 12,
-            borderRadius: 14,
-            border: "1px solid rgba(148,163,184,0.25)",
-            background: "rgba(255,255,255,0.04)",
-            color: "white",
-            padding: "10px 14px",
-            cursor: "pointer",
-            fontWeight: 900,
-          }}
-        >
-          Go to Account
-        </button>
+        <h1 style={{ fontSize: 28, fontWeight: 950, margin: 0 }}>Messages</h1>
+        <p style={{ opacity: 0.75, marginTop: 10 }}>Login with your @ashland.edu email to view conversations.</p>
       </div>
     );
   }
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 110 }}>
-      <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Messages</h1>
-      <p style={{ marginTop: 10, opacity: 0.75, maxWidth: 740 }}>
-        Conversations appear here only after a seller accepts a request.
-      </p>
+      <h1 style={{ fontSize: 28, fontWeight: 950, margin: 0 }}>Messages</h1>
+      <p style={{ opacity: 0.75, marginTop: 10 }}>Conversations appear here only after a seller accepts a request.</p>
 
-      {err && <div style={{ marginTop: 12, color: "#f87171", fontWeight: 800 }}>{err}</div>}
+      {err && <p style={{ color: "#f87171", marginTop: 12 }}>{err}</p>}
+      {loading && <p style={{ opacity: 0.75, marginTop: 12 }}>Loading…</p>}
 
-      <div style={{ marginTop: 16 }}>
-        {rows.length === 0 ? (
-          <div
+      {!loading && cards.length === 0 && (
+        <div
+          style={{
+            marginTop: 16,
+            border: "1px solid #0f223f",
+            background: "rgba(11,23,48,0.6)",
+            borderRadius: 16,
+            padding: 14,
+          }}
+        >
+          <div style={{ fontWeight: 950 }}>No conversations yet.</div>
+          <div style={{ opacity: 0.75, marginTop: 6 }}>
+            Once a seller accepts your request (or you accept a requester on your listing), a chat will appear here.
+          </div>
+        </div>
+      )}
+
+      <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+        {cards.map((c) => (
+          <button
+            key={c.threadId}
+            onClick={() => router.push(`/messages/${c.threadId}`)}
             style={{
+              textAlign: "left",
+              border: "1px solid #0f223f",
+              background: "rgba(11,23,48,0.55)",
               borderRadius: 18,
-              border: "1px solid rgba(148,163,184,0.15)",
-              background: "rgba(255,255,255,0.04)",
               padding: 14,
-              opacity: 0.8,
+              cursor: "pointer",
+              color: "white",
+              display: "flex",
+              gap: 12,
+              alignItems: "center",
             }}
           >
-            No conversations yet.
-            <div style={{ marginTop: 8, opacity: 0.75, fontSize: 13 }}>
-              Once a seller accepts your request (or you accept a requester on your listing), a chat will appear here.
+            <div
+              style={{
+                width: 58,
+                height: 58,
+                borderRadius: 16,
+                border: "1px solid rgba(148,163,184,0.25)",
+                overflow: "hidden",
+                background: "#0b1730",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#94a3b8",
+                flexShrink: 0,
+              }}
+            >
+              {c.itemPhotoUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={c.itemPhotoUrl} alt="Item" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              ) : (
+                <span style={{ fontWeight: 900 }}>No</span>
+              )}
             </div>
-          </div>
-        ) : (
-          <div style={{ display: "grid", gap: 12 }}>
-            {rows.map(({ t, otherId, last }) => {
-              const itemObj = Array.isArray(t.items) ? t.items[0] : t.items;
 
-              const itemTitle = itemObj?.title ?? "Item";
-              const itemPhoto = itemObj?.photo_url ?? null;
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                <div style={{ fontSize: 18, fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {c.itemTitle}
+                </div>
+                <div style={{ opacity: 0.6, fontSize: 12, whiteSpace: "nowrap" }}>{fmtTime(c.lastAt)}</div>
+              </div>
 
-              const lastPreview = last?.body ? (last.body.length > 70 ? last.body.slice(0, 70) + "…" : last.body) : "No messages yet";
-              const when = last?.created_at ? new Date(last.created_at).toLocaleString() : new Date(t.created_at).toLocaleString();
+              <div style={{ marginTop: 4, opacity: 0.8, fontSize: 13 }}>
+                With: <b>{c.otherName}</b>
+                {c.otherRole ? <span style={{ opacity: 0.75 }}> • {c.otherRole}</span> : null}
+                {c.itemStatus ? <span style={{ opacity: 0.75 }}> • {c.itemStatus}</span> : null}
+              </div>
 
-              return (
-                <button
-                  key={t.id}
-                  onClick={() => router.push(`/messages/${t.id}`)}
-                  style={{
-                    textAlign: "left",
-                    borderRadius: 18,
-                    border: "1px solid rgba(148,163,184,0.15)",
-                    background: "rgba(255,255,255,0.04)",
-                    padding: 12,
-                    cursor: "pointer",
-                  }}
-                >
-                  <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                    <div
-                      style={{
-                        width: 56,
-                        height: 56,
-                        borderRadius: 14,
-                        border: "1px solid rgba(148,163,184,0.15)",
-                        background: "rgba(0,0,0,0.35)",
-                        overflow: "hidden",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        color: "rgba(255,255,255,0.55)",
-                        flex: "0 0 auto",
-                      }}
-                    >
-                      {itemPhoto ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={itemPhoto} alt={itemTitle} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                      ) : (
-                        "📦"
-                      )}
-                    </div>
-
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                        <div style={{ fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {itemTitle}
-                        </div>
-                        <div style={{ fontSize: 12, opacity: 0.65, whiteSpace: "nowrap" }}>{when}</div>
-                      </div>
-
-                      <div style={{ marginTop: 4, fontSize: 12, opacity: 0.7 }}>
-                        With: <span style={{ opacity: 0.9, fontWeight: 900 }}>{shortId(otherId)}</span>
-                      </div>
-
-                      <div
-                        style={{
-                          marginTop: 6,
-                          fontSize: 13,
-                          opacity: 0.78,
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
-                      >
-                        {lastPreview}
-                      </div>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        )}
+              <div
+                style={{
+                  marginTop: 6,
+                  opacity: 0.75,
+                  fontSize: 13,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {c.lastBody}
+              </div>
+            </div>
+          </button>
+        ))}
       </div>
     </div>
   );
