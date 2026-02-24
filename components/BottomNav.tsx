@@ -9,11 +9,12 @@ export default function BottomNav() {
   const items = [
     { href: "/feed", label: "Feed", icon: "🏠" },
     { href: "/create", label: "List", icon: "➕" },
+    { href: "/messages", label: "Messages", icon: "💬" }, // ✅ NEW
     { href: "/my-items", label: "My", icon: "📦" },
     { href: "/me", label: "Account", icon: "👤" },
   ];
 
-  const NAV_HEIGHT = 88; // ✅ limits clickable overlay area
+  const NAV_HEIGHT = 88;
 
   return (
     <div
@@ -23,14 +24,14 @@ export default function BottomNav() {
         right: 0,
         bottom: 0,
         zIndex: 9999,
-        height: NAV_HEIGHT, // ✅ only this tall
-        pointerEvents: "none", // ✅ only inner footer is clickable
+        height: NAV_HEIGHT,
+        pointerEvents: "none",
       }}
     >
       <footer
         style={{
           pointerEvents: "auto",
-          height: "100%", // ✅ match wrapper height
+          height: "100%",
           width: "100%",
           display: "flex",
           alignItems: "center",
@@ -38,18 +39,18 @@ export default function BottomNav() {
           borderTop: "1px solid #0f223f",
           backdropFilter: "blur(10px)",
           WebkitBackdropFilter: "blur(10px)",
-          padding: "10px 12px",
+          padding: "10px 10px",
           paddingBottom: "calc(10px + env(safe-area-inset-bottom))",
         }}
       >
         <div
           style={{
-            maxWidth: 760,
+            maxWidth: 900,
             margin: "0 auto",
             width: "100%",
             display: "grid",
-            gridTemplateColumns: "repeat(4, 1fr)",
-            gap: 10,
+            gridTemplateColumns: "repeat(5, 1fr)", // ✅ 5 tabs
+            gap: 8, // slightly tighter for 5
             alignItems: "center",
           }}
         >
@@ -71,14 +72,15 @@ export default function BottomNav() {
                   border: active ? "1px solid #16a34a" : "1px solid #334155",
                   background: active ? "rgba(22,163,74,0.18)" : "transparent",
                   fontWeight: 900,
-                  gap: 8,
+                  gap: 6, // slightly tighter
                   userSelect: "none",
                   WebkitTapHighlightColor: "transparent",
                   touchAction: "manipulation",
+                  padding: "0 6px", // helps labels fit
                 }}
               >
                 <span style={{ fontSize: 18 }}>{it.icon}</span>
-                <span style={{ fontSize: 14 }}>{it.label}</span>
+                <span style={{ fontSize: 13 }}>{it.label}</span>
               </Link>
             );
           })}
