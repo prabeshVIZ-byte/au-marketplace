@@ -44,18 +44,17 @@ export default function BottomNav() {
       >
         <div
           style={{
-            maxWidth: 760,
+            maxWidth: 840,
             margin: "0 auto",
             width: "100%",
             display: "grid",
-            gridTemplateColumns: "repeat(4, 1fr)",
+            gridTemplateColumns: `repeat(${items.length}, 1fr)`,
             gap: 10,
             alignItems: "center",
           }}
         >
           {items.map((it) => {
-            // active if exact match OR if we're inside a messages thread (/messages/xxx)
-            const active = pathname === it.href || (it.href === "/messages" && pathname.startsWith("/messages/"));
+            const active = pathname === it.href || (it.href !== "/feed" && pathname?.startsWith(it.href));
 
             return (
               <Link

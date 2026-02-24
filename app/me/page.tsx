@@ -1,307 +1,208 @@
-// /app/me/page.tsx
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-type Role = "student" | "faculty" | "";
-type StatusType = "error" | "success" | "info";
-type UiStatus = { text: string; type: StatusType } | null;
-
-type MyRequest = {
+type ProfileRow = {
   id: string;
-  item_id: string;
+  email: string | null;
+  full_name: string | null;
+  user_role: string | null; // "student" | "faculty" etc
+  created_at?: string;
+};
+
+type MyItemRow = {
+  id: string;
+  title: string;
+  description: string | null;
   status: string | null;
-  created_at: string | null;
-  item_title?: string | null;
+  created_at: string;
+  photo_url: string | null;
+};
+
+type MyRequestRow = {
+  item_id: string;
+  created_at?: string | null;
+  items: {
+    id: string;
+    title: string;
+    photo_url: string | null;
+    status: string | null;
+  } | null;
 };
 
 function shortId(id: string) {
   if (!id) return "";
-  return `${id.slice(0, 8)}…`;
+  return id.slice(0, 6) + "…" + id.slice(-4);
 }
 
-function statusPill(status: string | null) {
-  const s = (status ?? "pending").toLowerCase();
-  const label =
-    s === "accepted" ? "Accepted" : s === "reserved" ? "Reserved" : s === "confirmed" ? "Confirmed" : s === "rejected" ? "Rejected" : "Pending";
-
-  const bg =
-    s === "accepted" || s === "reserved" || s === "confirmed"
-      ? "#052e16"
-      : s === "rejected"
-      ? "#3f1d1d"
-      : "#0b1730";
-
-  const border =
-    s === "accepted" || s === "reserved" || s === "confirmed"
-      ? "#14532d"
-      : s === "rejected"
-      ? "#7f1d1d"
-      : "#334155";
-
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 8,
-        padding: "6px 10px",
-        borderRadius: 999,
-        border: `1px solid ${border}`,
-        background: bg,
-        color: "white",
-        fontWeight: 900,
-        fontSize: 12,
-        letterSpacing: 0.2,
-        whiteSpace: "nowrap",
-      }}
-    >
-      {label}
-    </span>
-  );
-}
-
-export default function MePage() {
+export default function AccountPage() {
   const router = useRouter();
 
-  // auth UI
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [emailInput, setEmailInput] = useState("");
-  const [password, setPassword] = useState("");
-
-  // session
   const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
   const [userId, setUserId] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // profile (draft inputs)
-  const [fullName, setFullName] = useState("");
-  const [role, setRole] = useState<Role>("");
+  const [profile, setProfile] = useState<ProfileRow | null>(null);
 
-  // profile (DB truth)
-  const [profileLoading, setProfileLoading] = useState(false);
-  const [dbProfileComplete, setDbProfileComplete] = useState(false);
-  const [profileSaving, setProfileSaving] = useState(false);
+  const [tab, setTab] = useState<"listings" | "requests">("listings");
 
-  // requests
-  const [requests, setRequests] = useState<MyRequest[]>([]);
-  const [reqLoading, setReqLoading] = useState(false);
+  const [myItems, setMyItems] = useState<MyItemRow[]>([]);
+  const [myRequests, setMyRequests] = useState<MyRequestRow[]>([]);
 
-  // section toggles (clean UI)
-  const [showProfile, setShowProfile] = useState(false);
-  const [showRequests, setShowRequests] = useState(true);
+  const [stats, setStats] = useState<{ listed: number; requested: number; chats: number }>({
+    listed: 0,
+    requested: 0,
+    chats: 0,
+  });
 
-  // status
-  const [status, setStatus] = useState<UiStatus>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const draftComplete = useMemo(() => {
-    return fullName.trim().length > 0 && (role === "student" || role === "faculty");
-  }, [fullName, role]);
+  const isLoggedIn = useMemo(() => {
+    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  }, [userId, userEmail]);
 
-  const statusColor =
-    status?.type === "error" ? "#f87171" : status?.type === "success" ? "#4ade80" : "#93c5fd";
+  async function syncAuth() {
+    const { data } = await supabase.auth.getSession();
+    const s = data.session;
+    const uid = s?.user?.id ?? null;
+    const email = s?.user?.email ?? null;
+    setUserId(uid);
+    setUserEmail(email);
+    return { uid, email };
+  }
 
-  async function loadProfile(uid: string) {
-    setProfileLoading(true);
-    setDbProfileComplete(false);
+  async function loadAll() {
+    setLoading(true);
+    setErr(null);
 
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("full_name,user_role,email")
-      .eq("id", uid)
-      .maybeSingle();
-
-    setProfileLoading(false);
-
-    if (error) {
-      console.log("loadProfile:", error.message);
-      setStatus({ text: `Profile load failed: ${error.message}`, type: "error" });
+    const { uid, email } = await syncAuth();
+    if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
+      router.push("/me"); // stays here, but your /me page is the login page too in your flow
+      setLoading(false);
       return;
     }
 
-    const dbName = (data?.full_name ?? "").trim();
-    const dbRole = (data?.user_role ?? "") as Role;
+    // 1) profile
+    const { data: pData, error: pErr } = await supabase
+      .from("profiles")
+      .select("id,email,full_name,user_role,created_at")
+      .eq("id", uid)
+      .maybeSingle()
+      .returns<ProfileRow>();
 
-    setFullName(dbName);
-    setRole(dbRole || "");
+    if (pErr) {
+      // don't kill the page if profile missing
+      console.warn("profile load:", pErr.message);
+      setProfile(null);
+    } else {
+      setProfile(pData ?? null);
+    }
 
-    const complete = dbName.length > 0 && (dbRole === "student" || dbRole === "faculty");
-    setDbProfileComplete(complete);
+    // 2) my listings
+    const { data: iData, error: iErr } = await supabase
+      .from("items")
+      .select("id,title,description,status,created_at,photo_url")
+      .eq("owner_id", uid)
+      .order("created_at", { ascending: false })
+      .returns<MyItemRow[]>();
 
-    // if incomplete, open profile section automatically
-    if (!complete) setShowProfile(true);
-  }
+    if (iErr) {
+      setMyItems([]);
+      setErr(iErr.message);
+    } else {
+      setMyItems(iData ?? []);
+    }
 
-  async function loadMyRequests(uid: string) {
-    setReqLoading(true);
-
-    // Pull minimal info from interests; optionally join item title if you have a view later.
-    const { data, error } = await supabase
+    // 3) my requests = interests joined to items
+    // (This is the clean “request item” mechanism you already have.)
+    const { data: rData, error: rErr } = await supabase
       .from("interests")
-      .select("id,item_id,status,created_at")
+      .select("item_id,created_at,items:items(id,title,photo_url,status)")
       .eq("user_id", uid)
       .order("created_at", { ascending: false })
-      .limit(20);
+      .returns<MyRequestRow[]>();
 
-    setReqLoading(false);
-
-    if (error) {
-      console.log("loadMyRequests:", error.message);
-      setRequests([]);
-      return;
-    }
-
-    setRequests(((data as any[]) || []).map((r) => ({ ...r })));
-  }
-
-  async function refreshUser() {
-    const { data, error } = await supabase.auth.getUser();
-    if (error) console.log("getUser:", error.message);
-
-    const e = data.user?.email ?? null;
-    const uid = data.user?.id ?? null;
-
-    setUserEmail(e);
-    setUserId(uid);
-
-    if (uid) {
-      await loadProfile(uid);
-      await loadMyRequests(uid);
+    if (rErr) {
+      // don’t hard-fail; show empty requests
+      console.warn("requests load:", rErr.message);
+      setMyRequests([]);
     } else {
-      setFullName("");
-      setRole("");
-      setDbProfileComplete(false);
-      setRequests([]);
-    }
-  }
-
-  useEffect(() => {
-    let alive = true;
-
-    (async () => {
-      await refreshUser();
-      if (!alive) return;
-      setLoading(false);
-    })();
-
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      refreshUser();
-    });
-
-    return () => {
-      alive = false;
-      sub.subscription.unsubscribe();
-    };
-  }, []);
-
-  async function handleAuth() {
-    setStatus(null);
-
-    const e = emailInput.trim().toLowerCase();
-    if (!e.endsWith("@ashland.edu")) {
-      setStatus({ text: "Use your @ashland.edu email.", type: "error" });
-      return;
-    }
-    if (password.length < 8) {
-      setStatus({ text: "Password must be at least 8 characters.", type: "error" });
-      return;
+      setMyRequests(rData ?? []);
     }
 
-    setSending(true);
+    // 4) stats
+    const listed = (iData ?? []).length;
+    const requested = (rData ?? []).length;
 
-    if (mode === "signup") {
-      const { error } = await supabase.auth.signUp({ email: e, password });
-      setSending(false);
+    // chats: try threads table if you have it; otherwise 0
+    let chats = 0;
+    try {
+      const { count, error: tErr } = await supabase
+        .from("threads")
+        .select("id", { count: "exact", head: true })
+        .or(`owner_id.eq.${uid},requester_id.eq.${uid}`);
 
-      if (error) {
-        setStatus({ text: error.message, type: "error" });
-        return;
-      }
-
-      setStatus({ text: "Account created ✅ Now switch to Sign in.", type: "success" });
-      return;
+      if (!tErr) chats = count ?? 0;
+    } catch {
+      chats = 0;
     }
 
-    const { error } = await supabase.auth.signInWithPassword({ email: e, password });
-    setSending(false);
-
-    if (error) {
-      setStatus({ text: error.message, type: "error" });
-      return;
-    }
-
-    setStatus({ text: "Signed in ✅", type: "success" });
-    router.refresh();
-  }
-
-  async function saveProfile() {
-    setStatus(null);
-
-    if (!draftComplete) {
-      setStatus({ text: "Enter full name and choose Student/Faculty.", type: "error" });
-      return;
-    }
-
-    const { data: sess, error: sessErr } = await supabase.auth.getSession();
-    if (sessErr) {
-      setStatus({ text: sessErr.message, type: "error" });
-      return;
-    }
-
-    const uid = sess.session?.user?.id;
-    const email = sess.session?.user?.email;
-
-    if (!uid) {
-      setStatus({ text: "No session found. Please sign in again.", type: "error" });
-      return;
-    }
-
-    setProfileSaving(true);
-
-    const { error } = await supabase
-      .from("profiles")
-      .upsert([{ id: uid, email: email ?? null, full_name: fullName.trim(), user_role: role }], {
-        onConflict: "id",
-      });
-
-    setProfileSaving(false);
-
-    if (error) {
-      setStatus({ text: `Profile save failed: ${error.message}`, type: "error" });
-      return;
-    }
-
-    await loadProfile(uid);
-    setStatus({ text: "Profile saved ✅", type: "success" });
-    setShowProfile(false);
+    setStats({ listed, requested, chats });
+    setLoading(false);
   }
 
   async function signOut() {
-    setStatus(null);
-
-    const { error } = await supabase.auth.signOut();
-    if (error) {
-      setStatus({ text: error.message, type: "error" });
-      return;
-    }
-
-    setUserEmail(null);
-    setUserId(null);
-    setEmailInput("");
-    setPassword("");
-    setFullName("");
-    setRole("");
-    setDbProfileComplete(false);
-    setRequests([]);
-
-    router.replace("/feed");
-    router.refresh();
+    await supabase.auth.signOut();
+    setDrawerOpen(false);
+    router.push("/me");
   }
 
-  const canPost = !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu") && dbProfileComplete;
+  async function deleteListing(id: string) {
+    if (!confirm("Delete this listing? This cannot be undone.")) return;
+
+    setDeletingId(id);
+    const { error } = await supabase.from("items").delete().eq("id", id);
+    setDeletingId(null);
+
+    if (error) return alert(error.message);
+
+    setMyItems((prev) => prev.filter((x) => x.id !== id));
+    setStats((s) => ({ ...s, listed: Math.max(0, s.listed - 1) }));
+  }
+
+  useEffect(() => {
+    loadAll();
+
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      loadAll();
+    });
+
+    return () => sub.subscription.unsubscribe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setDrawerOpen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const displayName =
+    (profile?.full_name ?? "").trim() ||
+    (userEmail ? userEmail.split("@")[0] : "") ||
+    "Account";
+
+  const roleLabel = (profile?.user_role ?? "").trim() || "member";
 
   if (loading) {
     return (
@@ -311,439 +212,506 @@ export default function MePage() {
     );
   }
 
-  return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "black",
-        color: "white",
-        padding: 24,
-        paddingBottom: 120,
-        maxWidth: 920,
-        margin: "0 auto",
-      }}
-    >
-      <button
-        type="button"
-        onClick={() => router.push("/feed")}
-        style={{
-          marginBottom: 16,
-          background: "transparent",
-          color: "white",
-          border: "1px solid #334155",
-          padding: "8px 12px",
-          borderRadius: 12,
-          cursor: "pointer",
-          fontWeight: 900,
-        }}
-      >
-        ← Back to feed
-      </button>
+  if (!isLoggedIn) {
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Account</h1>
+        <p style={{ opacity: 0.8, marginTop: 10 }}>Please log in with your @ashland.edu email.</p>
 
-      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <div>
-          <h1 style={{ fontSize: 34, fontWeight: 950, margin: 0 }}>Account</h1>
-          <p style={{ opacity: 0.75, marginTop: 8, marginBottom: 0 }}>
-            {userEmail ? (
-              <>
-                Logged in as <b>{userEmail}</b>
-              </>
-            ) : (
-              <>
-                Login is restricted to <b>@ashland.edu</b>.
-              </>
-            )}
-          </p>
+        <button
+          onClick={() => router.push("/me")}
+          style={{
+            marginTop: 14,
+            border: "1px solid #334155",
+            background: "transparent",
+            color: "white",
+            padding: "10px 12px",
+            borderRadius: 12,
+            cursor: "pointer",
+            fontWeight: 900,
+          }}
+        >
+          Go to login
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
+      {/* Top header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div
+            style={{
+              width: 54,
+              height: 54,
+              borderRadius: 16,
+              border: "1px solid #0f223f",
+              background: "#0b1730",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontWeight: 1000,
+              fontSize: 18,
+            }}
+            title={displayName}
+          >
+            {displayName.slice(0, 1).toUpperCase()}
+          </div>
+
+          <div>
+            <div style={{ fontSize: 22, fontWeight: 1000, lineHeight: 1.1 }}>{displayName}</div>
+            <div style={{ marginTop: 4, opacity: 0.8, fontSize: 13 }}>
+              {roleLabel} • <span style={{ opacity: 0.9 }}>{userEmail}</span>
+            </div>
+          </div>
         </div>
 
-        {/* Primary actions (minimal) */}
-        {userEmail ? (
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button
-              type="button"
-              onClick={() => router.push("/create")}
-              disabled={!canPost}
-              title={!canPost ? "Complete your profile first" : "Post an item"}
-              style={{
-                background: !canPost ? "#14532d" : "#16a34a",
-                padding: "10px 14px",
-                borderRadius: 12,
-                border: "1px solid #14532d",
-                color: "white",
-                cursor: !canPost ? "not-allowed" : "pointer",
-                fontWeight: 950,
-                opacity: !canPost ? 0.55 : 1,
-              }}
-            >
-              Post an item
-            </button>
+        <button
+          onClick={() => setDrawerOpen(true)}
+          style={{
+            width: 44,
+            height: 44,
+            borderRadius: 12,
+            border: "1px solid #334155",
+            background: "transparent",
+            color: "white",
+            cursor: "pointer",
+            fontWeight: 900,
+          }}
+          aria-label="Open menu"
+          title="Menu"
+        >
+          ☰
+        </button>
+      </div>
 
+      {/* Stats row */}
+      <div
+        style={{
+          marginTop: 14,
+          border: "1px solid #0f223f",
+          background: "#020617",
+          borderRadius: 16,
+          padding: 14,
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 1fr)",
+          gap: 10,
+        }}
+      >
+        {[
+          { label: "Listed", value: stats.listed },
+          { label: "Requested", value: stats.requested },
+          { label: "Chats", value: stats.chats },
+        ].map((s) => (
+          <div
+            key={s.label}
+            style={{
+              borderRadius: 14,
+              border: "1px solid #0f223f",
+              background: "#0b1730",
+              padding: 12,
+              textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: 20, fontWeight: 1000 }}>{s.value}</div>
+            <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Primary actions */}
+      <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+        <Link
+          href="/create"
+          style={{
+            border: "1px solid #16a34a",
+            background: "rgba(22,163,74,0.14)",
+            color: "white",
+            padding: "10px 12px",
+            borderRadius: 12,
+            textDecoration: "none",
+            fontWeight: 900,
+          }}
+        >
+          + List new item
+        </Link>
+
+        <Link
+          href="/messages"
+          style={{
+            border: "1px solid #334155",
+            background: "transparent",
+            color: "white",
+            padding: "10px 12px",
+            borderRadius: 12,
+            textDecoration: "none",
+            fontWeight: 900,
+          }}
+        >
+          Open messages
+        </Link>
+      </div>
+
+      {err && <p style={{ color: "#f87171", marginTop: 12 }}>{err}</p>}
+
+      {/* Tabs (IG style) */}
+      <div style={{ marginTop: 16, display: "flex", gap: 10 }}>
+        {[
+          { key: "listings", label: "Listings" },
+          { key: "requests", label: "Requests" },
+        ].map((t) => {
+          const active = tab === (t.key as any);
+          return (
             <button
-              type="button"
-              onClick={signOut}
+              key={t.key}
+              onClick={() => setTab(t.key as any)}
               style={{
-                background: "transparent",
-                padding: "10px 14px",
-                borderRadius: 12,
-                border: "1px solid #334155",
+                borderRadius: 999,
+                border: active ? "1px solid #16a34a" : "1px solid #334155",
+                background: active ? "rgba(22,163,74,0.18)" : "transparent",
                 color: "white",
+                padding: "10px 12px",
                 cursor: "pointer",
                 fontWeight: 900,
               }}
             >
-              Sign out
+              {t.label}
             </button>
-          </div>
-        ) : null}
+          );
+        })}
       </div>
 
-      {/* Logged out: keep clean */}
-      {!userEmail ? (
-        <div style={{ marginTop: 18, maxWidth: 520, border: "1px solid #0f223f", borderRadius: 16, padding: 16, background: "#0b1730" }}>
-          <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-            <button
-              type="button"
-              onClick={() => setMode("signin")}
-              style={{
-                flex: 1,
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: mode === "signin" ? "1px solid #16a34a" : "1px solid #334155",
-                background: "transparent",
-                color: "white",
-                cursor: "pointer",
-                fontWeight: 950,
-              }}
-            >
-              Sign in
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setMode("signup")}
-              style={{
-                flex: 1,
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: mode === "signup" ? "1px solid #16a34a" : "1px solid #334155",
-                background: "transparent",
-                color: "white",
-                cursor: "pointer",
-                fontWeight: 950,
-              }}
-            >
-              Sign up
-            </button>
+      {/* Tab content */}
+      {tab === "listings" && (
+        <>
+          <div style={{ marginTop: 14, opacity: 0.85 }}>
+            Your listings are public in the feed. Use <b>Edit</b> to manage requests / status.
           </div>
 
-          <input
-            value={emailInput}
-            onChange={(e) => setEmailInput(e.target.value)}
-            placeholder="you@ashland.edu"
-            style={{
-              width: "100%",
-              padding: 12,
-              borderRadius: 12,
-              border: "1px solid #334155",
-              background: "black",
-              color: "white",
-              marginBottom: 10,
-            }}
-          />
+          {myItems.length === 0 ? (
+            <div
+              style={{
+                marginTop: 14,
+                border: "1px solid #0f223f",
+                background: "#0b1730",
+                borderRadius: 16,
+                padding: 14,
+              }}
+            >
+              <div style={{ fontWeight: 1000 }}>No listings yet.</div>
+              <div style={{ opacity: 0.8, marginTop: 6 }}>Create your first listing to start exchanging items.</div>
+            </div>
+          ) : (
+            <div
+              style={{
+                marginTop: 14,
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                gap: 14,
+              }}
+            >
+              {myItems.map((item) => (
+                <div
+                  key={item.id}
+                  style={{
+                    background: "#0b1730",
+                    padding: 14,
+                    borderRadius: 16,
+                    border: "1px solid #0f223f",
+                  }}
+                >
+                  {item.photo_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={item.photo_url}
+                      alt={item.title}
+                      style={{
+                        width: "100%",
+                        height: 160,
+                        objectFit: "cover",
+                        borderRadius: 14,
+                        border: "1px solid #0f223f",
+                        marginBottom: 10,
+                        display: "block",
+                      }}
+                    />
+                  ) : (
+                    <div
+                      style={{
+                        width: "100%",
+                        height: 160,
+                        borderRadius: 14,
+                        border: "1px dashed #334155",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "#94a3b8",
+                        marginBottom: 10,
+                      }}
+                    >
+                      No photo
+                    </div>
+                  )}
 
-          <input
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="Password (min 8 chars)"
-            type="password"
-            style={{
-              width: "100%",
-              padding: 12,
-              borderRadius: 12,
-              border: "1px solid #334155",
-              background: "black",
-              color: "white",
-            }}
-          />
+                  <div style={{ fontSize: 18, fontWeight: 1000 }}>{item.title}</div>
+                  <div style={{ opacity: 0.78, marginTop: 6, fontSize: 13 }}>
+                    {item.description ? item.description : "—"}
+                  </div>
 
-          <button
-            type="button"
-            onClick={handleAuth}
-            disabled={sending}
-            style={{
-              marginTop: 12,
-              width: "100%",
-              background: sending ? "#14532d" : "#16a34a",
-              padding: "12px 14px",
-              borderRadius: 12,
-              border: "1px solid #14532d",
-              color: "white",
-              cursor: sending ? "not-allowed" : "pointer",
-              fontWeight: 950,
-              opacity: sending ? 0.85 : 1,
-            }}
-          >
-            {sending ? "Working…" : mode === "signup" ? "Create account" : "Sign in"}
-          </button>
+                  <div style={{ opacity: 0.78, marginTop: 10, fontSize: 13 }}>
+                    Status: <b>{item.status ?? "—"}</b>
+                  </div>
 
-          {status && <p style={{ marginTop: 14, color: statusColor }}>{status.text}</p>}
-        </div>
-      ) : (
-        // Logged in: clean 2-column layout
-        <div style={{ marginTop: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-          {/* Left: Profile card */}
-          <div style={{ border: "1px solid #0f223f", borderRadius: 16, background: "#0b1730", padding: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-              <div style={{ fontWeight: 950, fontSize: 16 }}>Profile</div>
+                  <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                    <button
+                      onClick={() => router.push(`/manage/${item.id}`)}
+                      style={{
+                        flex: 1,
+                        border: "1px solid #334155",
+                        background: "transparent",
+                        color: "white",
+                        padding: "10px 12px",
+                        borderRadius: 12,
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
+                    >
+                      Edit
+                    </button>
 
+                    <button
+                      onClick={() => deleteListing(item.id)}
+                      disabled={deletingId === item.id}
+                      style={{
+                        flex: 1,
+                        border: "1px solid #7f1d1d",
+                        background: deletingId === item.id ? "#7f1d1d" : "transparent",
+                        color: "white",
+                        padding: "10px 12px",
+                        borderRadius: 12,
+                        cursor: deletingId === item.id ? "not-allowed" : "pointer",
+                        fontWeight: 900,
+                        opacity: deletingId === item.id ? 0.8 : 1,
+                      }}
+                    >
+                      {deletingId === item.id ? "Deleting…" : "Delete"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {tab === "requests" && (
+        <>
+          <div style={{ marginTop: 14, opacity: 0.85 }}>
+            These are items you requested (your “Request Item” clicks).
+          </div>
+
+          {myRequests.length === 0 ? (
+            <div
+              style={{
+                marginTop: 14,
+                border: "1px solid #0f223f",
+                background: "#0b1730",
+                borderRadius: 16,
+                padding: 14,
+              }}
+            >
+              <div style={{ fontWeight: 1000 }}>No requests yet.</div>
+              <div style={{ opacity: 0.8, marginTop: 6 }}>Go to the feed and request an item to start a request.</div>
               <button
-                type="button"
-                onClick={() => setShowProfile((v) => !v)}
+                onClick={() => router.push("/feed")}
                 style={{
-                  background: "transparent",
+                  marginTop: 12,
                   border: "1px solid #334155",
+                  background: "transparent",
                   color: "white",
-                  padding: "8px 10px",
+                  padding: "10px 12px",
                   borderRadius: 12,
                   cursor: "pointer",
                   fontWeight: 900,
                 }}
               >
-                {showProfile ? "Hide" : "Edit"}
+                Browse feed
+              </button>
+            </div>
+          ) : (
+            <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+              {myRequests.map((r) => {
+                const it = r.items;
+                return (
+                  <div
+                    key={r.item_id + (r.created_at ?? "")}
+                    style={{
+                      border: "1px solid #0f223f",
+                      background: "#0b1730",
+                      borderRadius: 16,
+                      padding: 14,
+                      display: "flex",
+                      gap: 12,
+                      alignItems: "center",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 54,
+                        height: 54,
+                        borderRadius: 14,
+                        border: "1px solid #0f223f",
+                        background: "#020617",
+                        overflow: "hidden",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "#94a3b8",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {it?.photo_url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={it.photo_url} alt={it.title ?? "Item"} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      ) : (
+                        "—"
+                      )}
+                    </div>
+
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 1000, fontSize: 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {it?.title ?? "Unknown item"}
+                      </div>
+                      <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>
+                        Item: <span style={{ fontWeight: 900 }}>{shortId(r.item_id)}</span> • Status: <b>{it?.status ?? "—"}</b>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => router.push(`/item/${r.item_id}`)}
+                      style={{
+                        border: "1px solid #334155",
+                        background: "transparent",
+                        color: "white",
+                        padding: "10px 12px",
+                        borderRadius: 12,
+                        cursor: "pointer",
+                        fontWeight: 900,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      View
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Drawer */}
+      {drawerOpen && (
+        <div
+          onClick={() => setDrawerOpen(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            zIndex: 9998,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: "absolute",
+              right: 12,
+              top: 12,
+              width: "min(360px, calc(100vw - 24px))",
+              background: "#0b1730",
+              border: "1px solid #0f223f",
+              borderRadius: 16,
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 14, borderBottom: "1px solid #0f223f", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontWeight: 1000 }}>Menu</div>
+              <button
+                onClick={() => setDrawerOpen(false)}
+                style={{
+                  border: "1px solid #334155",
+                  background: "transparent",
+                  color: "white",
+                  borderRadius: 12,
+                  padding: "6px 10px",
+                  cursor: "pointer",
+                  fontWeight: 900,
+                }}
+              >
+                ✕
               </button>
             </div>
 
-            <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <span
+            <div style={{ padding: 14, display: "grid", gap: 10 }}>
+              <button
+                onClick={() => {
+                  setDrawerOpen(false);
+                  setTab("requests");
+                }}
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  padding: "6px 10px",
-                  borderRadius: 999,
+                  width: "100%",
                   border: "1px solid #334155",
-                  background: "#020617",
+                  background: "transparent",
+                  color: "white",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  cursor: "pointer",
                   fontWeight: 900,
-                  fontSize: 12,
-                  opacity: 0.95,
+                  textAlign: "left",
                 }}
               >
-                Name: {fullName.trim().length ? fullName.trim() : "Not set"}
-              </span>
+                Requests (move here)
+              </button>
 
-              <span
+              <button
+                onClick={() => {
+                  setDrawerOpen(false);
+                  router.push("/messages");
+                }}
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  padding: "6px 10px",
-                  borderRadius: 999,
+                  width: "100%",
                   border: "1px solid #334155",
-                  background: "#020617",
+                  background: "transparent",
+                  color: "white",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  cursor: "pointer",
                   fontWeight: 900,
-                  fontSize: 12,
-                  opacity: 0.95,
+                  textAlign: "left",
                 }}
               >
-                Role: {role ? role : "Not set"}
-              </span>
+                Messages
+              </button>
 
-              <span
+              <button
+                onClick={signOut}
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  padding: "6px 10px",
-                  borderRadius: 999,
-                  border: `1px solid ${dbProfileComplete ? "#14532d" : "#7f1d1d"}`,
-                  background: dbProfileComplete ? "#052e16" : "#3f1d1d",
-                  fontWeight: 950,
-                  fontSize: 12,
+                  width: "100%",
+                  border: "1px solid #7f1d1d",
+                  background: "transparent",
+                  color: "white",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  textAlign: "left",
                 }}
               >
-                {dbProfileComplete ? "Complete" : "Incomplete"}
-              </span>
+                Sign out
+              </button>
             </div>
-
-            {showProfile && (
-              <div style={{ marginTop: 14, borderTop: "1px solid #0f223f", paddingTop: 14 }}>
-                <div style={{ fontWeight: 950, marginBottom: 8 }}>
-                  Update profile{" "}
-                  {profileLoading && <span style={{ marginLeft: 8, opacity: 0.7, fontSize: 12 }}>loading…</span>}
-                </div>
-
-                <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>Full name</label>
-                <input
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  placeholder="e.g., Tom Sudow"
-                  style={{
-                    width: "100%",
-                    padding: "10px 12px",
-                    borderRadius: 12,
-                    border: "1px solid #334155",
-                    background: "black",
-                    color: "white",
-                    marginBottom: 12,
-                  }}
-                />
-
-                <label style={{ display: "block", marginBottom: 6, opacity: 0.9 }}>You are</label>
-                <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
-                  <button
-                    type="button"
-                    onClick={() => setRole("student")}
-                    style={{
-                      flex: 1,
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid #334155",
-                      background: role === "student" ? "#052e16" : "transparent",
-                      color: "white",
-                      fontWeight: 950,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Student
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setRole("faculty")}
-                    style={{
-                      flex: 1,
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid #334155",
-                      background: role === "faculty" ? "#052e16" : "transparent",
-                      color: "white",
-                      fontWeight: 950,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Faculty
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={saveProfile}
-                  disabled={profileSaving || !draftComplete}
-                  style={{
-                    width: "100%",
-                    padding: "10px 12px",
-                    borderRadius: 12,
-                    border: "1px solid #14532d",
-                    background: profileSaving ? "#1f2937" : draftComplete ? "#16a34a" : "#14532d",
-                    color: "white",
-                    fontWeight: 950,
-                    cursor: profileSaving ? "not-allowed" : draftComplete ? "pointer" : "not-allowed",
-                    opacity: profileSaving ? 0.85 : 1,
-                  }}
-                >
-                  {profileSaving ? "Saving..." : "Save"}
-                </button>
-              </div>
-            )}
-
-            {status && <p style={{ marginTop: 12, color: statusColor }}>{status.text}</p>}
-          </div>
-
-          {/* Right: My requests */}
-          <div style={{ border: "1px solid #0f223f", borderRadius: 16, background: "#0b1730", padding: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-              <div style={{ fontWeight: 950, fontSize: 16 }}>My requests</div>
-
-              <div style={{ display: "flex", gap: 10 }}>
-                <button
-                  type="button"
-                  onClick={() => setShowRequests((v) => !v)}
-                  style={{
-                    background: "transparent",
-                    border: "1px solid #334155",
-                    color: "white",
-                    padding: "8px 10px",
-                    borderRadius: 12,
-                    cursor: "pointer",
-                    fontWeight: 900,
-                  }}
-                >
-                  {showRequests ? "Collapse" : "Expand"}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={async () => {
-                    if (!userId) return;
-                    await loadMyRequests(userId);
-                  }}
-                  style={{
-                    background: "transparent",
-                    border: "1px solid #334155",
-                    color: "white",
-                    padding: "8px 10px",
-                    borderRadius: 12,
-                    cursor: "pointer",
-                    fontWeight: 900,
-                  }}
-                >
-                  Refresh
-                </button>
-              </div>
-            </div>
-
-            <div style={{ marginTop: 10, opacity: 0.75, fontSize: 13 }}>
-              If a seller accepts you, it will show here.
-            </div>
-
-            {showRequests && (
-              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-                {reqLoading ? (
-                  <div style={{ opacity: 0.8 }}>Loading…</div>
-                ) : requests.length === 0 ? (
-                  <div style={{ opacity: 0.8 }}>No requests yet.</div>
-                ) : (
-                  requests.map((r) => (
-                    <div
-                      key={r.id}
-                      style={{
-                        border: "1px solid #334155",
-                        borderRadius: 14,
-                        padding: 12,
-                        background: "#020617",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: 12,
-                      }}
-                    >
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          Item: {shortId(r.item_id)}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => router.push(`/item/${r.item_id}`)}
-                          style={{
-                            marginTop: 8,
-                            background: "transparent",
-                            border: "1px solid #334155",
-                            color: "white",
-                            padding: "8px 10px",
-                            borderRadius: 12,
-                            cursor: "pointer",
-                            fontWeight: 900,
-                          }}
-                        >
-                          View item
-                        </button>
-                      </div>
-
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
-                        {statusPill(r.status)}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
           </div>
         </div>
       )}
