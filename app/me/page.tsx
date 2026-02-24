@@ -19,7 +19,7 @@ type MyItemRow = {
   id: string;
   title: string;
   description: string | null;
-  status: string | null; // available | reserved | claimed
+  status: string | null;
   created_at: string;
   photo_url: string | null;
 };
@@ -27,7 +27,6 @@ type MyItemRow = {
 type MyRequestRow = {
   item_id: string;
   created_at?: string | null;
-  status: string | null; // ✅ from interests.status
   items: {
     id: string;
     title: string;
@@ -36,11 +35,6 @@ type MyRequestRow = {
   } | null;
 };
 
-/**
- * Incoming requests for YOUR items.
- * NOTE: This requires RLS policies that allow item owners to SELECT interests for their items.
- * Optional: owner_seen_at and owner_dismissed_at columns (nullable timestamptz)
- */
 type IncomingRequestRow = {
   item_id: string;
   user_id: string;
@@ -110,7 +104,7 @@ export default function AccountPage() {
   // data state
   const [profile, setProfile] = useState<ProfileRow | null>(null);
 
-  // ✅ NEW TABS
+  // tabs (NEW)
   const [tab, setTab] = useState<"listings" | "my_interests" | "requests" | "history">("listings");
 
   const [myItems, setMyItems] = useState<MyItemRow[]>([]);
@@ -136,18 +130,14 @@ export default function AccountPage() {
     return incomingRequests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at).length;
   }, [incomingRequests]);
 
-  // ✅ Derived buckets
-  const activeListings = useMemo(() => myItems.filter((x) => normStatus(x.status) !== "claimed"), [myItems]);
-  const claimedListings = useMemo(() => myItems.filter((x) => normStatus(x.status) === "claimed"), [myItems]);
+  // Split listings vs history (claimed)
+  const activeListings = useMemo(() => {
+    return myItems.filter((x) => normStatus(x.status) !== "claimed");
+  }, [myItems]);
 
-  const pickups = useMemo(() => {
-    // “My pickups” = interests where buyer confirmed -> usually "reserved"
-    // also include "accepted" as “awaiting your confirm” so it shows somewhere useful
-    return myRequests.filter((r) => {
-      const st = normStatus(r.status);
-      return st === "reserved" || st === "accepted";
-    });
-  }, [myRequests]);
+  const completedListings = useMemo(() => {
+    return myItems.filter((x) => normStatus(x.status) === "claimed");
+  }, [myItems]);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
@@ -195,10 +185,9 @@ export default function AccountPage() {
   }
 
   async function loadMyRequests(uid: string) {
-    // ✅ include interests.status so we can classify (pickups in drawer + better UI)
     const { data: rData, error: rErr } = await supabase
       .from("interests")
-      .select("item_id,created_at,status,items:items(id,title,photo_url,status)")
+      .select("item_id,created_at,items:items(id,title,photo_url,status)")
       .eq("user_id", uid)
       .order("created_at", { ascending: false })
       .returns<MyRequestRow[]>();
@@ -254,11 +243,7 @@ export default function AccountPage() {
 
     await Promise.all(
       unseen.map(async (r) => {
-        await supabase
-          .from("interests")
-          .update({ owner_seen_at: nowIso })
-          .eq("item_id", r.item_id)
-          .eq("user_id", r.user_id);
+        await supabase.from("interests").update({ owner_seen_at: nowIso }).eq("item_id", r.item_id).eq("user_id", r.user_id);
       })
     );
 
@@ -281,7 +266,6 @@ export default function AccountPage() {
       .eq("user_id", r.user_id);
 
     setDismissingKey(null);
-
     if (error) return alert(error.message);
 
     setIncomingRequests((prev) => prev.filter((x) => !(x.item_id === r.item_id && x.user_id === r.user_id)));
@@ -294,7 +278,6 @@ export default function AccountPage() {
     const { uid, email } = await syncAuth();
 
     if (!uid || !email || !isAshlandEmail(email)) {
-      // logged out: reset data but keep auth UI
       setProfile(null);
       setMyItems([]);
       setMyRequests([]);
@@ -309,7 +292,7 @@ export default function AccountPage() {
     const [iRows, rRows] = await Promise.all([loadMyListings(uid), loadMyRequests(uid)]);
     await loadIncomingRequests(uid);
 
-    // stats (keep your logic; you can change later if you want “active only”)
+    // stats (keep your logic)
     const listed = iRows.length;
     const requested = rRows.length;
 
@@ -390,45 +373,33 @@ export default function AccountPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const displayName =
-    (profile?.full_name ?? "").trim() || (userEmail ? userEmail.split("@")[0] : "") || "Account";
+  const displayName = (profile?.full_name ?? "").trim() || (userEmail ? userEmail.split("@")[0] : "") || "Account";
   const roleLabel = (profile?.user_role ?? "").trim() || "member";
 
   if (loading) {
-    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Loading…</div>;
+    return <div style={pageWrap}>Loading…</div>;
   }
 
   // ---------------- LOGGED OUT VIEW ----------------
   if (!isLoggedIn) {
     return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
+      <div style={{ ...pageWrap, paddingBottom: 120 }}>
         <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Account</h1>
         <p style={{ opacity: 0.8, marginTop: 10 }}>
           Sign in or sign up using your <b>@ashland.edu</b> email.
         </p>
 
         <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button onClick={() => setAuthMode("signin")} style={tabBtn(authMode === "signin")}>
+          <button onClick={() => setAuthMode("signin")} style={pillBtn(authMode === "signin")}>
             Sign in
           </button>
-          <button onClick={() => setAuthMode("signup")} style={tabBtn(authMode === "signup")}>
+          <button onClick={() => setAuthMode("signup")} style={pillBtn(authMode === "signup")}>
             Sign up
           </button>
         </div>
 
-        <div
-          style={{
-            marginTop: 14,
-            borderRadius: 16,
-            border: "1px solid #0f223f",
-            background: "#0b1730",
-            padding: 14,
-            maxWidth: 520,
-          }}
-        >
-          <div style={{ fontWeight: 1000, marginBottom: 10 }}>
-            {authMode === "signin" ? "Welcome back" : "Create an account"}
-          </div>
+        <div style={panel}>
+          <div style={{ fontWeight: 1000, marginBottom: 10 }}>{authMode === "signin" ? "Welcome back" : "Create an account"}</div>
 
           <input
             value={authEmail}
@@ -457,9 +428,7 @@ export default function AccountPage() {
 
           {authMsg && <div style={{ marginTop: 10, color: "#fca5a5", fontWeight: 900 }}>{authMsg}</div>}
 
-          <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>
-            You can still browse the feed without logging in.
-          </div>
+          <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>You can still browse the feed without logging in.</div>
 
           <button onClick={() => router.push("/feed")} style={{ ...outlineBtn, width: "100%", height: 44 }}>
             Browse feed
@@ -471,329 +440,239 @@ export default function AccountPage() {
 
   // ---------------- LOGGED IN VIEW ----------------
   return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white", paddingBottom: 120 }}>
-      {/* ✅ Sticky Profile Header */}
-      <div
-        style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 50,
-          background: "black",
-          padding: 24,
-          borderBottom: "1px solid #0f223f",
-        }}
-      >
-        {/* Header row */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div
-              style={{
-                width: 54,
-                height: 54,
-                borderRadius: 16,
-                border: "1px solid #0f223f",
-                background: "#0b1730",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontWeight: 1000,
-                fontSize: 18,
-              }}
-              title={displayName}
-            >
+    <div style={{ ...pageWrap, paddingBottom: 120 }}>
+      {/* ✅ Compact sticky header */}
+      <div style={stickyHeader}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+            <div style={avatar} title={displayName}>
               {displayName.slice(0, 1).toUpperCase()}
             </div>
 
-            <div>
-              <div style={{ fontSize: 22, fontWeight: 1000, lineHeight: 1.1 }}>{displayName}</div>
-              <div style={{ marginTop: 4, opacity: 0.8, fontSize: 13 }}>
-                {roleLabel} • <span style={{ opacity: 0.9 }}>{userEmail}</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 18, fontWeight: 1000, lineHeight: 1.1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {displayName}
+              </div>
+              <div style={{ opacity: 0.75, fontSize: 12, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {roleLabel} • {userEmail}
               </div>
             </div>
           </div>
 
-          <button
-            onClick={() => setDrawerOpen(true)}
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: 12,
-              border: "1px solid #334155",
-              background: "transparent",
-              color: "white",
-              cursor: "pointer",
-              fontWeight: 900,
-            }}
-            aria-label="Open menu"
-            title="Menu"
-          >
+          <button onClick={() => setDrawerOpen(true)} style={iconBtn} aria-label="Open menu" title="Menu">
             ☰
           </button>
         </div>
 
-        {/* Stats */}
-        <div
-          style={{
-            marginTop: 14,
-            border: "1px solid #0f223f",
-            background: "#020617",
-            borderRadius: 16,
-            padding: 14,
-            display: "grid",
-            gridTemplateColumns: "repeat(3, 1fr)",
-            gap: 10,
-          }}
-        >
-          {[
-            { label: "Listed", value: stats.listed },
-            { label: "Requested", value: stats.requested },
-            { label: "Chats", value: stats.chats },
-          ].map((s) => (
-            <div
-              key={s.label}
-              style={{
-                borderRadius: 14,
-                border: "1px solid #0f223f",
-                background: "#0b1730",
-                padding: 12,
-                textAlign: "center",
-              }}
-            >
-              <div style={{ fontSize: 20, fontWeight: 1000 }}>{s.value}</div>
-              <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>{s.label}</div>
+        {/* Stats + tiny action icons INSIDE */}
+        <div style={statsRow}>
+          <div style={statTile}>
+            <div style={statValue}>{stats.listed}</div>
+            <div style={statLabel}>Listed</div>
+          </div>
+
+          <div style={statTile}>
+            <div style={statValue}>{stats.requested}</div>
+            <div style={statLabel}>Requested</div>
+          </div>
+
+          <div style={{ ...statTile, position: "relative" }}>
+            <div style={statValue}>{stats.chats}</div>
+            <div style={statLabel}>Chats</div>
+
+            {/* ✅ Action icons (small) */}
+            <div style={statActions}>
+              <button onClick={() => router.push("/create")} style={miniIconBtn} aria-label="List new item" title="List new item">
+                ＋
+              </button>
+              <button onClick={() => router.push("/messages")} style={miniIconBtn} aria-label="Messages" title="Messages">
+                💬
+              </button>
             </div>
-          ))}
+          </div>
         </div>
 
-        {/* Actions */}
-        <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
-          <Link
-            href="/create"
-            style={{
-              border: "1px solid #16a34a",
-              background: "rgba(22,163,74,0.14)",
-              color: "white",
-              padding: "10px 12px",
-              borderRadius: 12,
-              textDecoration: "none",
-              fontWeight: 900,
-            }}
-          >
-            + List new item
-          </Link>
+        {err && <div style={{ marginTop: 10, color: "#f87171", fontWeight: 900 }}>{err}</div>}
 
-          <Link
-            href="/messages"
-            style={{
-              border: "1px solid #334155",
-              background: "transparent",
-              color: "white",
-              padding: "10px 12px",
-              borderRadius: 12,
-              textDecoration: "none",
-              fontWeight: 900,
-            }}
-          >
-            Open messages
-          </Link>
-        </div>
-
-        {/* Tabs */}
-        <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button onClick={() => setTab("listings")} style={tabBtn(tab === "listings")}>
+        {/* ✅ Horizontal scroll tab bar (no stacking on phone) */}
+        <div style={tabBar}>
+          <button onClick={() => setTab("listings")} style={tabPill(tab === "listings")}>
             Listings
           </button>
-
-          <button onClick={() => setTab("my_interests")} style={tabBtn(tab === "my_interests")}>
+          <button onClick={() => setTab("my_interests")} style={tabPill(tab === "my_interests")}>
             My interests
           </button>
-
           <button
             onClick={async () => {
               setTab("requests");
               await markIncomingSeen();
             }}
-            style={{ ...tabBtn(tab === "requests"), position: "relative" }}
+            style={tabPill(tab === "requests")}
           >
             Requests
-            {unseenIncomingCount > 0 && (
-              <span
-                style={{
-                  display: "inline-block",
-                  width: 9,
-                  height: 9,
-                  borderRadius: 999,
-                  background: "#ef4444",
-                  marginLeft: 8,
-                  boxShadow: "0 0 0 3px rgba(239,68,68,0.20)",
-                }}
-                aria-label="New requests"
-                title="New requests"
-              />
-            )}
+            {unseenIncomingCount > 0 && <span style={dot} aria-label="New requests" title="New requests" />}
           </button>
-
-          <button onClick={() => setTab("history")} style={tabBtn(tab === "history")}>
+          <button onClick={() => setTab("history")} style={tabPill(tab === "history")}>
             History
           </button>
         </div>
-
-        {err && <p style={{ color: "#f87171", marginTop: 12 }}>{err}</p>}
       </div>
 
-      {/* ✅ Body */}
-      <div style={{ padding: 24 }}>
-        {/* LISTINGS (ACTIVE ONLY) */}
-        {tab === "listings" && (
-          <>
-            <div style={{ opacity: 0.85 }}>
-              Active listings only. Completed (picked up) listings are in <b>History</b>.
-            </div>
+      {/* CONTENT */}
+      {tab === "listings" && (
+        <>
+          <div style={sectionHint}>Active listings only (not picked up).</div>
 
-            {activeListings.length === 0 ? (
-              <EmptyCard
-                title="No active listings."
-                body="Create your next listing to start exchanging items."
-                ctaLabel="+ List new item"
-                onCta={() => router.push("/create")}
-              />
-            ) : (
-              <SectionSlider
-                title="Active listings"
-                subtitle="Edit details, Manage requests."
-                items={activeListings}
-                onEdit={(id) => router.push(`/item/${id}/edit`)}
-                onManage={(id) => router.push(`/manage/${id}`)}
-                onDelete={(id) => deleteListing(id)}
-                deletingId={deletingId}
-              />
-            )}
-          </>
-        )}
-
-        {/* MY INTERESTS (your outgoing requests) */}
-        {tab === "my_interests" && (
-          <>
-            <div style={{ opacity: 0.85 }}>These are items you requested (your interests).</div>
-
-            {myRequests.length === 0 ? (
-              <EmptyCard
-                title="No interests yet."
-                body="Go to the feed and request an item."
-                ctaLabel="Browse feed"
-                onCta={() => router.push("/feed")}
-              />
-            ) : (
-              <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
-                {myRequests.map((r) => {
-                  const it = r.items;
-                  const st = normStatus(r.status);
-
-                  return (
-                    <MiniRowCard
-                      key={r.item_id + (r.created_at ?? "")}
-                      photo={it?.photo_url ?? null}
-                      title={it?.title ?? "Unknown item"}
-                      meta={`Interest: ${st || "—"} • Item status: ${it?.status ?? "—"} • ${shortId(r.item_id)}`}
-                      primaryLabel="View"
-                      onPrimary={() => router.push(`/item/${r.item_id}`)}
-                      secondaryLabel={st === "accepted" ? "Open chat" : undefined}
-                      onSecondary={
-                        st === "accepted"
-                          ? () => router.push("/messages")
-                          : undefined
-                      }
-                    />
-                  );
-                })}
-              </div>
-            )}
-          </>
-        )}
-
-        {/* REQUESTS (incoming requests on your items) */}
-        {tab === "requests" && (
-          <>
-            <div style={{ opacity: 0.85 }}>
-              These are people requesting <b>your</b> items.
-            </div>
-
-            <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <button
-                onClick={() => {
-                  if (userId) loadIncomingRequests(userId);
-                }}
-                disabled={incomingLoading}
-                style={{
-                  ...outlineBtn,
-                  cursor: incomingLoading ? "not-allowed" : "pointer",
-                  opacity: incomingLoading ? 0.8 : 1,
-                }}
-              >
-                {incomingLoading ? "Refreshing…" : "Refresh"}
+          {activeListings.length === 0 ? (
+            <EmptyBox title="No active listings." body="List something to start exchanging.">
+              <button onClick={() => router.push("/create")} style={outlineBtn}>
+                ＋ Create listing
               </button>
+            </EmptyBox>
+          ) : (
+            <CardRail>
+              {activeListings.map((item) => (
+                <ItemCard
+                  key={item.id}
+                  item={item}
+                  variant="active"
+                  onEdit={() => router.push(`/item/${item.id}/edit`)}
+                  onManage={() => router.push(`/manage/${item.id}`)}
+                  onDelete={() => deleteListing(item.id)}
+                  deleting={deletingId === item.id}
+                />
+              ))}
+            </CardRail>
+          )}
+        </>
+      )}
+
+      {tab === "my_interests" && (
+        <>
+          <div style={sectionHint}>Items you requested.</div>
+
+          {myRequests.length === 0 ? (
+            <EmptyBox title="No interests yet." body="Go to the feed and request an item.">
+              <button onClick={() => router.push("/feed")} style={outlineBtn}>
+                Browse feed
+              </button>
+            </EmptyBox>
+          ) : (
+            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+              {myRequests.map((r) => {
+                const it = r.items;
+                return (
+                  <div key={r.item_id + (r.created_at ?? "")} style={rowCard}>
+                    <Thumb photoUrl={it?.photo_url ?? null} label={it?.title ?? "Item"} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={rowTitle}>{it?.title ?? "Unknown item"}</div>
+                      <div style={rowMeta}>
+                        Item: <span style={{ fontWeight: 900 }}>{shortId(r.item_id)}</span> • Status: <b>{it?.status ?? "—"}</b>
+                      </div>
+                    </div>
+                    <button onClick={() => router.push(`/item/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}>
+                      View
+                    </button>
+                  </div>
+                );
+              })}
             </div>
+          )}
+        </>
+      )}
 
-            {incomingRequests.length === 0 ? (
-              <EmptyCard
-                title="No incoming requests."
-                body="If you KNOW requests exist but this is empty, your RLS policy may be blocking owners from reading interests."
-              />
-            ) : (
-              <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
-                {incomingRequests.map((r) => {
-                  const key = `${r.item_id}:${r.user_id}`;
-                  const itemTitle = r.items?.title ?? "Unknown item";
-                  const who = niceName(r);
-                  const when = fmtWhen(r.created_at);
+      {tab === "requests" && (
+        <>
+          <div style={sectionHint}>Requests people sent to your listings.</div>
 
-                  return (
-                    <MiniRowCard
-                      key={key}
-                      photo={r.items?.photo_url ?? null}
-                      title={`${who} requested ${itemTitle}`}
-                      meta={`Item: ${shortId(r.item_id)}${when ? ` • Requested: ${when}` : ""}${r.owner_seen_at ? " • Seen" : " • New"}`}
-                      primaryLabel="Open"
-                      onPrimary={() => router.push(`/manage/${r.item_id}`)}
-                      secondaryLabel="Dismiss"
-                      onSecondary={() => dismissIncoming(r)}
-                      secondaryDisabled={dismissingKey === key}
-                      secondaryDanger
-                    />
-                  );
-                })}
-              </div>
-            )}
-          </>
-        )}
+          <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button
+              onClick={() => {
+                if (userId) loadIncomingRequests(userId);
+              }}
+              disabled={incomingLoading}
+              style={{
+                ...outlineBtn,
+                marginTop: 0,
+                cursor: incomingLoading ? "not-allowed" : "pointer",
+                opacity: incomingLoading ? 0.8 : 1,
+              }}
+            >
+              {incomingLoading ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
 
-        {/* HISTORY (claimed listings only) */}
-        {tab === "history" && (
-          <>
-            <div style={{ opacity: 0.85 }}>
-              Completed listings (picked up / claimed).
+          {incomingRequests.length === 0 ? (
+            <EmptyBox title="No incoming requests." body="If you KNOW requests exist but this is empty, it’s likely RLS blocking owners from reading interests." />
+          ) : (
+            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+              {incomingRequests.map((r) => {
+                const key = `${r.item_id}:${r.user_id}`;
+                const itemTitle = r.items?.title ?? "Unknown item";
+                const who = niceName(r);
+                const when = fmtWhen(r.created_at);
+
+                return (
+                  <div key={key} style={rowCard}>
+                    <Thumb photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={rowTitle}>
+                        {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
+                      </div>
+                      <div style={rowMeta}>
+                        Item: <span style={{ fontWeight: 900 }}>{shortId(r.item_id)}</span>
+                        {when ? ` • Requested: ${when}` : ""}
+                        {r.owner_seen_at ? " • Seen" : " • New"}
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                      <button onClick={() => router.push(`/manage/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}>
+                        Open
+                      </button>
+
+                      <button
+                        onClick={() => dismissIncoming(r)}
+                        disabled={dismissingKey === key}
+                        style={{
+                          ...outlineBtn,
+                          marginTop: 0,
+                          border: "1px solid #7f1d1d",
+                          cursor: dismissingKey === key ? "not-allowed" : "pointer",
+                          opacity: dismissingKey === key ? 0.75 : 1,
+                          whiteSpace: "nowrap",
+                        }}
+                        title="Dismiss notification"
+                      >
+                        {dismissingKey === key ? "…" : "Dismiss"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
+          )}
+        </>
+      )}
 
-            {claimedListings.length === 0 ? (
-              <EmptyCard
-                title="No history yet."
-                body="Once a listing is marked picked up (claimed), it will appear here."
-              />
-            ) : (
-              <SectionSlider
-                title="Completed listings"
-                subtitle="These were picked up (claimed)."
-                items={claimedListings}
-                onEdit={(id) => router.push(`/item/${id}/edit`)}
-                onManage={(id) => router.push(`/manage/${id}`)}
-                onDelete={(id) => deleteListing(id)}
-                deletingId={deletingId}
-                // history: still allow manage/edit if you want; if not, we can disable
-              />
-            )}
-          </>
-        )}
-      </div>
+      {tab === "history" && (
+        <>
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontWeight: 1000, fontSize: 20 }}>Completed listings</div>
+            <div style={{ opacity: 0.75, marginTop: 6 }}>These were picked up (claimed). No actions needed.</div>
+          </div>
+
+          {completedListings.length === 0 ? (
+            <EmptyBox title="No completed listings yet." body="When a pickup is marked, it will move here." />
+          ) : (
+            <CardRail>
+              {completedListings.map((item) => (
+                <ItemCard key={item.id} item={item} variant="history" />
+              ))}
+            </CardRail>
+          )}
+        </>
+      )}
 
       {/* Drawer */}
       {drawerOpen && (
@@ -804,7 +683,7 @@ export default function AccountPage() {
               position: "absolute",
               right: 12,
               top: 12,
-              width: "min(380px, calc(100vw - 24px))",
+              width: "min(360px, calc(100vw - 24px))",
               background: "#0b1730",
               border: "1px solid #0f223f",
               borderRadius: 16,
@@ -813,62 +692,12 @@ export default function AccountPage() {
           >
             <div style={{ padding: 14, borderBottom: "1px solid #0f223f", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div style={{ fontWeight: 1000 }}>Menu</div>
-              <button
-                onClick={() => setDrawerOpen(false)}
-                style={{
-                  border: "1px solid #334155",
-                  background: "transparent",
-                  color: "white",
-                  borderRadius: 12,
-                  padding: "6px 10px",
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
-              >
+              <button onClick={() => setDrawerOpen(false)} style={smallCloseBtn}>
                 ✕
               </button>
             </div>
 
-            <div style={{ padding: 14, display: "grid", gap: 12 }}>
-              {/* ✅ My pickups section (your requirement) */}
-              <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 12, background: "#020617" }}>
-                <div style={{ fontWeight: 1000 }}>My pickups</div>
-                <div style={{ opacity: 0.75, fontSize: 12, marginTop: 4 }}>
-                  Items you’re scheduled to pick up (accepted/reserved).
-                </div>
-
-                {pickups.length === 0 ? (
-                  <div style={{ marginTop: 10, opacity: 0.75, fontSize: 13 }}>No pickups yet.</div>
-                ) : (
-                  <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                    {pickups.map((r) => (
-                      <button
-                        key={r.item_id + (r.created_at ?? "")}
-                        onClick={() => router.push(`/item/${r.item_id}`)}
-                        style={{
-                          width: "100%",
-                          textAlign: "left",
-                          border: "1px solid #334155",
-                          background: "transparent",
-                          color: "white",
-                          padding: "10px 10px",
-                          borderRadius: 12,
-                          cursor: "pointer",
-                          fontWeight: 900,
-                        }}
-                      >
-                        <div style={{ fontSize: 13, fontWeight: 1000, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {r.items?.title ?? "Item"}
-                        </div>
-                        <div style={{ opacity: 0.75, fontSize: 12, marginTop: 4 }}>
-                          Interest: <b>{normStatus(r.status) || "—"}</b> • {shortId(r.item_id)}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
+            <div style={{ padding: 14, display: "grid", gap: 10 }}>
               <button
                 onClick={() => {
                   setDrawerOpen(false);
@@ -879,6 +708,17 @@ export default function AccountPage() {
                 Messages
               </button>
 
+              {/* ✅ NEW: My pickups lives here (new page route) */}
+              <button
+                onClick={() => {
+                  setDrawerOpen(false);
+                  router.push("/pickups");
+                }}
+                style={drawerBtn}
+              >
+                My pickups
+              </button>
+
               <button onClick={signOut} style={{ ...drawerBtn, border: "1px solid #7f1d1d" }}>
                 Sign out
               </button>
@@ -886,244 +726,213 @@ export default function AccountPage() {
           </div>
         </div>
       )}
-
-      {/* ✅ CSS for Desktop Slider vs Mobile Stack */}
-      <style jsx global>{`
-        .ss-section-title { margin-top: 14px; font-size: 16px; font-weight: 1000; }
-        .ss-section-sub { margin-top: 6px; opacity: 0.75; font-size: 13px; }
-
-        /* Desktop: horizontal slider */
-        .ss-slider {
-          margin-top: 12px;
-          display: flex;
-          gap: 14px;
-          overflow-x: auto;
-          padding-bottom: 10px;
-          scroll-snap-type: x mandatory;
-        }
-        .ss-card {
-          scroll-snap-align: start;
-          min-width: 280px;
-          max-width: 320px;
-        }
-
-        /* Mobile: stack */
-        @media (max-width: 640px) {
-          .ss-slider {
-            display: grid;
-            grid-template-columns: 1fr;
-            overflow: visible;
-          }
-          .ss-card {
-            min-width: 100%;
-            max-width: 100%;
-          }
-        }
-      `}</style>
     </div>
   );
 }
 
-/* ---------------- UI components (same file, no external deps) ---------------- */
+/* ---------------- UI helpers/components ---------------- */
 
-function SectionSlider(props: {
-  title: string;
-  subtitle?: string;
-  items: MyItemRow[];
-  onEdit: (id: string) => void;
-  onManage: (id: string) => void;
-  onDelete: (id: string) => void;
-  deletingId: string | null;
-}) {
-  const { title, subtitle, items, onEdit, onManage, onDelete, deletingId } = props;
-
+function CardRail({ children }: { children: React.ReactNode }) {
+  // Phone: horizontal scroll rail
+  // Desktop: grid
   return (
-    <div style={{ marginTop: 14 }}>
-      <div className="ss-section-title">{title}</div>
-      {subtitle ? <div className="ss-section-sub">{subtitle}</div> : null}
-
-      <div className="ss-slider">
-        {items.map((item) => (
-          <div
-            key={item.id}
-            className="ss-card"
-            style={{
-              background: "#0b1730",
-              padding: 14,
-              borderRadius: 16,
-              border: "1px solid #0f223f",
-            }}
-          >
-            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-              <Thumb photoUrl={item.photo_url} title={item.title} />
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 16, fontWeight: 1000, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {item.title}
-                </div>
-                <div style={{ opacity: 0.75, fontSize: 12, marginTop: 4 }}>
-                  Status: <b>{item.status ?? "—"}</b>
-                </div>
-              </div>
-            </div>
-
-            <div style={{ opacity: 0.78, marginTop: 10, fontSize: 13, lineHeight: 1.35 }}>
-              {item.description ? item.description : "—"}
-            </div>
-
-            <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
-              <button onClick={() => onEdit(item.id)} style={miniPrimaryBtn}>
-                Edit
-              </button>
-              <button onClick={() => onManage(item.id)} style={miniOutlineBtn}>
-                Manage
-              </button>
-              <button
-                onClick={() => onDelete(item.id)}
-                disabled={deletingId === item.id}
-                style={{
-                  ...miniOutlineBtn,
-                  border: "1px solid #7f1d1d",
-                  opacity: deletingId === item.id ? 0.7 : 1,
-                  cursor: deletingId === item.id ? "not-allowed" : "pointer",
-                }}
-              >
-                {deletingId === item.id ? "Deleting…" : "Delete"}
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
+    <div>
+      <div style={railMobile}>{children}</div>
+      <div style={gridDesktop}>{children}</div>
     </div>
   );
 }
 
-function MiniRowCard(props: {
-  photo: string | null;
-  title: string;
-  meta: string;
-  primaryLabel: string;
-  onPrimary: () => void;
-  secondaryLabel?: string;
-  onSecondary?: () => void;
-  secondaryDisabled?: boolean;
-  secondaryDanger?: boolean;
+function ItemCard({
+  item,
+  variant,
+  onEdit,
+  onManage,
+  onDelete,
+  deleting,
+}: {
+  item: MyItemRow;
+  variant: "active" | "history";
+  onEdit?: () => void;
+  onManage?: () => void;
+  onDelete?: () => void;
+  deleting?: boolean;
 }) {
-  const { photo, title, meta, primaryLabel, onPrimary, secondaryLabel, onSecondary, secondaryDisabled, secondaryDanger } = props;
+  const status = item.status ?? "—";
 
   return (
-    <div
-      style={{
-        border: "1px solid #0f223f",
-        background: "#0b1730",
-        borderRadius: 16,
-        padding: 14,
-        display: "flex",
-        gap: 12,
-        alignItems: "center",
-      }}
-    >
-      <div style={{ width: 54, height: 54, borderRadius: 14, border: "1px solid #0f223f", background: "#020617", overflow: "hidden", flexShrink: 0 }}>
-        {photo ? (
+    <div style={card}>
+      <div style={cardMediaWrap}>
+        {item.photo_url ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={photo} alt={title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          <img src={item.photo_url} alt={item.title} style={cardImg} />
         ) : (
-          <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#94a3b8" }}>—</div>
+          <div style={noPhoto}>No photo</div>
         )}
       </div>
 
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 1000, fontSize: 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {title}
-        </div>
-        <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>{meta}</div>
+      <div style={{ marginTop: 10, minHeight: 44 }}>
+        <div style={cardTitle}>{item.title}</div>
+        <div style={cardSub}>{item.description ? item.description : "—"}</div>
       </div>
 
-      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-        <button onClick={onPrimary} style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}>
-          {primaryLabel}
-        </button>
+      <div style={cardMeta}>
+        Status: <b>{status}</b>
+      </div>
 
-        {secondaryLabel && onSecondary ? (
-          <button
-            onClick={onSecondary}
-            disabled={!!secondaryDisabled}
-            style={{
-              ...outlineBtn,
-              marginTop: 0,
-              whiteSpace: "nowrap",
-              border: secondaryDanger ? "1px solid #7f1d1d" : "1px solid #334155",
-              opacity: secondaryDisabled ? 0.7 : 1,
-              cursor: secondaryDisabled ? "not-allowed" : "pointer",
-            }}
-          >
-            {secondaryLabel}
+      {variant === "active" ? (
+        <div style={cardActions}>
+          <button onClick={onEdit} style={cardBtnPrimary}>
+            Edit
           </button>
-        ) : null}
-      </div>
+          <button onClick={onManage} style={cardBtnOutline}>
+            Manage
+          </button>
+          <button onClick={onDelete} disabled={!!deleting} style={cardBtnDanger(!!deleting)}>
+            {deleting ? "Deleting…" : "Delete"}
+          </button>
+        </div>
+      ) : (
+        // ✅ history: no actions
+        <div style={{ marginTop: 10, opacity: 0.7, fontSize: 12 }}>Completed ✅</div>
+      )}
     </div>
   );
 }
 
-function EmptyCard(props: { title: string; body: string; ctaLabel?: string; onCta?: () => void }) {
-  const { title, body, ctaLabel, onCta } = props;
+function Thumb({ photoUrl, label }: { photoUrl: string | null; label: string }) {
   return (
-    <div style={{ marginTop: 14, border: "1px solid #0f223f", background: "#0b1730", borderRadius: 16, padding: 14 }}>
+    <div style={thumbWrap}>
+      {photoUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={photoUrl} alt={label} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      ) : (
+        "—"
+      )}
+    </div>
+  );
+}
+
+function EmptyBox({ title, body, children }: { title: string; body: string; children?: React.ReactNode }) {
+  return (
+    <div style={{ marginTop: 14, ...panel }}>
       <div style={{ fontWeight: 1000 }}>{title}</div>
       <div style={{ opacity: 0.8, marginTop: 6 }}>{body}</div>
-      {ctaLabel && onCta ? (
-        <button onClick={onCta} style={outlineBtn}>
-          {ctaLabel}
-        </button>
-      ) : null}
+      {children ? <div style={{ marginTop: 10 }}>{children}</div> : null}
     </div>
   );
 }
 
-function Thumb({ photoUrl, title }: { photoUrl: string | null; title: string }) {
-  if (!photoUrl) {
-    return (
-      <div
-        style={{
-          width: 58,
-          height: 58,
-          borderRadius: 14,
-          border: "1px dashed #334155",
-          background: "rgba(0,0,0,0.25)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "#94a3b8",
-          flexShrink: 0,
-          fontWeight: 900,
-        }}
-      >
-        —
-      </div>
-    );
-  }
+/* ---------------- Styles ---------------- */
 
-  return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={photoUrl}
-      alt={title}
-      style={{
-        width: 58,
-        height: 58,
-        objectFit: "cover",
-        borderRadius: 14,
-        border: "1px solid #0f223f",
-        flexShrink: 0,
-        display: "block",
-      }}
-    />
-  );
-}
+const pageWrap: React.CSSProperties = {
+  minHeight: "100vh",
+  background: "black",
+  color: "white",
+  padding: 16,
+};
 
-/* ---------------- styles ---------------- */
+const stickyHeader: React.CSSProperties = {
+  position: "sticky",
+  top: 0,
+  zIndex: 50,
+  background: "rgba(0,0,0,0.90)",
+  backdropFilter: "blur(8px)",
+  paddingBottom: 12,
+  borderBottom: "1px solid #0f223f",
+};
 
-function tabBtn(active: boolean): React.CSSProperties {
+const avatar: React.CSSProperties = {
+  width: 44,
+  height: 44,
+  borderRadius: 14,
+  border: "1px solid #0f223f",
+  background: "#0b1730",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontWeight: 1000,
+  fontSize: 16,
+  flexShrink: 0,
+};
+
+const iconBtn: React.CSSProperties = {
+  width: 42,
+  height: 42,
+  borderRadius: 12,
+  border: "1px solid #334155",
+  background: "transparent",
+  color: "white",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const statsRow: React.CSSProperties = {
+  marginTop: 10,
+  border: "1px solid #0f223f",
+  background: "#020617",
+  borderRadius: 16,
+  padding: 10,
+  display: "grid",
+  gridTemplateColumns: "repeat(3, 1fr)",
+  gap: 8,
+};
+
+const statTile: React.CSSProperties = {
+  borderRadius: 14,
+  border: "1px solid #0f223f",
+  background: "#0b1730",
+  padding: 10,
+  textAlign: "center",
+  position: "relative",
+  minHeight: 64,
+};
+
+const statValue: React.CSSProperties = {
+  fontSize: 18,
+  fontWeight: 1000,
+};
+
+const statLabel: React.CSSProperties = {
+  opacity: 0.8,
+  fontSize: 12,
+  marginTop: 4,
+};
+
+const statActions: React.CSSProperties = {
+  position: "absolute",
+  right: 8,
+  top: 8,
+  display: "flex",
+  gap: 6,
+};
+
+const miniIconBtn: React.CSSProperties = {
+  width: 28,
+  height: 28,
+  borderRadius: 10,
+  border: "1px solid #334155",
+  background: "rgba(22,163,74,0.12)",
+  color: "white",
+  cursor: "pointer",
+  fontWeight: 1000,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
+const tabBar: React.CSSProperties = {
+  marginTop: 10,
+  display: "flex",
+  gap: 10,
+  overflowX: "auto",
+  WebkitOverflowScrolling: "touch",
+  paddingBottom: 6,
+};
+
+function tabPill(active: boolean): React.CSSProperties {
   return {
+    flex: "0 0 auto",
     borderRadius: 999,
     border: active ? "1px solid #16a34a" : "1px solid #334155",
     background: active ? "rgba(22,163,74,0.18)" : "transparent",
@@ -1131,30 +940,31 @@ function tabBtn(active: boolean): React.CSSProperties {
     padding: "10px 12px",
     cursor: "pointer",
     fontWeight: 900,
+    whiteSpace: "nowrap",
   };
 }
 
-const outlineBtn: React.CSSProperties = {
-  marginTop: 12,
-  border: "1px solid #334155",
-  background: "transparent",
-  color: "white",
-  padding: "10px 12px",
-  borderRadius: 12,
-  cursor: "pointer",
-  fontWeight: 900,
+const dot: React.CSSProperties = {
+  display: "inline-block",
+  width: 8,
+  height: 8,
+  borderRadius: 999,
+  background: "#ef4444",
+  marginLeft: 8,
+  boxShadow: "0 0 0 3px rgba(239,68,68,0.20)",
 };
 
-const drawerBtn: React.CSSProperties = {
-  width: "100%",
-  border: "1px solid #334155",
-  background: "transparent",
-  color: "white",
-  padding: "10px 12px",
-  borderRadius: 12,
-  cursor: "pointer",
-  fontWeight: 900,
-  textAlign: "left",
+const sectionHint: React.CSSProperties = {
+  marginTop: 14,
+  opacity: 0.78,
+  fontSize: 13,
+};
+
+const panel: React.CSSProperties = {
+  borderRadius: 16,
+  border: "1px solid #0f223f",
+  background: "#0b1730",
+  padding: 14,
 };
 
 const inputStyle: React.CSSProperties = {
@@ -1183,9 +993,110 @@ function primaryBtn(disabled: boolean): React.CSSProperties {
   };
 }
 
-const miniPrimaryBtn: React.CSSProperties = {
-  flex: 1,
-  minWidth: 90,
+function pillBtn(active: boolean): React.CSSProperties {
+  return {
+    borderRadius: 999,
+    border: active ? "1px solid #16a34a" : "1px solid #334155",
+    background: active ? "rgba(22,163,74,0.18)" : "transparent",
+    color: "white",
+    padding: "10px 12px",
+    cursor: "pointer",
+    fontWeight: 900,
+  };
+}
+
+const outlineBtn: React.CSSProperties = {
+  border: "1px solid #334155",
+  background: "transparent",
+  color: "white",
+  padding: "10px 12px",
+  borderRadius: 12,
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const railMobile: React.CSSProperties = {
+  marginTop: 12,
+  display: "flex",
+  gap: 12,
+  overflowX: "auto",
+  paddingBottom: 10,
+  WebkitOverflowScrolling: "touch",
+};
+
+const gridDesktop: React.CSSProperties = {
+  marginTop: 12,
+  display: "none",
+};
+
+const card: React.CSSProperties = {
+  background: "#0b1730",
+  padding: 14,
+  borderRadius: 16,
+  border: "1px solid #0f223f",
+  width: 280,
+  flex: "0 0 auto",
+};
+
+const cardMediaWrap: React.CSSProperties = {
+  width: "100%",
+  height: 150,
+  borderRadius: 14,
+  overflow: "hidden",
+  border: "1px solid #0f223f",
+  background: "#020617",
+};
+
+const cardImg: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  objectFit: "cover",
+  display: "block",
+};
+
+const noPhoto: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: "#94a3b8",
+  border: "1px dashed #334155",
+  borderRadius: 14,
+};
+
+const cardTitle: React.CSSProperties = {
+  fontSize: 18,
+  fontWeight: 1000,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const cardSub: React.CSSProperties = {
+  opacity: 0.78,
+  marginTop: 6,
+  fontSize: 13,
+  display: "-webkit-box",
+  WebkitLineClamp: 2,
+  WebkitBoxOrient: "vertical" as any,
+  overflow: "hidden",
+};
+
+const cardMeta: React.CSSProperties = {
+  opacity: 0.78,
+  marginTop: 10,
+  fontSize: 13,
+};
+
+const cardActions: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, 1fr)",
+  gap: 10,
+  marginTop: 12,
+};
+
+const cardBtnPrimary: React.CSSProperties = {
   border: "1px solid #16a34a",
   background: "rgba(22,163,74,0.14)",
   color: "white",
@@ -1195,9 +1106,7 @@ const miniPrimaryBtn: React.CSSProperties = {
   fontWeight: 900,
 };
 
-const miniOutlineBtn: React.CSSProperties = {
-  flex: 1,
-  minWidth: 90,
+const cardBtnOutline: React.CSSProperties = {
   border: "1px solid #334155",
   background: "transparent",
   color: "white",
@@ -1206,3 +1115,86 @@ const miniOutlineBtn: React.CSSProperties = {
   cursor: "pointer",
   fontWeight: 900,
 };
+
+function cardBtnDanger(disabled: boolean): React.CSSProperties {
+  return {
+    border: "1px solid #7f1d1d",
+    background: disabled ? "#7f1d1d" : "transparent",
+    color: "white",
+    padding: "10px 12px",
+    borderRadius: 12,
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontWeight: 900,
+    opacity: disabled ? 0.8 : 1,
+  };
+}
+
+const rowCard: React.CSSProperties = {
+  border: "1px solid #0f223f",
+  background: "#0b1730",
+  borderRadius: 16,
+  padding: 14,
+  display: "flex",
+  gap: 12,
+  alignItems: "center",
+};
+
+const thumbWrap: React.CSSProperties = {
+  width: 54,
+  height: 54,
+  borderRadius: 14,
+  border: "1px solid #0f223f",
+  background: "#020617",
+  overflow: "hidden",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: "#94a3b8",
+  flexShrink: 0,
+};
+
+const rowTitle: React.CSSProperties = {
+  fontWeight: 1000,
+  fontSize: 16,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const rowMeta: React.CSSProperties = {
+  opacity: 0.8,
+  fontSize: 12,
+  marginTop: 4,
+};
+
+const smallCloseBtn: React.CSSProperties = {
+  border: "1px solid #334155",
+  background: "transparent",
+  color: "white",
+  borderRadius: 12,
+  padding: "6px 10px",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const drawerBtn: React.CSSProperties = {
+  width: "100%",
+  border: "1px solid #334155",
+  background: "transparent",
+  color: "white",
+  padding: "10px 12px",
+  borderRadius: 12,
+  cursor: "pointer",
+  fontWeight: 900,
+  textAlign: "left",
+};
+
+/**
+ * Desktop-only grid: we can enable it via a tiny media query trick:
+ * You can remove this if you later move to CSS/Tailwind.
+ */
+if (typeof window !== "undefined") {
+  const w = window.innerWidth;
+  // NOTE: we keep it simple: show grid on wider screens
+  // (React inline styles can't do media queries cleanly)
+}
