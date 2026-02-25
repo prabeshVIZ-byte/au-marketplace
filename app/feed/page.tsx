@@ -1,9 +1,15 @@
 "use client";
 
 import Image from "next/image";
+import { Grand_Hotel } from "next/font/google";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+
+const brandFont = Grand_Hotel({
+  subsets: ["latin"],
+  weight: "400",
+});
 
 type OwnerRole = "student" | "faculty" | null;
 
@@ -156,9 +162,7 @@ export default function FeedPage() {
 
     const { data, error } = await supabase
       .from("v_feed_items")
-      .select(
-        "id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role"
-      )
+      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -172,18 +176,12 @@ export default function FeedPage() {
     const rows = ((data as FeedRowFromView[]) || []).map((x) => ({ ...x })) as FeedRow[];
     const ids = rows.map((x) => x.id);
 
-    // pull owner_id + is_claimed from real table (NOT the view)
     const meta = await loadOwnerMeta(ids);
     const merged = rows.map((x) => {
       const m = meta.get(x.id);
-      return {
-        ...x,
-        owner_id: m?.owner_id ?? null,
-        is_claimed: m?.is_claimed ?? null,
-      };
+      return { ...x, owner_id: m?.owner_id ?? null, is_claimed: m?.is_claimed ?? null };
     });
 
-    // hide claimed items
     const visible = merged.filter((x) => {
       const st = (x.status ?? "available").toLowerCase();
       const claimed = !!x.is_claimed || st === "claimed";
@@ -207,7 +205,6 @@ export default function FeedPage() {
       return;
     }
 
-    // block if it's your own listing
     const isMineListing = !!item.owner_id && item.owner_id === userId;
     if (isMineListing) return;
 
@@ -308,12 +305,12 @@ export default function FeedPage() {
     position: "sticky",
     top: 0,
     zIndex: 30,
-    background: "rgba(0,0,0,0.88)",
-    backdropFilter: "blur(10px)",
+    background: "rgba(0,0,0,0.90)",
+    backdropFilter: "blur(12px)",
     borderBottom: "1px solid rgba(148,163,184,0.12)",
   };
 
-  const pagePad: React.CSSProperties = { padding: "16px 16px 90px" };
+  const pagePad: React.CSSProperties = { padding: "14px 16px 90px" };
 
   const pill: React.CSSProperties = {
     flex: "0 0 auto",
@@ -329,77 +326,76 @@ export default function FeedPage() {
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white" }}>
-      {/* TOP BAR (logo + create) */}
+      {/* TOP BAR */}
       <div style={topWrap}>
         <div style={{ ...pagePad, paddingBottom: 10 }}>
+          {/* Header row with perfect center brand */}
           <div
             style={{
-              display: "flex",
+              display: "grid",
+              gridTemplateColumns: "56px 1fr 56px",
               alignItems: "center",
-              justifyContent: "space-between",
               gap: 12,
             }}
           >
-            {/* Logo only (clean) */}
+            {/* Left: logo icon */}
             <button
               type="button"
               onClick={() => router.push("/feed")}
+              aria-label="Home"
+              title="Home"
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                background: "transparent",
-                border: "none",
-                padding: 0,
+                width: 56,
+                height: 56,
+                borderRadius: 16,
+                overflow: "hidden",
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.08)",
+                boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
                 cursor: "pointer",
+                padding: 0,
               }}
-              aria-label="ScholarSwap home"
-              title="ScholarSwap"
             >
-              <div
-                style={{
-                  width: 40,
-                  height: 40,
-                  borderRadius: 12,
-                  overflow: "hidden",
-                  border: "1px solid rgba(148,163,184,0.18)",
-                  background: "rgba(255,255,255,0.03)",
-                  boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
-                }}
-              >
-                <Image
-                  src="/scholarswap-logo.png"
-                  alt="ScholarSwap"
-                  width={40}
-                  height={40}
-                  priority
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                />
-              </div>
-              <div style={{ lineHeight: 1.05 }}>
-                <div style={{ fontSize: 16, fontWeight: 950, letterSpacing: -0.2 }}>
-                  ScholarSwap
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.65, fontWeight: 800 }}>
-                  Campus exchange feed
-                </div>
-              </div>
+              <Image
+                src="/scholarswap-icon.png"
+                alt="ScholarSwap"
+                width={56}
+                height={56}
+                priority
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+              />
             </button>
 
-            {/* Create button (replaces My listings) */}
+            {/* Center: brand wordmark (Instagram-like font) */}
+            <div style={{ textAlign: "center", lineHeight: 1 }}>
+              <div
+                className={brandFont.className}
+                style={{
+                  fontSize: 44,
+                  letterSpacing: 0.2,
+                  transform: "translateY(2px)",
+                  color: "rgba(255,255,255,0.96)",
+                  userSelect: "none",
+                }}
+              >
+                ScholarSwap
+              </div>
+            </div>
+
+            {/* Right: create */}
             <button
               type="button"
               onClick={() => router.push("/create")}
               style={{
-                width: 44,
-                height: 44,
-                borderRadius: 14,
+                width: 56,
+                height: 56,
+                borderRadius: 16,
                 border: "1px solid rgba(52,211,153,0.25)",
                 background: "rgba(16,185,129,0.16)",
                 color: "rgba(209,250,229,0.95)",
                 cursor: "pointer",
                 fontWeight: 1000,
-                fontSize: 22,
+                fontSize: 26,
                 display: "grid",
                 placeItems: "center",
               }}
@@ -410,7 +406,7 @@ export default function FeedPage() {
             </button>
           </div>
 
-          {/* FILTER ROW (single line on mobile) */}
+          {/* FILTER ROW */}
           <div style={{ marginTop: 12 }}>
             <div
               style={{
@@ -422,7 +418,7 @@ export default function FeedPage() {
                 alignItems: "center",
               }}
             >
-              {/* Lister pill (embedded before categories) */}
+              {/* Lister pill */}
               <div
                 style={{
                   ...pill,
@@ -478,7 +474,6 @@ export default function FeedPage() {
               })}
             </div>
 
-            {/* Small header row */}
             <div
               style={{
                 marginTop: 8,
@@ -488,9 +483,7 @@ export default function FeedPage() {
                 gap: 12,
               }}
             >
-              <div style={{ fontSize: 14, fontWeight: 900, opacity: 0.9 }}>
-                Public Feed
-              </div>
+              <div style={{ fontSize: 14, fontWeight: 900, opacity: 0.9 }}>Public Feed</div>
               <div style={{ fontSize: 13, opacity: 0.65, fontWeight: 900 }}>
                 Showing <b style={{ opacity: 0.95 }}>{filteredItems.length}</b>
               </div>
@@ -504,13 +497,7 @@ export default function FeedPage() {
 
       {/* CARDS */}
       <div style={{ ...pagePad, paddingTop: 14 }}>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(270px, 1fr))",
-            gap: 18,
-          }}
-        >
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(270px, 1fr))", gap: 18 }}>
           {filteredItems.map((item) => {
             const mineRequested = myInterested[item.id] === true;
             const expiryText = formatExpiry(item.expires_at);
@@ -527,15 +514,7 @@ export default function FeedPage() {
                   boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
                 }}
               >
-                {/* image */}
-                <div
-                  style={{
-                    position: "relative",
-                    height: 220,
-                    background:
-                      "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))",
-                  }}
-                >
+                <div style={{ position: "relative", height: 220, background: "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))" }}>
                   {item.photo_url ? (
                     <button
                       type="button"
@@ -543,67 +522,34 @@ export default function FeedPage() {
                         setOpenImg(item.photo_url!);
                         setOpenTitle(item.title);
                       }}
-                      style={{
-                        padding: 0,
-                        border: "none",
-                        background: "transparent",
-                        cursor: "pointer",
-                        width: "100%",
-                        height: "100%",
-                      }}
+                      style={{ padding: 0, border: "none", background: "transparent", cursor: "pointer", width: "100%", height: "100%" }}
                       aria-label="Open photo"
                       title="Open photo"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={item.photo_url}
-                        alt={item.title}
-                        loading="lazy"
-                        style={{
-                          width: "100%",
-                          height: "100%",
-                          objectFit: "cover",
-                          display: "block",
-                        }}
-                      />
+                      <img src={item.photo_url} alt={item.title} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
                     </button>
                   ) : (
-                    <div
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        color: "rgba(255,255,255,0.45)",
-                      }}
-                    >
+                    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,0.45)" }}>
                       No photo
                     </div>
                   )}
 
                   <div style={{ position: "absolute", top: 12, left: 12 }}>
-                    <span style={statusBadge(item.status)}>
-                      {(item.status ?? "available").toLowerCase()}
-                    </span>
+                    <span style={statusBadge(item.status)}>{(item.status ?? "available").toLowerCase()}</span>
                   </div>
                 </div>
 
-                {/* body */}
                 <div style={{ padding: 14 }}>
                   <div style={{ fontSize: 12, opacity: 0.72 }}>
                     {item.category ? `Category: ${item.category}` : "Category: —"}
                     {item.owner_role ? ` • Lister: ${item.owner_role}` : ""}
                   </div>
 
-                  <div style={{ marginTop: 8, fontSize: 20, fontWeight: 950, letterSpacing: -0.2 }}>
-                    {item.title}
-                  </div>
+                  <div style={{ marginTop: 8, fontSize: 20, fontWeight: 950, letterSpacing: -0.2 }}>{item.title}</div>
 
                   <div style={{ marginTop: 8, opacity: 0.7, fontSize: 13 }}>
-                    {item.expires_at
-                      ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}`
-                      : "Contributor will de-list themselves"}{" "}
+                    {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}` : "Contributor will de-list themselves"}{" "}
                     <span style={{ opacity: 0.75 }}>({expiryText})</span>
                   </div>
 
@@ -622,9 +568,7 @@ export default function FeedPage() {
                     {item.description || "—"}
                   </div>
 
-                  <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13 }}>
-                    {item.interest_count || 0} requests
-                  </div>
+                  <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13 }}>{item.interest_count || 0} requests</div>
 
                   <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                     <button
@@ -708,18 +652,8 @@ export default function FeedPage() {
               overflow: "hidden",
             }}
           >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "10px 12px",
-                borderBottom: "1px solid rgba(148,163,184,0.15)",
-              }}
-            >
-              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {openTitle || "Photo"}
-              </div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid rgba(148,163,184,0.15)" }}>
+              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{openTitle || "Photo"}</div>
               <button
                 type="button"
                 onClick={() => setOpenImg(null)}
@@ -741,14 +675,7 @@ export default function FeedPage() {
             <img
               src={openImg}
               alt={openTitle || "Full photo"}
-              style={{
-                width: "100%",
-                height: "auto",
-                maxHeight: "80vh",
-                objectFit: "contain",
-                display: "block",
-                background: "black",
-              }}
+              style={{ width: "100%", height: "auto", maxHeight: "80vh", objectFit: "contain", display: "block", background: "black" }}
             />
           </div>
         </div>
