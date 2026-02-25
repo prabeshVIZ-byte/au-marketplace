@@ -418,19 +418,45 @@ export default function FeedPage() {
               />
             </button>
 
-            {/* Center: big brand */}
-            <div
-              style={{
-                textAlign: "center",
-                fontSize: 38,
-                fontWeight: 700,
-                letterSpacing: "-0.5px",
-                color: "white",
-                lineHeight: 1,
-              }}
-            >
-              ScholarSwap
-            </div>
+            {/* Center: big brand + AU logo */}
+<div
+  style={{
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    minWidth: 0,
+  }}
+>
+  <div
+    style={{
+      textAlign: "center",
+      fontSize: 38,
+      fontWeight: 700,
+      letterSpacing: "-0.5px",
+      color: "white",
+      lineHeight: 1,
+      whiteSpace: "nowrap",
+    }}
+  >
+    ScholarSwap
+  </div>
+
+  <Image
+    src="/Ashland_Eagles_logo.svg.png"
+    alt="Ashland University"
+    width={28}
+    height={28}
+    priority
+    style={{
+      width: 28,
+      height: 28,
+      objectFit: "contain",
+      opacity: 0.85,
+      flexShrink: 0,
+    }}
+  />
+</div>
 
             {/* Right: create */}
             <button
