@@ -41,6 +41,20 @@ type MyInterestRow = {
   status: string | null;
 };
 
+type OfferStatus = "pending" | "hold" | "accepted" | "completed" | "declined" | "withdrawn";
+
+type OfferRow = {
+  id: string;
+  request_id: string;
+  helper_id: string;
+  status: OfferStatus | string;
+  availability: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+  helper?: { id: string; full_name: string | null; user_role: string | null } | null;
+};
+
 function formatExpiry(expiresAt: string | null) {
   if (!expiresAt) return "Until I cancel";
   const end = new Date(expiresAt);
@@ -101,6 +115,64 @@ function requestTimeframeLabel(t: string | null) {
   return "";
 }
 
+function offerStatusLabel(s: string | null) {
+  const k = (s ?? "pending").toLowerCase();
+  if (k === "pending") return "Pending";
+  if (k === "hold") return "On hold";
+  if (k === "accepted") return "Accepted";
+  if (k === "completed") return "Completed";
+  if (k === "declined") return "Declined";
+  if (k === "withdrawn") return "Withdrawn";
+  return k;
+}
+
+function statusPillStyle(status: string | null): React.CSSProperties {
+  const k = (status ?? "pending").toLowerCase();
+  const base: React.CSSProperties = {
+    padding: "6px 10px",
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: 950,
+    border: "1px solid rgba(148,163,184,0.22)",
+    background: "rgba(255,255,255,0.04)",
+    color: "rgba(255,255,255,0.85)",
+  };
+
+  if (k === "accepted") {
+    return {
+      ...base,
+      border: "1px solid rgba(34,197,94,0.35)",
+      background: "rgba(34,197,94,0.14)",
+      color: "rgba(209,250,229,0.95)",
+    };
+  }
+  if (k === "hold") {
+    return {
+      ...base,
+      border: "1px solid rgba(59,130,246,0.35)",
+      background: "rgba(59,130,246,0.14)",
+      color: "rgba(191,219,254,0.95)",
+    };
+  }
+  if (k === "completed") {
+    return {
+      ...base,
+      border: "1px solid rgba(234,179,8,0.35)",
+      background: "rgba(234,179,8,0.12)",
+      color: "rgba(254,249,195,0.95)",
+    };
+  }
+  if (k === "declined" || k === "withdrawn") {
+    return {
+      ...base,
+      border: "1px solid rgba(248,113,113,0.35)",
+      background: "rgba(239,68,68,0.10)",
+      color: "rgba(254,202,202,0.95)",
+    };
+  }
+  return base;
+}
+
 export default function ItemDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -119,33 +191,91 @@ export default function ItemDetailPage() {
   const [interestCount, setInterestCount] = useState(0);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
 
+  // REQUEST only
+  const [offers, setOffers] = useState<OfferRow[]>([]);
+  const [myOffer, setMyOffer] = useState<OfferRow | null>(null);
+
   const [saving, setSaving] = useState(false);
 
-  // interest modal state (GIVE only)
+  // GIVE modal
   const [showInterest, setShowInterest] = useState(false);
   const [earliestPickup, setEarliestPickup] = useState<"today" | "tomorrow" | "weekend">("today");
   const [timeWindow, setTimeWindow] = useState<"morning" | "afternoon" | "evening">("afternoon");
   const [note, setNote] = useState("");
-  const [interestMsg, setInterestMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
 
-  // photo modal
+  // REQUEST modal
+  const [showOfferModal, setShowOfferModal] = useState(false);
+  const [offerAvailability, setOfferAvailability] = useState<"today" | "tomorrow" | "this_week" | "flexible">("today");
+  const [offerNote, setOfferNote] = useState("");
+
+  // photo modal (give only)
   const [openImg, setOpenImg] = useState<string | null>(null);
 
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
 
+  const postType: PostType = (item?.post_type ?? "give") as PostType;
+
   const isMinePost = useMemo(() => {
     return !!userId && !!item?.owner_id && item.owner_id === userId;
   }, [userId, item?.owner_id]);
 
-  const postType: PostType = (item?.post_type ?? "give") as PostType;
+  const expiryText = formatExpiry(item?.expires_at ?? null);
+  const showName = item && !item.is_anonymous && seller?.full_name;
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
     const session = data.session;
     setUserId(session?.user?.id ?? null);
     setUserEmail(session?.user?.email ?? null);
+  }
+
+  async function loadOffersForRequest(loaded: ItemRow, uid: string | null) {
+    if (loaded.post_type !== "request") return;
+
+    // my offer (if logged in)
+    if (uid) {
+      const { data: mine } = await supabase
+        .from("request_offers")
+        .select("id,request_id,helper_id,status,availability,note,created_at,updated_at")
+        .eq("request_id", loaded.id)
+        .eq("helper_id", uid)
+        .maybeSingle();
+
+      setMyOffer((mine as any) ?? null);
+    } else {
+      setMyOffer(null);
+    }
+
+    // requester sees all offers
+    if (uid && loaded.owner_id === uid) {
+      const { data: all, error } = await supabase
+        .from("request_offers")
+        .select("id,request_id,helper_id,status,availability,note,created_at,updated_at")
+        .eq("request_id", loaded.id)
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        setOffers([]);
+        return;
+      }
+
+      const rows = (all as OfferRow[]) || [];
+      const helperIds = Array.from(new Set(rows.map((r) => r.helper_id).filter(Boolean)));
+
+      let profileMap = new Map<string, any>();
+      if (helperIds.length) {
+        const { data: profs } = await supabase.from("profiles").select("id,full_name,user_role").in("id", helperIds);
+        for (const p of (profs as any[]) || []) profileMap.set(p.id, p);
+      }
+
+      const merged = rows.map((r) => ({ ...r, helper: profileMap.get(r.helper_id) ?? null }));
+      setOffers(merged);
+    } else {
+      setOffers([]);
+    }
   }
 
   async function loadItem() {
@@ -163,12 +293,12 @@ export default function ItemDetailPage() {
         .single();
 
       if (itErr) throw new Error(itErr.message);
+
       const loaded = it as ItemRow;
-      // default post_type if old rows exist
       loaded.post_type = (loaded.post_type ?? "give") as PostType;
       setItem(loaded);
 
-      // seller profile (if not anonymous)
+      // seller/poster profile (if not anonymous)
       const ownerId = loaded.owner_id ?? null;
       const anon = !!loaded.is_anonymous;
 
@@ -179,13 +309,13 @@ export default function ItemDetailPage() {
         setSeller(null);
       }
 
-      // GIVE only: interests count + my interest
+      // auth uid
+      const { data: s } = await supabase.auth.getSession();
+      const uid = s.session?.user?.id ?? null;
+
       if (loaded.post_type === "give") {
         const { count } = await supabase.from("interests").select("*", { count: "exact", head: true }).eq("item_id", itemId);
         setInterestCount(count ?? 0);
-
-        const { data: s } = await supabase.auth.getSession();
-        const uid = s.session?.user?.id ?? null;
 
         if (uid) {
           const { data: mine, error: mineErr } = await supabase
@@ -200,38 +330,40 @@ export default function ItemDetailPage() {
         } else {
           setMyInterest(null);
         }
+
+        // clear request-only state
+        setOffers([]);
+        setMyOffer(null);
       } else {
-        // REQUEST: no interests
+        // request
         setInterestCount(0);
         setMyInterest(null);
+        await loadOffersForRequest(loaded, uid);
       }
     } catch (e: any) {
       setErr(e?.message || "Failed to load item.");
       setItem(null);
       setSeller(null);
       setMyInterest(null);
+      setOffers([]);
+      setMyOffer(null);
     } finally {
       setLoading(false);
     }
   }
 
-  // GIVE: submit interest
+  // -------------------
+  // GIVE FLOW (unchanged)
+  // -------------------
   async function submitInterest() {
     if (!item) return;
     if (postType !== "give") return;
 
-    if (!isLoggedIn || !userId) {
-      router.push("/me");
-      return;
-    }
-
-    if (isMinePost) {
-      setInterestMsg("This is your listing.");
-      return;
-    }
+    if (!isLoggedIn || !userId) return router.push("/me");
+    if (isMinePost) return setMsg("This is your listing.");
 
     setSaving(true);
-    setInterestMsg(null);
+    setMsg(null);
 
     try {
       const { data, error } = await supabase
@@ -250,9 +382,9 @@ export default function ItemDetailPage() {
         .single();
 
       if (error) {
-        const msg = error.message.toLowerCase();
-        if (msg.includes("duplicate") || msg.includes("unique")) {
-          setInterestMsg("You already sent an interest request for this item.");
+        const m = error.message.toLowerCase();
+        if (m.includes("duplicate") || m.includes("unique")) {
+          setMsg("You already sent an interest request for this item.");
           await loadItem();
           return;
         }
@@ -261,36 +393,30 @@ export default function ItemDetailPage() {
 
       setMyInterest({ id: (data as any).id, status: (data as any).status ?? "pending" });
       setInterestCount((c) => c + 1);
-      setInterestMsg("✅ Request sent. Wait for seller acceptance.");
+      setMsg("✅ Request sent. Wait for seller acceptance.");
       setNote("");
       setShowInterest(false);
     } catch (e: any) {
-      setInterestMsg(e?.message || "Could not send request.");
+      setMsg(e?.message || "Could not send request.");
     } finally {
       setSaving(false);
     }
   }
 
-  // GIVE: withdraw
   async function withdrawInterest() {
     if (!item) return;
     if (postType !== "give") return;
-
-    if (!isLoggedIn || !userId) {
-      router.push("/me");
-      return;
-    }
-
+    if (!isLoggedIn || !userId) return router.push("/me");
     if (isMinePost) return;
 
     const st = (myInterest?.status ?? "").toLowerCase();
     if (st === "accepted" || st === "reserved") {
-      setInterestMsg("This request is already accepted/reserved. You can’t withdraw here.");
+      setMsg("This request is already accepted/reserved. You can’t withdraw here.");
       return;
     }
 
     setSaving(true);
-    setInterestMsg(null);
+    setMsg(null);
 
     try {
       const { error } = await supabase.from("interests").delete().eq("item_id", item.id).eq("user_id", userId);
@@ -299,39 +425,27 @@ export default function ItemDetailPage() {
       setMyInterest(null);
       setInterestCount((c) => Math.max(0, c - 1));
       setShowInterest(false);
-      setInterestMsg("Removed ✅");
+      setMsg("Removed ✅");
     } catch (e: any) {
-      setInterestMsg(e?.message || "Could not remove your request.");
+      setMsg(e?.message || "Could not remove your request.");
     } finally {
       setSaving(false);
     }
   }
 
-  // GIVE: confirm pickup + chat
   async function confirmPickupAndChat() {
     if (!item || !userId || !myInterest?.id) return;
     if (postType !== "give") return;
 
-    if (!isLoggedIn) {
-      router.push("/me");
-      return;
-    }
-
+    if (!isLoggedIn) return router.push("/me");
     if (isMinePost) return;
 
     const st = (myInterest.status ?? "").toLowerCase();
-    if (st !== "accepted") {
-      setInterestMsg("You can confirm only after the seller accepts.");
-      return;
-    }
-
-    if (!item.owner_id) {
-      setInterestMsg("Missing seller id. Cannot start chat.");
-      return;
-    }
+    if (st !== "accepted") return setMsg("You can confirm only after the seller accepts.");
+    if (!item.owner_id) return setMsg("Missing seller id. Cannot start chat.");
 
     setSaving(true);
-    setInterestMsg(null);
+    setMsg(null);
 
     try {
       const { error: rpcErr } = await supabase.rpc("confirm_pickup", { p_interest_id: myInterest.id });
@@ -351,64 +465,199 @@ export default function ItemDetailPage() {
 
       router.push(`/messages/${threadId}`);
     } catch (e: any) {
-      setInterestMsg(e?.message || "Could not confirm pickup.");
+      setMsg(e?.message || "Could not confirm pickup.");
     } finally {
       setSaving(false);
     }
   }
 
-  // REQUEST: offer help -> open chat thread (direct)
-  async function offerHelpAndChat() {
-    if (!item || !userId) return;
+  // -------------------
+  // REQUEST FLOW (new)
+  // -------------------
+  async function submitOffer() {
+    if (!item) return;
+    if (postType !== "request") return;
 
-    if (!isLoggedIn) {
-      router.push("/me");
-      return;
+    if (!isLoggedIn || !userId) return router.push("/me");
+    if (isMinePost) return setMsg("This is your request.");
+
+    setSaving(true);
+    setMsg(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("request_offers")
+        .insert([
+          {
+            request_id: item.id,
+            helper_id: userId,
+            status: "pending",
+            availability: offerAvailability,
+            note: offerNote.trim() || null,
+          },
+        ])
+        .select("id,request_id,helper_id,status,availability,note,created_at,updated_at")
+        .single();
+
+      if (error) {
+        const m = error.message.toLowerCase();
+        if (m.includes("duplicate") || m.includes("unique")) {
+          setMsg("You already offered help. The requester will pick from the list.");
+          await loadItem();
+          return;
+        }
+        throw new Error(error.message);
+      }
+
+      setMyOffer(data as any);
+      setShowOfferModal(false);
+      setOfferNote("");
+      setMsg("✅ Offer sent. You’ll be notified if accepted.");
+    } catch (e: any) {
+      setMsg(e?.message || "Could not send offer.");
+    } finally {
+      setSaving(false);
     }
+  }
 
-    if (isMinePost) {
-      setInterestMsg("This is your request.");
-      return;
-    }
+  async function withdrawOffer() {
+    if (!item) return;
+    if (postType !== "request") return;
+    if (!isLoggedIn || !userId) return router.push("/me");
+    if (!myOffer?.id) return;
 
-    if (!item.owner_id) {
-      setInterestMsg("Missing requester id. Cannot start chat.");
+    const st = (myOffer.status ?? "").toLowerCase();
+    if (st === "accepted" || st === "completed") {
+      setMsg("You can’t withdraw after being accepted/completed.");
       return;
     }
 
     setSaving(true);
-    setInterestMsg(null);
+    setMsg(null);
 
     try {
-      // Use same thread system: owner = request poster, requester = helper (you)
-      const threadId = await ensureThread({
-        itemId: item.id,
-        ownerId: item.owner_id, // poster
-        requesterId: userId, // helper
-      });
+      const { error } = await supabase.from("request_offers").delete().eq("id", myOffer.id).eq("helper_id", userId);
+      if (error) throw new Error(error.message);
 
-      const g = requestGroupLabel(item.request_group);
-      const t = requestTimeframeLabel(item.request_timeframe);
-      const loc = (item.request_location ?? "").trim();
-
-      const context = [g, t, loc].filter(Boolean).join(" • ");
-      await insertSystemMessage({
-        threadId,
-        senderId: userId,
-        body: `🙌 Offered help on this request.${context ? ` (${context})` : ""} Use this chat to coordinate details.`,
-      });
-
-      router.push(`/messages/${threadId}`);
+      setMyOffer(null);
+      setMsg("Removed ✅");
+      await loadItem();
     } catch (e: any) {
-      setInterestMsg(e?.message || "Could not open chat.");
+      setMsg(e?.message || "Could not withdraw.");
     } finally {
       setSaving(false);
     }
   }
 
+  async function acceptOfferAsRequester(offer: OfferRow) {
+    if (!item) return;
+    if (postType !== "request") return;
+    if (!isLoggedIn || !userId) return router.push("/me");
+    if (!isMinePost) return;
+
+    setSaving(true);
+    setMsg(null);
+
+    try {
+      const { error: rpcErr } = await supabase.rpc("accept_request_offer_keep_others", { p_offer_id: offer.id });
+      if (rpcErr) throw new Error(rpcErr.message);
+
+      await loadItem();
+      setMsg("✅ Accepted. You can now chat with this helper.");
+    } catch (e: any) {
+      setMsg(e?.message || "Could not accept offer.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function setOfferStatusAsRequester(offer: OfferRow, status: OfferStatus) {
+    if (!item) return;
+    if (postType !== "request") return;
+    if (!isLoggedIn || !userId) return router.push("/me");
+    if (!isMinePost) return;
+
+    setSaving(true);
+    setMsg(null);
+
+    try {
+      const { error } = await supabase.from("request_offers").update({ status }).eq("id", offer.id);
+      if (error) throw new Error(error.message);
+
+      await loadItem();
+    } catch (e: any) {
+      setMsg(e?.message || "Could not update offer.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function completeOfferAsRequester(offer: OfferRow) {
+    if (!item) return;
+    if (postType !== "request") return;
+    if (!isLoggedIn || !userId) return router.push("/me");
+    if (!isMinePost) return;
+
+    setSaving(true);
+    setMsg(null);
+
+    try {
+      const { error: rpcErr } = await supabase.rpc("complete_request_offer", { p_offer_id: offer.id });
+      if (rpcErr) throw new Error(rpcErr.message);
+
+      await loadItem();
+      setMsg("✅ Marked completed.");
+    } catch (e: any) {
+      setMsg(e?.message || "Could not complete.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function openChatForOffer(offer: OfferRow) {
+    if (!item) return;
+    if (postType !== "request") return;
+    if (!isLoggedIn || !userId) return router.push("/me");
+
+    // requester can open chat with accepted helper; helper can open chat only if their offer accepted
+    const st = (offer.status ?? "").toLowerCase();
+    if (st !== "accepted" && st !== "completed") {
+      setMsg("Chat unlocks only after acceptance.");
+      return;
+    }
+
+    if (!item.owner_id) return setMsg("Missing requester id.");
+
+    setSaving(true);
+    setMsg(null);
+
+    try {
+      const threadId = await ensureThread({
+        itemId: item.id,
+        ownerId: item.owner_id, // request poster
+        requesterId: offer.helper_id, // helper
+      });
+
+      await insertSystemMessage({
+        threadId,
+        senderId: userId,
+        body: "✅ Chat opened for an accepted offer. Coordinate details here.",
+      });
+
+      router.push(`/messages/${threadId}`);
+    } catch (e: any) {
+      setMsg(e?.message || "Could not open chat.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // initial load + auth
   useEffect(() => {
-    syncAuth();
-    loadItem();
+    (async () => {
+      await syncAuth();
+      await loadItem();
+    })();
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
       syncAuth();
@@ -419,17 +668,21 @@ export default function ItemDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId]);
 
-  // realtime interest updates ONLY for give posts
+  // realtime (give interests)
   useEffect(() => {
     if (!itemId || !userId) return;
     if (postType !== "give") return;
 
     const channel = supabase
       .channel(`interest-${itemId}-${userId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "interests", filter: `item_id=eq.${itemId}` }, (payload) => {
-        const row: any = payload.new;
-        if (row?.user_id === userId) setMyInterest({ id: row.id, status: row.status ?? null });
-      })
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "interests", filter: `item_id=eq.${itemId}` },
+        (payload) => {
+          const row: any = payload.new;
+          if (row?.user_id === userId) setMyInterest({ id: row.id, status: row.status ?? null });
+        }
+      )
       .subscribe();
 
     return () => {
@@ -437,6 +690,29 @@ export default function ItemDetailPage() {
     };
   }, [itemId, userId, postType]);
 
+  // realtime (request offers)
+  useEffect(() => {
+    if (!itemId || !userId) return;
+    if (postType !== "request") return;
+
+    const channel = supabase
+      .channel(`offers-${itemId}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "request_offers", filter: `request_id=eq.${itemId}` },
+        () => {
+          // simplest + safest: reload (small volume)
+          loadItem();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [itemId, userId, postType]);
+
+  // esc closes image
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") setOpenImg(null);
@@ -445,13 +721,15 @@ export default function ItemDetailPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const expiryText = formatExpiry(item?.expires_at ?? null);
-  const showName = item && !item.is_anonymous && seller?.full_name;
-
-  const myStatus = (myInterest?.status ?? "").toLowerCase();
+  // derived give status
+  const myInterestStatus = (myInterest?.status ?? "").toLowerCase();
   const mineInterested = !!myInterest?.id;
-  const isAccepted = myStatus === "accepted";
-  const isReserved = myStatus === "reserved";
+  const isAccepted = myInterestStatus === "accepted";
+  const isReserved = myInterestStatus === "reserved";
+
+  // derived request status
+  const myOfferStatus = (myOffer?.status ?? "").toLowerCase();
+  const myOfferAccepted = myOfferStatus === "accepted" || myOfferStatus === "completed";
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -505,7 +783,7 @@ export default function ItemDetailPage() {
             </Chip>
           </div>
 
-          {/* media */}
+          {/* media / request hero */}
           <div style={{ marginTop: 14 }}>
             {postType === "give" ? (
               item.photo_url ? (
@@ -549,7 +827,6 @@ export default function ItemDetailPage() {
                 </div>
               )
             ) : (
-              // request hero block (beautiful + subtle)
               <div
                 style={{
                   width: "100%",
@@ -569,28 +846,188 @@ export default function ItemDetailPage() {
                   {item.request_timeframe ? ` • ${requestTimeframeLabel(item.request_timeframe)}` : ""}
                   {item.request_location ? ` • ${item.request_location}` : ""}
                 </div>
-                <div style={{ marginTop: 10, opacity: 0.8, lineHeight: 1.5 }}>
+                <div style={{ marginTop: 10, opacity: 0.85, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
                   {item.description || "No extra details provided."}
                 </div>
               </div>
             )}
           </div>
 
-          {/* description (for give only; requests already show it in hero) */}
+          {/* give description */}
           {postType === "give" && (
-            <div
-              style={{
-                marginTop: 14,
-                background: "rgba(255,255,255,0.04)",
-                border: "1px solid rgba(148,163,184,0.16)",
-                borderRadius: 16,
-                padding: 14,
-              }}
-            >
+            <div style={{ marginTop: 14, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(148,163,184,0.16)", borderRadius: 16, padding: 14 }}>
               <div style={{ fontWeight: 950, marginBottom: 8 }}>Description</div>
               <div style={{ opacity: 0.9, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
                 {item.description && item.description.trim().toLowerCase() !== "until i cancel" ? item.description : "—"}
               </div>
+            </div>
+          )}
+
+          {/* REQUEST: offers panel for requester */}
+          {postType === "request" && isMinePost && (
+            <div style={{ marginTop: 14, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(148,163,184,0.16)", borderRadius: 16, padding: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+                <div style={{ fontWeight: 950 }}>Offers</div>
+                <div style={{ opacity: 0.7, fontSize: 13, fontWeight: 900 }}>{offers.length} total</div>
+              </div>
+
+              {offers.length === 0 ? (
+                <div style={{ marginTop: 10, opacity: 0.75 }}>No offers yet.</div>
+              ) : (
+                <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                  {offers.map((o) => {
+                    const st = (o.status ?? "pending").toLowerCase();
+                    const helperName = o.helper?.full_name || "Ashland user";
+                    const helperRole = o.helper?.user_role ? ` (${o.helper.user_role})` : "";
+
+                    return (
+                      <div
+                        key={o.id}
+                        style={{
+                          border: "1px solid rgba(148,163,184,0.18)",
+                          borderRadius: 14,
+                          padding: 12,
+                          background: "rgba(0,0,0,0.22)",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                          <div style={{ fontWeight: 950 }}>
+                            {helperName}
+                            {helperRole}
+                          </div>
+                          <span style={statusPillStyle(o.status)}>{offerStatusLabel(o.status)}</span>
+                        </div>
+
+                        <div style={{ marginTop: 8, opacity: 0.85, fontSize: 13 }}>
+                          {o.availability ? `Availability: ${o.availability}` : "Availability: —"}
+                        </div>
+
+                        {o.note ? (
+                          <div style={{ marginTop: 8, opacity: 0.85, whiteSpace: "pre-wrap" }}>{o.note}</div>
+                        ) : (
+                          <div style={{ marginTop: 8, opacity: 0.6 }}>No note.</div>
+                        )}
+
+                        <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          {(st === "pending" || st === "hold") && (
+                            <button
+                              onClick={() => acceptOfferAsRequester(o)}
+                              disabled={saving}
+                              style={{
+                                background: "rgba(34,197,94,0.18)",
+                                border: "1px solid rgba(34,197,94,0.30)",
+                                color: "white",
+                                padding: "10px 12px",
+                                borderRadius: 12,
+                                cursor: saving ? "not-allowed" : "pointer",
+                                fontWeight: 950,
+                                opacity: saving ? 0.75 : 1,
+                              }}
+                            >
+                              Accept
+                            </button>
+                          )}
+
+                          {st === "pending" && (
+                            <button
+                              onClick={() => setOfferStatusAsRequester(o, "hold")}
+                              disabled={saving}
+                              style={{
+                                background: "rgba(59,130,246,0.12)",
+                                border: "1px solid rgba(59,130,246,0.25)",
+                                color: "white",
+                                padding: "10px 12px",
+                                borderRadius: 12,
+                                cursor: saving ? "not-allowed" : "pointer",
+                                fontWeight: 950,
+                                opacity: saving ? 0.75 : 1,
+                              }}
+                            >
+                              Put on hold
+                            </button>
+                          )}
+
+                          {st === "hold" && (
+                            <button
+                              onClick={() => setOfferStatusAsRequester(o, "pending")}
+                              disabled={saving}
+                              style={{
+                                background: "transparent",
+                                border: "1px solid rgba(148,163,184,0.22)",
+                                color: "white",
+                                padding: "10px 12px",
+                                borderRadius: 12,
+                                cursor: saving ? "not-allowed" : "pointer",
+                                fontWeight: 950,
+                                opacity: saving ? 0.75 : 1,
+                              }}
+                            >
+                              Move to pending
+                            </button>
+                          )}
+
+                          {(st === "accepted" || st === "completed") && (
+                            <button
+                              onClick={() => openChatForOffer(o)}
+                              disabled={saving}
+                              style={{
+                                background: "rgba(16,185,129,0.22)",
+                                border: "1px solid rgba(16,185,129,0.30)",
+                                color: "white",
+                                padding: "10px 12px",
+                                borderRadius: 12,
+                                cursor: saving ? "not-allowed" : "pointer",
+                                fontWeight: 950,
+                                opacity: saving ? 0.75 : 1,
+                              }}
+                            >
+                              Open chat
+                            </button>
+                          )}
+
+                          {st === "accepted" && (
+                            <button
+                              onClick={() => completeOfferAsRequester(o)}
+                              disabled={saving}
+                              style={{
+                                background: "rgba(234,179,8,0.14)",
+                                border: "1px solid rgba(234,179,8,0.25)",
+                                color: "white",
+                                padding: "10px 12px",
+                                borderRadius: 12,
+                                cursor: saving ? "not-allowed" : "pointer",
+                                fontWeight: 950,
+                                opacity: saving ? 0.75 : 1,
+                              }}
+                            >
+                              Mark completed
+                            </button>
+                          )}
+
+                          {(st === "pending" || st === "hold") && (
+                            <button
+                              onClick={() => setOfferStatusAsRequester(o, "declined")}
+                              disabled={saving}
+                              style={{
+                                background: "transparent",
+                                border: "1px solid rgba(248,113,113,0.30)",
+                                color: "rgba(254,202,202,0.95)",
+                                padding: "10px 12px",
+                                borderRadius: 12,
+                                cursor: saving ? "not-allowed" : "pointer",
+                                fontWeight: 950,
+                                opacity: saving ? 0.75 : 1,
+                              }}
+                            >
+                              Decline
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -603,7 +1040,7 @@ export default function ItemDetailPage() {
                     if (!isLoggedIn) return router.push("/me");
                     if (isMinePost) return;
                     if (mineInterested) return;
-                    setInterestMsg(null);
+                    setMsg(null);
                     setShowInterest(true);
                   }}
                   disabled={saving || mineInterested || isMinePost || (item.status ?? "available") !== "available"}
@@ -669,37 +1106,88 @@ export default function ItemDetailPage() {
               </>
             ) : (
               <>
-                <button
-                  onClick={offerHelpAndChat}
-                  disabled={saving || isMinePost}
-                  style={{
-                    background: isMinePost ? "rgba(255,255,255,0.03)" : "rgba(34,197,94,0.18)",
-                    border: "1px solid rgba(34,197,94,0.30)",
-                    color: "white",
-                    padding: "10px 14px",
-                    borderRadius: 12,
-                    cursor: saving || isMinePost ? "not-allowed" : "pointer",
-                    fontWeight: 950,
-                    opacity: saving ? 0.8 : 1,
-                  }}
-                >
-                  {isMinePost ? "Your request" : !isLoggedIn ? "Offer help (login required)" : saving ? "Opening…" : "Offer help"}
-                </button>
+                {!isMinePost && (
+                  <>
+                    <button
+                      onClick={() => {
+                        if (!isLoggedIn) return router.push("/me");
+                        if (myOffer?.id) return;
+                        setMsg(null);
+                        setShowOfferModal(true);
+                      }}
+                      disabled={saving || !!myOffer?.id}
+                      style={{
+                        background: !!myOffer?.id ? "rgba(255,255,255,0.05)" : "rgba(34,197,94,0.18)",
+                        border: "1px solid rgba(34,197,94,0.30)",
+                        color: "white",
+                        padding: "10px 14px",
+                        borderRadius: 12,
+                        cursor: saving || !!myOffer?.id ? "not-allowed" : "pointer",
+                        fontWeight: 950,
+                        opacity: saving ? 0.8 : 1,
+                      }}
+                    >
+                      {!isLoggedIn ? "Offer help (login required)" : myOffer?.id ? `Offer sent • ${offerStatusLabel(myOffer.status)}` : "Offer help"}
+                    </button>
 
-                <button
-                  onClick={() => router.push("/messages")}
-                  style={{
-                    background: "transparent",
-                    border: "1px solid rgba(148,163,184,0.22)",
-                    color: "white",
-                    padding: "10px 14px",
-                    borderRadius: 12,
-                    cursor: "pointer",
-                    fontWeight: 950,
-                  }}
-                >
-                  Messages
-                </button>
+                    {myOffer?.id && (
+                      <>
+                        {myOfferAccepted ? (
+                          <button
+                            onClick={() => openChatForOffer(myOffer)}
+                            disabled={saving}
+                            style={{
+                              background: "rgba(16,185,129,0.22)",
+                              border: "1px solid rgba(16,185,129,0.30)",
+                              color: "white",
+                              padding: "10px 14px",
+                              borderRadius: 12,
+                              cursor: saving ? "not-allowed" : "pointer",
+                              fontWeight: 950,
+                              opacity: saving ? 0.8 : 1,
+                            }}
+                          >
+                            Start chat
+                          </button>
+                        ) : (
+                          <button
+                            onClick={withdrawOffer}
+                            disabled={saving}
+                            style={{
+                              background: "transparent",
+                              border: "1px solid rgba(148,163,184,0.22)",
+                              color: "white",
+                              padding: "10px 14px",
+                              borderRadius: 12,
+                              cursor: saving ? "not-allowed" : "pointer",
+                              fontWeight: 950,
+                              opacity: saving ? 0.8 : 1,
+                            }}
+                          >
+                            Withdraw offer
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </>
+                )}
+
+                {isMinePost && (
+                  <button
+                    onClick={() => router.push("/messages")}
+                    style={{
+                      background: "transparent",
+                      border: "1px solid rgba(148,163,184,0.22)",
+                      color: "white",
+                      padding: "10px 14px",
+                      borderRadius: 12,
+                      cursor: "pointer",
+                      fontWeight: 950,
+                    }}
+                  >
+                    Messages
+                  </button>
+                )}
               </>
             )}
 
@@ -719,9 +1207,9 @@ export default function ItemDetailPage() {
             </button>
           </div>
 
-          {interestMsg && !showInterest && (
+          {msg && !showInterest && !showOfferModal && (
             <div style={{ marginTop: 12, opacity: 0.92, border: "1px solid rgba(148,163,184,0.22)", borderRadius: 12, padding: 10 }}>
-              {interestMsg}
+              {msg}
             </div>
           )}
 
@@ -729,41 +1217,17 @@ export default function ItemDetailPage() {
           {postType === "give" && showInterest && (
             <div
               onClick={() => setShowInterest(false)}
-              style={{
-                position: "fixed",
-                inset: 0,
-                background: "rgba(0,0,0,0.65)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                padding: 16,
-                zIndex: 50,
-              }}
+              style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}
             >
               <div
                 onClick={(e) => e.stopPropagation()}
-                style={{
-                  width: "100%",
-                  maxWidth: 520,
-                  borderRadius: 18,
-                  border: "1px solid rgba(148,163,184,0.22)",
-                  background: "rgba(2,6,23,1)",
-                  padding: 16,
-                }}
+                style={{ width: "100%", maxWidth: 520, borderRadius: 18, border: "1px solid rgba(148,163,184,0.22)", background: "rgba(2,6,23,1)", padding: 16 }}
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                   <div style={{ fontSize: 18, fontWeight: 950 }}>Request this item</div>
                   <button
                     onClick={() => setShowInterest(false)}
-                    style={{
-                      background: "transparent",
-                      border: "1px solid rgba(148,163,184,0.22)",
-                      color: "white",
-                      padding: "6px 10px",
-                      borderRadius: 10,
-                      cursor: "pointer",
-                      fontWeight: 950,
-                    }}
+                    style={{ background: "transparent", border: "1px solid rgba(148,163,184,0.22)", color: "white", padding: "6px 10px", borderRadius: 10, cursor: "pointer", fontWeight: 950 }}
                   >
                     ✕
                   </button>
@@ -776,14 +1240,7 @@ export default function ItemDetailPage() {
                   <select
                     value={earliestPickup}
                     onChange={(e) => setEarliestPickup(e.target.value as any)}
-                    style={{
-                      width: "100%",
-                      background: "black",
-                      color: "white",
-                      border: "1px solid rgba(148,163,184,0.22)",
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                    }}
+                    style={{ width: "100%", background: "black", color: "white", border: "1px solid rgba(148,163,184,0.22)", padding: "10px 12px", borderRadius: 12 }}
                   >
                     <option value="today">Today</option>
                     <option value="tomorrow">Tomorrow</option>
@@ -796,14 +1253,7 @@ export default function ItemDetailPage() {
                   <select
                     value={timeWindow}
                     onChange={(e) => setTimeWindow(e.target.value as any)}
-                    style={{
-                      width: "100%",
-                      background: "black",
-                      color: "white",
-                      border: "1px solid rgba(148,163,184,0.22)",
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                    }}
+                    style={{ width: "100%", background: "black", color: "white", border: "1px solid rgba(148,163,184,0.22)", padding: "10px 12px", borderRadius: 12 }}
                   >
                     <option value="morning">Morning</option>
                     <option value="afternoon">Afternoon</option>
@@ -817,37 +1267,16 @@ export default function ItemDetailPage() {
                     value={note}
                     onChange={(e) => setNote(e.target.value)}
                     placeholder="Example: I can meet at the library after 3pm."
-                    style={{
-                      width: "100%",
-                      minHeight: 90,
-                      background: "black",
-                      color: "white",
-                      border: "1px solid rgba(148,163,184,0.22)",
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      resize: "vertical",
-                    }}
+                    style={{ width: "100%", minHeight: 90, background: "black", color: "white", border: "1px solid rgba(148,163,184,0.22)", padding: "10px 12px", borderRadius: 12, resize: "vertical" }}
                   />
                 </div>
 
-                {interestMsg && (
-                  <div style={{ marginTop: 12, border: "1px solid rgba(148,163,184,0.22)", borderRadius: 12, padding: 10, opacity: 0.92 }}>
-                    {interestMsg}
-                  </div>
-                )}
+                {msg && <div style={{ marginTop: 12, border: "1px solid rgba(148,163,184,0.22)", borderRadius: 12, padding: 10, opacity: 0.92 }}>{msg}</div>}
 
                 <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end" }}>
                   <button
                     onClick={() => setShowInterest(false)}
-                    style={{
-                      background: "transparent",
-                      border: "1px solid rgba(148,163,184,0.22)",
-                      color: "white",
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      cursor: "pointer",
-                      fontWeight: 950,
-                    }}
+                    style={{ background: "transparent", border: "1px solid rgba(148,163,184,0.22)", color: "white", padding: "10px 12px", borderRadius: 12, cursor: "pointer", fontWeight: 950 }}
                   >
                     Cancel
                   </button>
@@ -855,16 +1284,7 @@ export default function ItemDetailPage() {
                   <button
                     onClick={submitInterest}
                     disabled={saving}
-                    style={{
-                      background: "rgba(16,185,129,0.22)",
-                      border: "1px solid rgba(16,185,129,0.35)",
-                      color: "white",
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      cursor: saving ? "not-allowed" : "pointer",
-                      fontWeight: 950,
-                      opacity: saving ? 0.8 : 1,
-                    }}
+                    style={{ background: "rgba(16,185,129,0.22)", border: "1px solid rgba(16,185,129,0.35)", color: "white", padding: "10px 12px", borderRadius: 12, cursor: saving ? "not-allowed" : "pointer", fontWeight: 950, opacity: saving ? 0.8 : 1 }}
                   >
                     {saving ? "Sending..." : "Send request"}
                   </button>
@@ -873,74 +1293,89 @@ export default function ItemDetailPage() {
             </div>
           )}
 
-          {/* fullscreen image modal (give only) */}
-          {postType === "give" && openImg && (
+          {/* REQUEST: offer modal */}
+          {postType === "request" && showOfferModal && (
             <div
-              onClick={() => setOpenImg(null)}
-              style={{
-                position: "fixed",
-                inset: 0,
-                background: "rgba(0,0,0,0.75)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                padding: 20,
-                zIndex: 9999,
-              }}
+              onClick={() => setShowOfferModal(false)}
+              style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}
             >
               <div
                 onClick={(e) => e.stopPropagation()}
-                style={{
-                  width: "min(1000px, 95vw)",
-                  maxHeight: "90vh",
-                  background: "rgba(255,255,255,0.04)",
-                  border: "1px solid rgba(148,163,184,0.18)",
-                  borderRadius: 16,
-                  overflow: "hidden",
-                }}
+                style={{ width: "100%", maxWidth: 520, borderRadius: 18, border: "1px solid rgba(34,197,94,0.22)", background: "rgba(2,6,23,1)", padding: 16 }}
               >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    padding: "10px 12px",
-                    borderBottom: "1px solid rgba(148,163,184,0.15)",
-                  }}
-                >
-                  <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {item.title}
-                  </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div style={{ fontSize: 18, fontWeight: 950 }}>Offer help</div>
                   <button
-                    type="button"
-                    onClick={() => setOpenImg(null)}
-                    style={{
-                      background: "transparent",
-                      color: "white",
-                      border: "1px solid rgba(148,163,184,0.25)",
-                      padding: "6px 10px",
-                      borderRadius: 12,
-                      cursor: "pointer",
-                      fontWeight: 950,
-                    }}
+                    onClick={() => setShowOfferModal(false)}
+                    style={{ background: "transparent", border: "1px solid rgba(148,163,184,0.22)", color: "white", padding: "6px 10px", borderRadius: 10, cursor: "pointer", fontWeight: 950 }}
                   >
                     ✕
                   </button>
                 </div>
 
+                <div style={{ marginTop: 12, opacity: 0.85 }}>
+                  Your offer will appear in the requester’s list. Chat unlocks only after you’re accepted.
+                </div>
+
+                <div style={{ marginTop: 14 }}>
+                  <label style={{ display: "block", fontWeight: 900, marginBottom: 6 }}>Availability</label>
+                  <select
+                    value={offerAvailability}
+                    onChange={(e) => setOfferAvailability(e.target.value as any)}
+                    style={{ width: "100%", background: "black", color: "white", border: "1px solid rgba(148,163,184,0.22)", padding: "10px 12px", borderRadius: 12 }}
+                  >
+                    <option value="today">Today</option>
+                    <option value="tomorrow">Tomorrow</option>
+                    <option value="this_week">This week</option>
+                    <option value="flexible">Flexible</option>
+                  </select>
+                </div>
+
+                <div style={{ marginTop: 12 }}>
+                  <label style={{ display: "block", fontWeight: 900, marginBottom: 6 }}>Optional note</label>
+                  <textarea
+                    value={offerNote}
+                    onChange={(e) => setOfferNote(e.target.value)}
+                    placeholder="Example: I can drive after 5pm. I have room for 2 bags."
+                    style={{ width: "100%", minHeight: 90, background: "black", color: "white", border: "1px solid rgba(148,163,184,0.22)", padding: "10px 12px", borderRadius: 12, resize: "vertical" }}
+                  />
+                </div>
+
+                {msg && <div style={{ marginTop: 12, border: "1px solid rgba(148,163,184,0.22)", borderRadius: 12, padding: 10, opacity: 0.92 }}>{msg}</div>}
+
+                <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button
+                    onClick={() => setShowOfferModal(false)}
+                    style={{ background: "transparent", border: "1px solid rgba(148,163,184,0.22)", color: "white", padding: "10px 12px", borderRadius: 12, cursor: "pointer", fontWeight: 950 }}
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    onClick={submitOffer}
+                    disabled={saving}
+                    style={{ background: "rgba(34,197,94,0.18)", border: "1px solid rgba(34,197,94,0.30)", color: "white", padding: "10px 12px", borderRadius: 12, cursor: saving ? "not-allowed" : "pointer", fontWeight: 950, opacity: saving ? 0.8 : 1 }}
+                  >
+                    {saving ? "Sending..." : "Send offer"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* fullscreen image modal (give only) */}
+          {postType === "give" && openImg && (
+            <div onClick={() => setOpenImg(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 9999 }}>
+              <div onClick={(e) => e.stopPropagation()} style={{ width: "min(1000px, 95vw)", maxHeight: "90vh", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(148,163,184,0.18)", borderRadius: 16, overflow: "hidden" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid rgba(148,163,184,0.15)" }}>
+                  <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</div>
+                  <button type="button" onClick={() => setOpenImg(null)} style={{ background: "transparent", color: "white", border: "1px solid rgba(148,163,184,0.25)", padding: "6px 10px", borderRadius: 12, cursor: "pointer", fontWeight: 950 }}>
+                    ✕
+                  </button>
+                </div>
+
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={openImg}
-                  alt={item.title}
-                  style={{
-                    width: "100%",
-                    height: "auto",
-                    maxHeight: "80vh",
-                    objectFit: "contain",
-                    display: "block",
-                    background: "black",
-                  }}
-                />
+                <img src={openImg} alt={item.title} style={{ width: "100%", height: "auto", maxHeight: "80vh", objectFit: "contain", display: "block", background: "black" }} />
               </div>
             </div>
           )}
