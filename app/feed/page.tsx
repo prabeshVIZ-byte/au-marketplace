@@ -1,14 +1,14 @@
 "use client";
 
 import Image from "next/image";
-import { Space_Grotesk } from "next/font/google";
+import { Outfit } from "next/font/google";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-const uiFont = Space_Grotesk({
+const brandFont = Outfit({
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+  weight: ["500", "600", "700"],
 });
 
 type OwnerRole = "student" | "faculty" | null;
@@ -63,7 +63,7 @@ function statusBadge(status: string | null) {
     padding: "6px 10px",
     borderRadius: 999,
     fontSize: 12,
-    fontWeight: 800,
+    fontWeight: 900,
     border: "1px solid rgba(148,163,184,0.25)",
     background: "rgba(0,0,0,0.35)",
     color: "rgba(255,255,255,0.82)",
@@ -124,17 +124,11 @@ export default function FeedPage() {
     setUserEmail(session?.user?.email ?? null);
   }
 
-  const isLoggedIn =
-    !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  const isLoggedIn = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
 
   async function loadMyInterestMap(uid: string, itemIds: string[]) {
     if (itemIds.length === 0) return;
-    const { data, error } = await supabase
-      .from("interests")
-      .select("item_id")
-      .eq("user_id", uid)
-      .in("item_id", itemIds);
-
+    const { data, error } = await supabase.from("interests").select("item_id").eq("user_id", uid).in("item_id", itemIds);
     if (error) return;
 
     const map: Record<string, boolean> = {};
@@ -144,11 +138,7 @@ export default function FeedPage() {
 
   async function loadOwnerMeta(itemIds: string[]) {
     if (itemIds.length === 0) return new Map<string, ItemMeta>();
-    const { data, error } = await supabase
-      .from("items")
-      .select("id,owner_id,is_claimed")
-      .in("id", itemIds);
-
+    const { data, error } = await supabase.from("items").select("id,owner_id,is_claimed").in("id", itemIds);
     if (error) return new Map<string, ItemMeta>();
 
     const m = new Map<string, ItemMeta>();
@@ -162,9 +152,7 @@ export default function FeedPage() {
 
     const { data, error } = await supabase
       .from("v_feed_items")
-      .select(
-        "id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role"
-      )
+      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -178,12 +166,18 @@ export default function FeedPage() {
     const rows = ((data as FeedRowFromView[]) || []).map((x) => ({ ...x })) as FeedRow[];
     const ids = rows.map((x) => x.id);
 
+    // pull owner_id + is_claimed from real table (NOT the view)
     const meta = await loadOwnerMeta(ids);
     const merged = rows.map((x) => {
       const m = meta.get(x.id);
-      return { ...x, owner_id: m?.owner_id ?? null, is_claimed: m?.is_claimed ?? null };
+      return {
+        ...x,
+        owner_id: m?.owner_id ?? null,
+        is_claimed: m?.is_claimed ?? null,
+      };
     });
 
+    // Hide claimed items (either status or is_claimed)
     const visible = merged.filter((x) => {
       const st = (x.status ?? "available").toLowerCase();
       const claimed = !!x.is_claimed || st === "claimed";
@@ -207,6 +201,7 @@ export default function FeedPage() {
       return;
     }
 
+    // block if it's your own listing
     const isMineListing = !!item.owner_id && item.owner_id === userId;
     if (isMineListing) return;
 
@@ -214,30 +209,18 @@ export default function FeedPage() {
     setSavingId(item.id);
 
     if (already) {
-      const { error } = await supabase
-        .from("interests")
-        .delete()
-        .eq("item_id", item.id)
-        .eq("user_id", userId);
-
+      const { error } = await supabase.from("interests").delete().eq("item_id", item.id).eq("user_id", userId);
       setSavingId(null);
       if (error) return alert(error.message);
 
       setMyInterested((p) => ({ ...p, [item.id]: false }));
       setItems((prev) =>
-        prev.map((x) =>
-          x.id === item.id
-            ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) }
-            : x
-        )
+        prev.map((x) => (x.id === item.id ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) } : x))
       );
       return;
     }
 
-    const { error } = await supabase
-      .from("interests")
-      .insert([{ item_id: item.id, user_id: userId }]);
-
+    const { error } = await supabase.from("interests").insert([{ item_id: item.id, user_id: userId }]);
     setSavingId(null);
 
     if (error) {
@@ -250,11 +233,7 @@ export default function FeedPage() {
     }
 
     setMyInterested((p) => ({ ...p, [item.id]: true }));
-    setItems((prev) =>
-      prev.map((x) =>
-        x.id === item.id ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x
-      )
-    );
+    setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
   }
 
   useEffect(() => {
@@ -303,17 +282,6 @@ export default function FeedPage() {
     });
   }, [items, categoryFilter, roleFilter]);
 
-  const topWrap: React.CSSProperties = {
-    position: "sticky",
-    top: 0,
-    zIndex: 30,
-    background: "rgba(0,0,0,0.90)",
-    backdropFilter: "blur(12px)",
-    borderBottom: "1px solid rgba(148,163,184,0.12)",
-  };
-
-  const pagePad: React.CSSProperties = { padding: "14px 16px 90px" };
-
   const pill: React.CSSProperties = {
     flex: "0 0 auto",
     borderRadius: 999,
@@ -322,93 +290,94 @@ export default function FeedPage() {
     color: "rgba(255,255,255,0.86)",
     padding: "10px 14px",
     cursor: "pointer",
-    fontWeight: 700,
+    fontWeight: 900,
     whiteSpace: "nowrap",
   };
 
   return (
-    <div className={uiFont.className} style={{ minHeight: "100vh", background: "black", color: "white" }}>
+    <div className={brandFont.className} style={{ minHeight: "100vh", background: "black", color: "white" }}>
       {/* TOP BAR */}
-      <div style={topWrap}>
-        <div style={{ ...pagePad, paddingBottom: 10 }}>
-          {/* Perfect centered brand row */}
+      <div
+        style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 30,
+          background: "rgba(0,0,0,0.92)",
+          backdropFilter: "blur(14px)",
+          borderBottom: "1px solid rgba(148,163,184,0.10)",
+        }}
+      >
+        <div style={{ padding: "18px 16px 12px" }}>
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "60px 1fr 60px",
+              gridTemplateColumns: "52px 1fr 52px",
               alignItems: "center",
-              gap: 12,
             }}
           >
-            {/* Left: logo */}
+            {/* Left: logo badge */}
             <button
-  type="button"
-  onClick={() => router.push("/feed")}
-  aria-label="Home"
-  title="Home"
-  style={{
-    width: 52,
-    height: 52,
-    borderRadius: 16,
-    overflow: "hidden",
-    border: "1px solid rgba(255,255,255,0.10)",
-    background: "white", // ✅ makes logo visible always
-    boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
-    cursor: "pointer",
-    padding: 0,
-    display: "grid",
-    placeItems: "center",
-  }}
->
-  <Image
-    src="/scholarswap-logo.png"
-    alt="ScholarSwap"
-    width={52}
-    height={52}
-    priority
-    style={{
-      width: "100%",
-      height: "100%",
-      objectFit: "contain", // ✅ don't crop logo
-      padding: 6,          // ✅ keep it clean inside badge
-      display: "block",
-    }}
-  />
-</button>
-
-            {/* Center brand text */}
-            <div style={{ textAlign: "center", lineHeight: 1 }}>
-              <div
+              onClick={() => router.push("/feed")}
+              style={{
+                width: 52,
+                height: 52,
+                borderRadius: 16,
+                overflow: "hidden",
+                background: "white",
+                border: "1px solid rgba(0,0,0,0.1)",
+                display: "grid",
+                placeItems: "center",
+                padding: 0,
+                cursor: "pointer",
+              }}
+              aria-label="Home"
+              title="Home"
+            >
+              <Image
+                src="/scholarswap-logo.png"
+                alt="ScholarSwap"
+                width={52}
+                height={52}
+                priority
                 style={{
-                  fontSize: 22,
-                  fontWeight: 700,
-                  letterSpacing: 0.2,
-                  color: "rgba(255,255,255,0.96)",
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                  padding: 6,
+                  display: "block",
                 }}
-              >
-                ScholarSwap
-              </div>
-              <div style={{ marginTop: 4, fontSize: 12, fontWeight: 500, opacity: 0.65 }}>
-                Campus exchange feed
-              </div>
+              />
+            </button>
+
+            {/* Center: big brand */}
+            <div
+              style={{
+                textAlign: "center",
+                fontSize: 38,
+                fontWeight: 700,
+                letterSpacing: "-0.5px",
+                color: "white",
+                lineHeight: 1,
+              }}
+            >
+              ScholarSwap
             </div>
 
             {/* Right: create */}
             <button
-              type="button"
               onClick={() => router.push("/create")}
               style={{
-                width: 60,
-                height: 60,
-                borderRadius: 18,
-                border: "1px solid rgba(52,211,153,0.25)",
-                background: "rgba(16,185,129,0.16)",
-                color: "rgba(209,250,229,0.95)",
-                cursor: "pointer",
-                fontWeight: 800,
+                width: 52,
+                height: 52,
+                borderRadius: 16,
+                border: "1px solid rgba(52,211,153,0.30)",
+                background: "rgba(16,185,129,0.18)",
+                color: "white",
                 fontSize: 26,
+                fontWeight: 700,
                 display: "grid",
                 placeItems: "center",
+                cursor: "pointer",
               }}
               aria-label="Create listing"
               title="Create listing"
@@ -429,7 +398,7 @@ export default function FeedPage() {
                 alignItems: "center",
               }}
             >
-              {/* Lister pill */}
+              {/* Lister pill (embedded) */}
               <div
                 style={{
                   ...pill,
@@ -447,7 +416,7 @@ export default function FeedPage() {
                     background: "transparent",
                     border: "none",
                     color: "white",
-                    fontWeight: 700,
+                    fontWeight: 900,
                     cursor: "pointer",
                     outline: "none",
                     padding: "10px 0",
@@ -472,9 +441,7 @@ export default function FeedPage() {
                     onClick={() => setCategoryFilter(c)}
                     style={{
                       ...pill,
-                      border: active
-                        ? "1px solid rgba(52,211,153,0.45)"
-                        : "1px solid rgba(148,163,184,0.22)",
+                      border: active ? "1px solid rgba(52,211,153,0.45)" : "1px solid rgba(148,163,184,0.22)",
                       background: active ? "rgba(16,185,129,0.14)" : "rgba(255,255,255,0.04)",
                       color: active ? "rgba(209,250,229,0.95)" : "rgba(255,255,255,0.82)",
                     }}
@@ -486,8 +453,8 @@ export default function FeedPage() {
             </div>
 
             <div style={{ marginTop: 8, display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, opacity: 0.9 }}>Public Feed</div>
-              <div style={{ fontSize: 13, opacity: 0.65, fontWeight: 700 }}>
+              <div style={{ fontSize: 14, fontWeight: 900, opacity: 0.9 }}>Public Feed</div>
+              <div style={{ fontSize: 13, opacity: 0.65, fontWeight: 900 }}>
                 Showing <b style={{ opacity: 0.95 }}>{filteredItems.length}</b>
               </div>
             </div>
@@ -499,7 +466,7 @@ export default function FeedPage() {
       </div>
 
       {/* CARDS */}
-      <div style={{ ...pagePad, paddingTop: 14 }}>
+      <div style={{ padding: "14px 16px 90px" }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(270px, 1fr))", gap: 18 }}>
           {filteredItems.map((item) => {
             const mineRequested = myInterested[item.id] === true;
@@ -551,7 +518,7 @@ export default function FeedPage() {
                     {item.owner_role ? ` • Lister: ${item.owner_role}` : ""}
                   </div>
 
-                  <div style={{ marginTop: 8, fontSize: 20, fontWeight: 800, letterSpacing: -0.2 }}>{item.title}</div>
+                  <div style={{ marginTop: 8, fontSize: 20, fontWeight: 950, letterSpacing: -0.2 }}>{item.title}</div>
 
                   <div style={{ marginTop: 8, opacity: 0.7, fontSize: 13 }}>
                     {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}` : "Contributor will de-list themselves"}{" "}
@@ -586,7 +553,7 @@ export default function FeedPage() {
                         padding: "10px 12px",
                         borderRadius: 14,
                         cursor: "pointer",
-                        fontWeight: 700,
+                        fontWeight: 900,
                       }}
                     >
                       View item
@@ -609,7 +576,7 @@ export default function FeedPage() {
                         padding: "10px 12px",
                         borderRadius: 14,
                         cursor: savingId === item.id || isMineListing ? "not-allowed" : "pointer",
-                        fontWeight: 800,
+                        fontWeight: 950,
                         opacity: savingId === item.id || isMineListing ? 0.75 : 1,
                       }}
                     >
@@ -658,7 +625,7 @@ export default function FeedPage() {
             }}
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid rgba(148,163,184,0.15)" }}>
-              <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{openTitle || "Photo"}</div>
+              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{openTitle || "Photo"}</div>
               <button
                 type="button"
                 onClick={() => setOpenImg(null)}
@@ -669,7 +636,7 @@ export default function FeedPage() {
                   padding: "6px 10px",
                   borderRadius: 12,
                   cursor: "pointer",
-                  fontWeight: 800,
+                  fontWeight: 950,
                 }}
               >
                 ✕
