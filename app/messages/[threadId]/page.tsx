@@ -49,7 +49,7 @@ function pillStyle() {
     gap: 8,
     padding: "8px 10px",
     borderRadius: 999,
-    border: "1px solid rgba(148,163,184,0.20)",
+    border: "1px solid rgba(148,163,184,0.2)",
     background: "rgba(255,255,255,0.04)",
     color: "rgba(255,255,255,0.88)",
     fontSize: 13,
@@ -70,8 +70,8 @@ export default function ThreadPage() {
   // data
   const [thread, setThread] = useState<ThreadRow | null>(null);
   const [item, setItem] = useState<ItemRow | null>(null);
-  const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
   const [otherProfile, setOtherProfile] = useState<ProfileRow | null>(null);
+  const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
 
   // ui
@@ -88,7 +88,10 @@ export default function ThreadPage() {
   }, [userId, userEmail]);
 
   const myStatus = (myInterest?.status ?? "").toLowerCase();
-  const canConfirm = myStatus === "accepted"; // show CTA only when seller accepted
+  const canConfirm = myStatus === "accepted"; // seller accepted buyer's interest
+
+  const isBuyer = !!userId && !!thread?.requester_id && userId === thread.requester_id;
+  const mustConfirmBeforeChat = isBuyer && canConfirm;
 
   function scrollToBottom() {
     requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
@@ -102,7 +105,7 @@ export default function ThreadPage() {
   }
 
   async function loadThreadAndItem(uid: string) {
-    if (!threadId) return;
+    if (!threadId) return null;
 
     setErr(null);
 
@@ -125,17 +128,14 @@ export default function ThreadPage() {
         .single();
 
       if (!itErr && it) {
-        setItem(it as ItemRow);
+        const itemRow = it as ItemRow;
+        setItem(itemRow);
 
-        const ownerId = (threadRow.owner_id ?? (it as any).owner_id ?? null) as string | null;
+        const ownerId = (threadRow.owner_id ?? itemRow.owner_id ?? null) as string | null;
         const requesterId = (threadRow.requester_id ?? null) as string | null;
 
         const otherId =
-          ownerId && requesterId
-            ? ownerId === uid
-              ? requesterId
-              : ownerId
-            : null;
+          ownerId && requesterId ? (ownerId === uid ? requesterId : ownerId) : null;
 
         if (otherId) {
           const { data: pData, error: pErr } = await supabase
@@ -157,6 +157,8 @@ export default function ThreadPage() {
       setItem(null);
       setOtherProfile(null);
     }
+
+    return threadRow;
   }
 
   async function loadMyInterest(uid: string, itemId: string | null) {
@@ -184,7 +186,7 @@ export default function ThreadPage() {
 
     const { data, error } = await supabase
       .from("messages")
-      .select("id,thread_id,sender_id,body,created_at") // ✅ removed is_system
+      .select("id,thread_id,sender_id,body,created_at")
       .eq("thread_id", threadId)
       .order("created_at", { ascending: true });
 
@@ -210,9 +212,10 @@ export default function ThreadPage() {
     }
 
     try {
-      await loadThreadAndItem(uid);
-      await loadMyInterest(uid, (thread?.item_id ?? null) as any); // ok (thread state may lag)
+      const th = await loadThreadAndItem(uid);
+      await loadMyInterest(uid, th?.item_id ?? null);
       await loadMessages();
+
       setLoading(false);
       setTimeout(scrollToBottom, 50);
     } catch (e: any) {
@@ -227,10 +230,9 @@ export default function ThreadPage() {
   }
 
   async function sendMessage() {
-    if (!isAshland || !userId) {
-      router.push("/me");
-      return;
-    }
+    if (!isAshland || !userId) return router.push("/me");
+    if (mustConfirmBeforeChat) return;
+
     const body = text.trim();
     if (!body) return;
 
@@ -252,7 +254,7 @@ export default function ThreadPage() {
     const { data, error } = await supabase
       .from("messages")
       .insert([{ thread_id: threadId, sender_id: userId, body }])
-      .select("id,thread_id,sender_id,body,created_at") // ✅ removed is_system
+      .select("id,thread_id,sender_id,body,created_at")
       .single();
 
     setSending(false);
@@ -271,7 +273,7 @@ export default function ThreadPage() {
   async function confirmPickupFromChat() {
     if (!isAshland || !userId) return router.push("/me");
     if (!thread?.item_id || !myInterest?.id) return;
-    if (!canConfirm) return;
+    if (!mustConfirmBeforeChat) return;
 
     setActionBusy(true);
     setErr(null);
@@ -283,7 +285,7 @@ export default function ThreadPage() {
       await insertSystemMessage({
         threadId,
         senderId: userId,
-        body: "✅ Buyer confirmed pickup. Let’s coordinate a time and place here.",
+        body: "✅ Pickup confirmed. You can start chatting now to coordinate time and place.",
       });
 
       await loadMyInterest(userId, thread.item_id);
@@ -296,6 +298,7 @@ export default function ThreadPage() {
     }
   }
 
+  // realtime inserts
   useEffect(() => {
     if (!threadId) return;
 
@@ -322,6 +325,7 @@ export default function ThreadPage() {
     };
   }, [threadId]);
 
+  // initial load + auth changes
   useEffect(() => {
     (async () => {
       await syncAuth();
@@ -337,20 +341,8 @@ export default function ThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
-  useEffect(() => {
-    (async () => {
-      if (!userId || !thread?.item_id) return;
-      await loadMyInterest(userId, thread.item_id);
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, thread?.item_id]);
-
   if (!isAshland) {
-    return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        Checking access…
-      </div>
-    );
+    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Checking access…</div>;
   }
 
   return (
@@ -376,6 +368,7 @@ export default function ThreadPage() {
       {err && <div style={{ color: "#f87171", marginTop: 10 }}>{err}</div>}
       {loading && <div style={{ opacity: 0.8, marginTop: 10 }}>Loading…</div>}
 
+      {/* header */}
       {!loading && item && (
         <div
           style={{
@@ -441,7 +434,8 @@ export default function ThreadPage() {
         </div>
       )}
 
-      {!loading && item && canConfirm && (
+      {/* ✅ Buyer confirm gate */}
+      {!loading && item && mustConfirmBeforeChat && (
         <div
           style={{
             marginTop: 12,
@@ -456,47 +450,31 @@ export default function ThreadPage() {
           }}
         >
           <div style={{ fontWeight: 950 }}>
-            Seller accepted. <span style={{ opacity: 0.85 }}>Confirm pickup to start coordinating here.</span>
+            Seller accepted your request.{" "}
+            <span style={{ opacity: 0.85 }}>Confirm pickup above to start chatting.</span>
           </div>
 
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <button
-              onClick={confirmPickupFromChat}
-              disabled={actionBusy}
-              style={{
-                background: "rgba(20,83,45,1)",
-                border: "1px solid rgba(22,101,52,1)",
-                color: "white",
-                padding: "10px 12px",
-                borderRadius: 12,
-                cursor: actionBusy ? "not-allowed" : "pointer",
-                fontWeight: 950,
-                opacity: actionBusy ? 0.8 : 1,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {actionBusy ? "Confirming…" : "Confirm pickup ✅"}
-            </button>
-
-            <button
-              onClick={() => router.push(`/item/${item.id}`)}
-              style={{
-                background: "transparent",
-                border: "1px solid rgba(148,163,184,0.22)",
-                color: "white",
-                padding: "10px 12px",
-                borderRadius: 12,
-                cursor: "pointer",
-                fontWeight: 950,
-                whiteSpace: "nowrap",
-              }}
-            >
-              Or view item
-            </button>
-          </div>
+          <button
+            onClick={confirmPickupFromChat}
+            disabled={actionBusy}
+            style={{
+              background: "rgba(20,83,45,1)",
+              border: "1px solid rgba(22,101,52,1)",
+              color: "white",
+              padding: "10px 12px",
+              borderRadius: 12,
+              cursor: actionBusy ? "not-allowed" : "pointer",
+              fontWeight: 950,
+              opacity: actionBusy ? 0.8 : 1,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {actionBusy ? "Confirming…" : "Confirm pickup ✅"}
+          </button>
         </div>
       )}
 
+      {/* messages */}
       <div style={{ marginTop: 14 }}>
         {messages.map((m) => {
           const mine = !!userId && m.sender_id === userId;
@@ -528,6 +506,7 @@ export default function ThreadPage() {
         <div ref={bottomRef} />
       </div>
 
+      {/* composer */}
       <div style={{ marginTop: 16, display: "flex", gap: 10, alignItems: "center" }}>
         <input
           value={text}
@@ -538,7 +517,8 @@ export default function ThreadPage() {
               sendMessage();
             }
           }}
-          placeholder="Type a message..."
+          disabled={sending || mustConfirmBeforeChat}
+          placeholder={mustConfirmBeforeChat ? "Confirm pickup above to start chatting…" : "Type a message..."}
           style={{
             flex: 1,
             height: 48,
@@ -548,12 +528,13 @@ export default function ThreadPage() {
             color: "white",
             padding: "0 12px",
             outline: "none",
+            opacity: mustConfirmBeforeChat ? 0.7 : 1,
           }}
         />
 
         <button
           onClick={sendMessage}
-          disabled={sending || !text.trim()}
+          disabled={sending || !text.trim() || mustConfirmBeforeChat}
           style={{
             height: 48,
             padding: "0 16px",
@@ -561,9 +542,9 @@ export default function ThreadPage() {
             border: "1px solid rgba(16,185,129,0.35)",
             background: sending ? "rgba(16,185,129,0.10)" : "rgba(16,185,129,0.18)",
             color: "white",
-            cursor: sending || !text.trim() ? "not-allowed" : "pointer",
+            cursor: sending || !text.trim() || mustConfirmBeforeChat ? "not-allowed" : "pointer",
             fontWeight: 950,
-            opacity: sending || !text.trim() ? 0.65 : 1,
+            opacity: sending || !text.trim() || mustConfirmBeforeChat ? 0.65 : 1,
           }}
         >
           {sending ? "Sending…" : "Send"}
