@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
-import { insertSystemMessage } from "@/lib/ensureThread"; // ✅ helper you referenced
+import { insertSystemMessage } from "@/lib/ensureThread";
 
 type ProfileRow = {
   id: string;
@@ -40,7 +40,6 @@ type MessageRow = {
   sender_id: string | null;
   body: string;
   created_at: string;
-  is_system?: boolean | null;
 };
 
 function pillStyle() {
@@ -89,7 +88,7 @@ export default function ThreadPage() {
   }, [userId, userEmail]);
 
   const myStatus = (myInterest?.status ?? "").toLowerCase();
-  const canConfirm = myStatus === "accepted"; // ✅ show CTA only when seller accepted
+  const canConfirm = myStatus === "accepted"; // show CTA only when seller accepted
 
   function scrollToBottom() {
     requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
@@ -107,8 +106,6 @@ export default function ThreadPage() {
 
     setErr(null);
 
-    // ✅ thread (keep it safe: assume at least id,item_id)
-    // If your column is different (ex: listing_id), rename it here.
     const { data: th, error: thErr } = await supabase
       .from("threads")
       .select("id,item_id,owner_id,requester_id,created_at")
@@ -120,7 +117,6 @@ export default function ThreadPage() {
     const threadRow = th as ThreadRow;
     setThread(threadRow);
 
-    // ✅ item
     if (threadRow.item_id) {
       const { data: it, error: itErr } = await supabase
         .from("items")
@@ -131,8 +127,6 @@ export default function ThreadPage() {
       if (!itErr && it) {
         setItem(it as ItemRow);
 
-        // ✅ load OTHER profile if possible (owner vs requester)
-        // If threads doesn’t have owner_id/requester_id, we’ll just skip.
         const ownerId = (threadRow.owner_id ?? (it as any).owner_id ?? null) as string | null;
         const requesterId = (threadRow.requester_id ?? null) as string | null;
 
@@ -190,7 +184,7 @@ export default function ThreadPage() {
 
     const { data, error } = await supabase
       .from("messages")
-      .select("id,thread_id,sender_id,body,created_at,is_system")
+      .select("id,thread_id,sender_id,body,created_at") // ✅ removed is_system
       .eq("thread_id", threadId)
       .order("created_at", { ascending: true });
 
@@ -217,7 +211,7 @@ export default function ThreadPage() {
 
     try {
       await loadThreadAndItem(uid);
-      await loadMyInterest(uid, (thread?.item_id ?? null) as any); // thread state may not be set yet
+      await loadMyInterest(uid, (thread?.item_id ?? null) as any); // ok (thread state may lag)
       await loadMessages();
       setLoading(false);
       setTimeout(scrollToBottom, 50);
@@ -243,7 +237,6 @@ export default function ThreadPage() {
     setSending(true);
     setErr(null);
 
-    // optimistic insert
     const temp: MessageRow = {
       id: `temp-${Date.now()}`,
       thread_id: threadId,
@@ -259,7 +252,7 @@ export default function ThreadPage() {
     const { data, error } = await supabase
       .from("messages")
       .insert([{ thread_id: threadId, sender_id: userId, body }])
-      .select("id,thread_id,sender_id,body,created_at,is_system")
+      .select("id,thread_id,sender_id,body,created_at") // ✅ removed is_system
       .single();
 
     setSending(false);
@@ -275,7 +268,6 @@ export default function ThreadPage() {
     scrollToBottom();
   }
 
-  // ✅ confirm pickup inside chat (only when accepted)
   async function confirmPickupFromChat() {
     if (!isAshland || !userId) return router.push("/me");
     if (!thread?.item_id || !myInterest?.id) return;
@@ -285,18 +277,15 @@ export default function ThreadPage() {
     setErr(null);
 
     try {
-      // 1) reserve atomically (your SQL RPC)
       const { error: rpcErr } = await supabase.rpc("confirm_pickup", { p_interest_id: myInterest.id });
       if (rpcErr) throw new Error(rpcErr.message);
 
-      // 2) system message in this thread
       await insertSystemMessage({
         threadId,
         senderId: userId,
         body: "✅ Buyer confirmed pickup. Let’s coordinate a time and place here.",
       });
 
-      // 3) refresh
       await loadMyInterest(userId, thread.item_id);
       await loadMessages();
       scrollToBottom();
@@ -307,7 +296,6 @@ export default function ThreadPage() {
     }
   }
 
-  // realtime: INSERT messages
   useEffect(() => {
     if (!threadId) return;
 
@@ -349,7 +337,6 @@ export default function ThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
-  // after thread/item loads, refresh interest status (so CTA appears immediately)
   useEffect(() => {
     (async () => {
       if (!userId || !thread?.item_id) return;
@@ -389,7 +376,6 @@ export default function ThreadPage() {
       {err && <div style={{ color: "#f87171", marginTop: 10 }}>{err}</div>}
       {loading && <div style={{ opacity: 0.8, marginTop: 10 }}>Loading…</div>}
 
-      {/* header card */}
       {!loading && item && (
         <div
           style={{
@@ -455,7 +441,6 @@ export default function ThreadPage() {
         </div>
       )}
 
-      {/* ✅ Confirm CTA inside chat */}
       {!loading && item && canConfirm && (
         <div
           style={{
@@ -512,7 +497,6 @@ export default function ThreadPage() {
         </div>
       )}
 
-      {/* messages */}
       <div style={{ marginTop: 14 }}>
         {messages.map((m) => {
           const mine = !!userId && m.sender_id === userId;
@@ -544,7 +528,6 @@ export default function ThreadPage() {
         <div ref={bottomRef} />
       </div>
 
-      {/* composer */}
       <div style={{ marginTop: 16, display: "flex", gap: 10, alignItems: "center" }}>
         <input
           value={text}
