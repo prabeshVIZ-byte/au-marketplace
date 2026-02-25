@@ -431,7 +431,7 @@ export default function FeedPage() {
   <div
     style={{
       textAlign: "center",
-      fontSize: 38,
+      fontSize: 30,
       fontWeight: 700,
       letterSpacing: "-0.5px",
       color: "white",
