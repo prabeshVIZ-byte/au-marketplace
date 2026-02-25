@@ -40,6 +40,17 @@ type MessageRow = {
   sender_id: string | null;
   body: string;
   created_at: string;
+
+  // optional (recommended columns)
+  pinned?: boolean | null;
+  deleted_at?: string | null;
+  deleted_by?: string | null;
+};
+
+type ThreadReadRow = {
+  thread_id: string;
+  user_id: string;
+  last_seen_at: string;
 };
 
 function pillStyle() {
@@ -58,6 +69,17 @@ function pillStyle() {
   } as const;
 }
 
+function isoToMs(iso: string) {
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function safeName(p: ProfileRow | null) {
+  const n = (p?.full_name ?? "").trim();
+  if (n) return n;
+  return "Ashland user";
+}
+
 export default function ThreadPage() {
   const router = useRouter();
   const params = useParams();
@@ -74,12 +96,18 @@ export default function ThreadPage() {
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
 
+  // seen/unseen
+  const [myLastSeenAt, setMyLastSeenAt] = useState<string | null>(null);
+  const [otherLastSeenAt, setOtherLastSeenAt] = useState<string | null>(null);
+
   // ui
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const [msgActingId, setMsgActingId] = useState<string | null>(null); // pin/delete acting
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -92,6 +120,14 @@ export default function ThreadPage() {
 
   const isBuyer = !!userId && !!thread?.requester_id && userId === thread.requester_id;
   const mustConfirmBeforeChat = isBuyer && canConfirm;
+
+  const otherId = useMemo(() => {
+    if (!userId || !thread) return null;
+    const ownerId = thread.owner_id ?? null;
+    const requesterId = thread.requester_id ?? null;
+    if (!ownerId || !requesterId) return null;
+    return ownerId === userId ? requesterId : ownerId;
+  }, [userId, thread]);
 
   function scrollToBottom() {
     requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
@@ -131,17 +167,18 @@ export default function ThreadPage() {
         const itemRow = it as ItemRow;
         setItem(itemRow);
 
+        // other profile
         const ownerId = (threadRow.owner_id ?? itemRow.owner_id ?? null) as string | null;
         const requesterId = (threadRow.requester_id ?? null) as string | null;
 
-        const otherId =
+        const other =
           ownerId && requesterId ? (ownerId === uid ? requesterId : ownerId) : null;
 
-        if (otherId) {
+        if (other) {
           const { data: pData, error: pErr } = await supabase
             .from("profiles")
             .select("id,full_name,user_role")
-            .eq("id", otherId)
+            .eq("id", other)
             .single();
 
           if (!pErr && pData) setOtherProfile(pData as ProfileRow);
@@ -186,7 +223,7 @@ export default function ThreadPage() {
 
     const { data, error } = await supabase
       .from("messages")
-      .select("id,thread_id,sender_id,body,created_at")
+      .select("id,thread_id,sender_id,body,created_at,pinned,deleted_at,deleted_by")
       .eq("thread_id", threadId)
       .order("created_at", { ascending: true });
 
@@ -195,7 +232,70 @@ export default function ThreadPage() {
       throw new Error(error.message || "Error loading messages.");
     }
 
-    setMessages((data as MessageRow[]) || []);
+    const rows = ((data as MessageRow[]) || []).map((m) => ({
+      ...m,
+      pinned: m.pinned ?? false,
+    }));
+
+    // pinned first, but keep chronological inside each group
+    const pinned = rows.filter((m) => !!m.pinned).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
+    const normal = rows.filter((m) => !m.pinned).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
+
+    setMessages([...pinned, ...normal]);
+  }
+
+  async function loadReads() {
+    if (!threadId || !userId) return;
+
+    // my read
+    try {
+      const { data: mine } = await supabase
+        .from("thread_reads")
+        .select("thread_id,user_id,last_seen_at")
+        .eq("thread_id", threadId)
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      setMyLastSeenAt((mine as ThreadReadRow | null)?.last_seen_at ?? null);
+
+      // other read (if we know who other is)
+      if (otherId) {
+        const { data: oth } = await supabase
+          .from("thread_reads")
+          .select("thread_id,user_id,last_seen_at")
+          .eq("thread_id", threadId)
+          .eq("user_id", otherId)
+          .maybeSingle();
+
+        setOtherLastSeenAt((oth as ThreadReadRow | null)?.last_seen_at ?? null);
+      } else {
+        setOtherLastSeenAt(null);
+      }
+    } catch {
+      // if table doesn't exist, we silently ignore
+      setMyLastSeenAt(null);
+      setOtherLastSeenAt(null);
+    }
+  }
+
+  async function markSeenNow() {
+    if (!threadId || !userId) return;
+
+    // only mark seen if you can actually view the chat (your gate)
+    if (mustConfirmBeforeChat) return;
+
+    const nowIso = new Date().toISOString();
+
+    // upsert into thread_reads (requires table)
+    try {
+      await supabase.from("thread_reads").upsert(
+        [{ thread_id: threadId, user_id: userId, last_seen_at: nowIso }],
+        { onConflict: "thread_id,user_id" }
+      );
+      setMyLastSeenAt(nowIso);
+    } catch {
+      // ignore if table missing
+    }
   }
 
   async function loadAll() {
@@ -215,6 +315,8 @@ export default function ThreadPage() {
       const th = await loadThreadAndItem(uid);
       await loadMyInterest(uid, th?.item_id ?? null);
       await loadMessages();
+      await loadReads();
+      await markSeenNow();
 
       setLoading(false);
       setTimeout(scrollToBottom, 50);
@@ -226,6 +328,22 @@ export default function ThreadPage() {
       setOtherProfile(null);
       setMessages([]);
       setLoading(false);
+    }
+  }
+
+  async function refreshNow() {
+    if (!threadId) return;
+    setRefreshing(true);
+    setErr(null);
+    try {
+      await loadMessages();
+      await loadReads();
+      await markSeenNow();
+      setTimeout(scrollToBottom, 30);
+    } catch (e: any) {
+      setErr(e?.message || "Could not refresh.");
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -245,8 +363,12 @@ export default function ThreadPage() {
       sender_id: userId,
       body,
       created_at: new Date().toISOString(),
+      pinned: false,
+      deleted_at: null,
+      deleted_by: null,
     };
 
+    // optimistic append (at end of non-pinned)
     setMessages((prev) => [...prev, temp]);
     setText("");
     scrollToBottom();
@@ -254,7 +376,7 @@ export default function ThreadPage() {
     const { data, error } = await supabase
       .from("messages")
       .insert([{ thread_id: threadId, sender_id: userId, body }])
-      .select("id,thread_id,sender_id,body,created_at")
+      .select("id,thread_id,sender_id,body,created_at,pinned,deleted_at,deleted_by")
       .single();
 
     setSending(false);
@@ -266,7 +388,8 @@ export default function ThreadPage() {
     }
 
     const real = data as MessageRow;
-    setMessages((prev) => prev.map((x) => (x.id === temp.id ? real : x)));
+    setMessages((prev) => prev.map((x) => (x.id === temp.id ? { ...real, pinned: real.pinned ?? false } : x)));
+    await markSeenNow();
     scrollToBottom();
   }
 
@@ -290,6 +413,7 @@ export default function ThreadPage() {
 
       await loadMyInterest(userId, thread.item_id);
       await loadMessages();
+      await markSeenNow();
       scrollToBottom();
     } catch (e: any) {
       setErr(e?.message || "Could not confirm pickup.");
@@ -298,32 +422,96 @@ export default function ThreadPage() {
     }
   }
 
-  // realtime inserts
+  async function togglePin(m: MessageRow) {
+    if (!userId) return;
+    if (!threadId) return;
+
+    const next = !(m.pinned ?? false);
+    setMsgActingId(m.id);
+    setErr(null);
+
+    // optimistic
+    setMessages((prev) => {
+      const updated = prev.map((x) => (x.id === m.id ? { ...x, pinned: next } : x));
+      const pinned = updated.filter((x) => !!x.pinned).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
+      const normal = updated.filter((x) => !x.pinned).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
+      return [...pinned, ...normal];
+    });
+
+    // persist (requires pinned column)
+    const { error } = await supabase.from("messages").update({ pinned: next }).eq("id", m.id);
+
+    setMsgActingId(null);
+    if (error) {
+      // rollback by reloading from server
+      await refreshNow();
+      setErr(error.message);
+    }
+  }
+
+  async function deleteMessage(m: MessageRow) {
+    if (!userId) return;
+    if (!threadId) return;
+
+    const mine = m.sender_id === userId;
+    const ok = confirm(mine ? "Delete this message?" : "Remove this message from your view?");
+    if (!ok) return;
+
+    setMsgActingId(m.id);
+    setErr(null);
+
+    // optimistic: soft-delete view
+    setMessages((prev) => prev.map((x) => (x.id === m.id ? { ...x, deleted_at: new Date().toISOString(), deleted_by: userId, body: "" } : x)));
+
+    // Preferred: soft delete (requires columns)
+    const { error: softErr } = await supabase
+      .from("messages")
+      .update({ deleted_at: new Date().toISOString(), deleted_by: userId })
+      .eq("id", m.id);
+
+    if (!softErr) {
+      setMsgActingId(null);
+      return;
+    }
+
+    // Fallback: hard delete (only allow if sender)
+    if (mine) {
+      const { error: hardErr } = await supabase.from("messages").delete().eq("id", m.id);
+      setMsgActingId(null);
+
+      if (hardErr) {
+        await refreshNow();
+        setErr(hardErr.message);
+      } else {
+        setMessages((prev) => prev.filter((x) => x.id !== m.id));
+      }
+      return;
+    }
+
+    // If not mine and soft-delete not available, revert
+    setMsgActingId(null);
+    await refreshNow();
+    setErr("Soft-delete is not enabled yet. Add deleted_at/deleted_by columns to messages.");
+  }
+
+  // refresh on focus (not live)
   useEffect(() => {
     if (!threadId) return;
 
-    const channel = supabase
-      .channel(`messages-${threadId}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages", filter: `thread_id=eq.${threadId}` },
-        (payload) => {
-          const row = payload.new as MessageRow;
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === row.id)) return prev;
-            return [...prev, row].sort(
-              (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-            );
-          });
-          scrollToBottom();
-        }
-      )
-      .subscribe();
+    async function onFocus() {
+      try {
+        await loadMessages();
+        await loadReads();
+        await markSeenNow();
+      } catch {
+        // ignore
+      }
+    }
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [threadId]);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId, userId, otherId, mustConfirmBeforeChat]);
 
   // initial load + auth changes
   useEffect(() => {
@@ -341,29 +529,82 @@ export default function ThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
+  const unseenCount = useMemo(() => {
+    if (!myLastSeenAt) return 0;
+    const seenMs = isoToMs(myLastSeenAt);
+    return messages.filter((m) => {
+      if (!m.sender_id) return false;
+      if (m.sender_id === userId) return false;
+      if (m.deleted_at) return false;
+      return isoToMs(m.created_at) > seenMs;
+    }).length;
+  }, [messages, myLastSeenAt, userId]);
+
+  const lastMyMessage = useMemo(() => {
+    const mine = messages.filter((m) => m.sender_id === userId && !m.deleted_at);
+    if (mine.length === 0) return null;
+    return mine.reduce((a, b) => (isoToMs(a.created_at) > isoToMs(b.created_at) ? a : b));
+  }, [messages, userId]);
+
+  const lastMyMessageSeen = useMemo(() => {
+    if (!lastMyMessage) return false;
+    if (!otherLastSeenAt) return false;
+    return isoToMs(otherLastSeenAt) >= isoToMs(lastMyMessage.created_at);
+  }, [lastMyMessage, otherLastSeenAt]);
+
   if (!isAshland) {
-    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Checking access…</div>;
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+        Checking access…
+      </div>
+    );
   }
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 18, paddingBottom: 120 }}>
-      <button
-        onClick={() => router.push("/messages")}
-        style={{
-          marginBottom: 14,
-          background: "transparent",
-          color: "white",
-          border: "1px solid rgba(148,163,184,0.25)",
-          padding: "8px 12px",
-          borderRadius: 12,
-          cursor: "pointer",
-          fontWeight: 900,
-        }}
-      >
-        ← Back
-      </button>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+        <button
+          onClick={() => router.push("/messages")}
+          style={{
+            background: "transparent",
+            color: "white",
+            border: "1px solid rgba(148,163,184,0.25)",
+            padding: "8px 12px",
+            borderRadius: 12,
+            cursor: "pointer",
+            fontWeight: 900,
+          }}
+        >
+          ← Back
+        </button>
 
-      <h1 style={{ marginTop: 8, fontSize: 26, fontWeight: 950 }}>Conversation</h1>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          {unseenCount > 0 && (
+            <span style={{ ...pillStyle(), border: "1px solid rgba(239,68,68,0.35)", background: "rgba(239,68,68,0.10)" }}>
+              Unseen: {unseenCount}
+            </span>
+          )}
+
+          <button
+            onClick={refreshNow}
+            disabled={refreshing}
+            style={{
+              background: "transparent",
+              color: "white",
+              border: "1px solid rgba(148,163,184,0.25)",
+              padding: "8px 12px",
+              borderRadius: 12,
+              cursor: refreshing ? "not-allowed" : "pointer",
+              fontWeight: 900,
+              opacity: refreshing ? 0.7 : 1,
+            }}
+          >
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      <h1 style={{ marginTop: 14, fontSize: 26, fontWeight: 950 }}>Conversation</h1>
 
       {err && <div style={{ color: "#f87171", marginTop: 10 }}>{err}</div>}
       {loading && <div style={{ opacity: 0.8, marginTop: 10 }}>Loading…</div>}
@@ -407,9 +648,9 @@ export default function ThreadPage() {
             <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
               <span style={pillStyle()}>Thread: {threadId.slice(0, 8)}…</span>
               {myInterest?.status ? <span style={pillStyle()}>Status: {myInterest.status}</span> : null}
-              {otherProfile?.full_name ? (
+              {otherProfile ? (
                 <span style={pillStyle()}>
-                  Talking with: {otherProfile.full_name}
+                  Talking with: {safeName(otherProfile)}
                   <span style={{ opacity: 0.75 }}>• {otherProfile.user_role || "student"}</span>
                 </span>
               ) : null}
@@ -450,8 +691,7 @@ export default function ThreadPage() {
           }}
         >
           <div style={{ fontWeight: 950 }}>
-            Seller accepted your request.{" "}
-            <span style={{ opacity: 0.85 }}>Confirm pickup above to start chatting.</span>
+            Seller accepted your request. <span style={{ opacity: 0.85 }}>Confirm pickup above to start chatting.</span>
           </div>
 
           <button
@@ -479,26 +719,104 @@ export default function ThreadPage() {
         {messages.map((m) => {
           const mine = !!userId && m.sender_id === userId;
           const time = new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          const deleted = !!m.deleted_at;
 
           return (
             <div key={m.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginTop: 10 }}>
-              <div
-                style={{
-                  maxWidth: "min(640px, 78vw)",
-                  padding: "10px 12px",
-                  borderRadius: 16,
-                  borderTopRightRadius: mine ? 6 : 16,
-                  borderTopLeftRadius: mine ? 16 : 6,
-                  background: mine ? "rgba(22,163,74,0.25)" : "rgba(255,255,255,0.04)",
-                  border: "1px solid rgba(148,163,184,0.18)",
-                  color: "white",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                  fontWeight: 650,
-                }}
-              >
-                <div style={{ opacity: 0.98 }}>{m.body}</div>
-                <div style={{ opacity: 0.6, fontSize: 12, marginTop: 6, textAlign: "right" }}>{time}</div>
+              <div style={{ maxWidth: "min(640px, 78vw)" }}>
+                {/* bubble */}
+                <div
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 16,
+                    borderTopRightRadius: mine ? 6 : 16,
+                    borderTopLeftRadius: mine ? 16 : 6,
+                    background: mine ? "rgba(22,163,74,0.25)" : "rgba(255,255,255,0.04)",
+                    border: "1px solid rgba(148,163,184,0.18)",
+                    color: "white",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    fontWeight: 650,
+                    position: "relative",
+                  }}
+                >
+                  {/* pin badge */}
+                  {!!m.pinned && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        top: -10,
+                        left: mine ? "auto" : 10,
+                        right: mine ? 10 : "auto",
+                        fontSize: 12,
+                        fontWeight: 950,
+                        padding: "4px 8px",
+                        borderRadius: 999,
+                        border: "1px solid rgba(52,211,153,0.28)",
+                        background: "rgba(16,185,129,0.12)",
+                        opacity: 0.95,
+                      }}
+                    >
+                      📌 Pinned
+                    </div>
+                  )}
+
+                  <div style={{ opacity: deleted ? 0.65 : 0.98, fontStyle: deleted ? "italic" : "normal" }}>
+                    {deleted ? "Message deleted" : m.body}
+                  </div>
+
+                  <div style={{ opacity: 0.6, fontSize: 12, marginTop: 6, textAlign: "right", display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                    <span>{time}</span>
+
+                    {/* Seen indicator ONLY on your last message */}
+                    {mine && lastMyMessage?.id === m.id && !deleted && (
+                      <span style={{ opacity: 0.75, fontWeight: 900 }}>
+                        {lastMyMessageSeen ? "Seen" : "Sent"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* actions */}
+                {!deleted && (
+                  <div style={{ marginTop: 6, display: "flex", gap: 8, justifyContent: mine ? "flex-end" : "flex-start" }}>
+                    <button
+                      onClick={() => togglePin(m)}
+                      disabled={msgActingId === m.id}
+                      style={{
+                        background: "transparent",
+                        border: "1px solid rgba(148,163,184,0.20)",
+                        color: "white",
+                        padding: "6px 10px",
+                        borderRadius: 12,
+                        cursor: msgActingId === m.id ? "not-allowed" : "pointer",
+                        fontWeight: 900,
+                        opacity: msgActingId === m.id ? 0.7 : 0.95,
+                        fontSize: 12,
+                      }}
+                    >
+                      {m.pinned ? "Unpin" : "Pin"}
+                    </button>
+
+                    <button
+                      onClick={() => deleteMessage(m)}
+                      disabled={msgActingId === m.id}
+                      style={{
+                        background: "transparent",
+                        border: "1px solid rgba(127,29,29,0.80)",
+                        color: "white",
+                        padding: "6px 10px",
+                        borderRadius: 12,
+                        cursor: msgActingId === m.id ? "not-allowed" : "pointer",
+                        fontWeight: 900,
+                        opacity: msgActingId === m.id ? 0.7 : 0.95,
+                        fontSize: 12,
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -511,6 +829,7 @@ export default function ThreadPage() {
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onFocus={() => markSeenNow()}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
