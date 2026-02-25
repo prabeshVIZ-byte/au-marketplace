@@ -6,12 +6,24 @@ import { useRouter, useParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
 
+type PostType = "give" | "request";
+
 type ItemRow = {
   id: string;
   title: string;
   description: string | null;
+
+  // give fields
   category: string | null;
   pickup_location: string | null;
+
+  // request fields
+  post_type: PostType;
+  request_group: string | null;
+  request_timeframe: string | null;
+  request_location: string | null;
+
+  // shared
   is_anonymous: boolean | null;
   expires_at: string | null;
   photo_url: string | null;
@@ -72,6 +84,23 @@ function Chip({ children }: { children: React.ReactNode }) {
   );
 }
 
+function requestGroupLabel(g: string | null) {
+  const k = (g ?? "").toLowerCase();
+  if (k === "logistics") return "Logistics";
+  if (k === "services") return "Services";
+  if (k === "urgent") return "Urgent";
+  if (k === "collaboration") return "Collaboration";
+  return "Request";
+}
+
+function requestTimeframeLabel(t: string | null) {
+  const k = (t ?? "").toLowerCase();
+  if (k === "today") return "Today";
+  if (k === "this_week") return "This week";
+  if (k === "flexible") return "Flexible";
+  return "";
+}
+
 export default function ItemDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -86,12 +115,13 @@ export default function ItemDetailPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
+  // GIVE only
   const [interestCount, setInterestCount] = useState(0);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
 
   const [saving, setSaving] = useState(false);
 
-  // interest modal state
+  // interest modal state (GIVE only)
   const [showInterest, setShowInterest] = useState(false);
   const [earliestPickup, setEarliestPickup] = useState<"today" | "tomorrow" | "weekend">("today");
   const [timeWindow, setTimeWindow] = useState<"morning" | "afternoon" | "evening">("afternoon");
@@ -105,9 +135,11 @@ export default function ItemDetailPage() {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
 
-  const isMineListing = useMemo(() => {
+  const isMinePost = useMemo(() => {
     return !!userId && !!item?.owner_id && item.owner_id === userId;
   }, [userId, item?.owner_id]);
+
+  const postType: PostType = (item?.post_type ?? "give") as PostType;
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
@@ -124,41 +156,54 @@ export default function ItemDetailPage() {
     try {
       const { data: it, error: itErr } = await supabase
         .from("items")
-        .select("id,title,description,category,pickup_location,is_anonymous,expires_at,photo_url,status,owner_id")
+        .select(
+          "id,title,description,category,pickup_location,is_anonymous,expires_at,photo_url,status,owner_id,post_type,request_group,request_timeframe,request_location"
+        )
         .eq("id", itemId)
         .single();
 
       if (itErr) throw new Error(itErr.message);
-      setItem(it as ItemRow);
+      const loaded = it as ItemRow;
+      // default post_type if old rows exist
+      loaded.post_type = (loaded.post_type ?? "give") as PostType;
+      setItem(loaded);
 
-      const { count } = await supabase.from("interests").select("*", { count: "exact", head: true }).eq("item_id", itemId);
-      setInterestCount(count ?? 0);
-
-      const { data: s } = await supabase.auth.getSession();
-      const uid = s.session?.user?.id ?? null;
-
-      if (uid) {
-        const { data: mine, error: mineErr } = await supabase
-          .from("interests")
-          .select("id,status")
-          .eq("item_id", itemId)
-          .eq("user_id", uid)
-          .maybeSingle();
-
-        if (!mineErr && mine) setMyInterest({ id: (mine as any).id, status: (mine as any).status ?? null });
-        else setMyInterest(null);
-      } else {
-        setMyInterest(null);
-      }
-
-      const ownerId = (it as any)?.owner_id ?? null;
-      const anon = !!(it as any)?.is_anonymous;
+      // seller profile (if not anonymous)
+      const ownerId = loaded.owner_id ?? null;
+      const anon = !!loaded.is_anonymous;
 
       if (!anon && ownerId) {
         const { data: prof } = await supabase.from("profiles").select("full_name,user_role").eq("id", ownerId).single();
         setSeller((prof as SellerProfile) || null);
       } else {
         setSeller(null);
+      }
+
+      // GIVE only: interests count + my interest
+      if (loaded.post_type === "give") {
+        const { count } = await supabase.from("interests").select("*", { count: "exact", head: true }).eq("item_id", itemId);
+        setInterestCount(count ?? 0);
+
+        const { data: s } = await supabase.auth.getSession();
+        const uid = s.session?.user?.id ?? null;
+
+        if (uid) {
+          const { data: mine, error: mineErr } = await supabase
+            .from("interests")
+            .select("id,status")
+            .eq("item_id", itemId)
+            .eq("user_id", uid)
+            .maybeSingle();
+
+          if (!mineErr && mine) setMyInterest({ id: (mine as any).id, status: (mine as any).status ?? null });
+          else setMyInterest(null);
+        } else {
+          setMyInterest(null);
+        }
+      } else {
+        // REQUEST: no interests
+        setInterestCount(0);
+        setMyInterest(null);
       }
     } catch (e: any) {
       setErr(e?.message || "Failed to load item.");
@@ -170,15 +215,17 @@ export default function ItemDetailPage() {
     }
   }
 
+  // GIVE: submit interest
   async function submitInterest() {
     if (!item) return;
+    if (postType !== "give") return;
 
     if (!isLoggedIn || !userId) {
       router.push("/me");
       return;
     }
 
-    if (isMineListing) {
+    if (isMinePost) {
       setInterestMsg("This is your listing.");
       return;
     }
@@ -224,15 +271,17 @@ export default function ItemDetailPage() {
     }
   }
 
+  // GIVE: withdraw
   async function withdrawInterest() {
     if (!item) return;
+    if (postType !== "give") return;
 
     if (!isLoggedIn || !userId) {
       router.push("/me");
       return;
     }
 
-    if (isMineListing) return;
+    if (isMinePost) return;
 
     const st = (myInterest?.status ?? "").toLowerCase();
     if (st === "accepted" || st === "reserved") {
@@ -258,16 +307,17 @@ export default function ItemDetailPage() {
     }
   }
 
-  // ✅ Buyer confirm: reserve via RPC + ensure thread + system msg + redirect to chat thread
+  // GIVE: confirm pickup + chat
   async function confirmPickupAndChat() {
     if (!item || !userId || !myInterest?.id) return;
+    if (postType !== "give") return;
 
     if (!isLoggedIn) {
       router.push("/me");
       return;
     }
 
-    if (isMineListing) return;
+    if (isMinePost) return;
 
     const st = (myInterest.status ?? "").toLowerCase();
     if (st !== "accepted") {
@@ -284,28 +334,73 @@ export default function ItemDetailPage() {
     setInterestMsg(null);
 
     try {
-      // 1) reserve atomically
       const { error: rpcErr } = await supabase.rpc("confirm_pickup", { p_interest_id: myInterest.id });
       if (rpcErr) throw new Error(rpcErr.message);
 
-      // 2) create/find thread
       const threadId = await ensureThread({
         itemId: item.id,
         ownerId: item.owner_id,
         requesterId: userId,
       });
 
-      // 3) "notify" seller inside the thread
       await insertSystemMessage({
         threadId,
         senderId: userId,
         body: "✅ Buyer confirmed pickup. Let’s coordinate a time and place here.",
       });
 
-      // 4) go to chat
       router.push(`/messages/${threadId}`);
     } catch (e: any) {
       setInterestMsg(e?.message || "Could not confirm pickup.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // REQUEST: offer help -> open chat thread (direct)
+  async function offerHelpAndChat() {
+    if (!item || !userId) return;
+
+    if (!isLoggedIn) {
+      router.push("/me");
+      return;
+    }
+
+    if (isMinePost) {
+      setInterestMsg("This is your request.");
+      return;
+    }
+
+    if (!item.owner_id) {
+      setInterestMsg("Missing requester id. Cannot start chat.");
+      return;
+    }
+
+    setSaving(true);
+    setInterestMsg(null);
+
+    try {
+      // Use same thread system: owner = request poster, requester = helper (you)
+      const threadId = await ensureThread({
+        itemId: item.id,
+        ownerId: item.owner_id, // poster
+        requesterId: userId, // helper
+      });
+
+      const g = requestGroupLabel(item.request_group);
+      const t = requestTimeframeLabel(item.request_timeframe);
+      const loc = (item.request_location ?? "").trim();
+
+      const context = [g, t, loc].filter(Boolean).join(" • ");
+      await insertSystemMessage({
+        threadId,
+        senderId: userId,
+        body: `🙌 Offered help on this request.${context ? ` (${context})` : ""} Use this chat to coordinate details.`,
+      });
+
+      router.push(`/messages/${threadId}`);
+    } catch (e: any) {
+      setInterestMsg(e?.message || "Could not open chat.");
     } finally {
       setSaving(false);
     }
@@ -324,9 +419,10 @@ export default function ItemDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId]);
 
-  // ✅ realtime interest updates: buyer sees acceptance instantly
+  // realtime interest updates ONLY for give posts
   useEffect(() => {
     if (!itemId || !userId) return;
+    if (postType !== "give") return;
 
     const channel = supabase
       .channel(`interest-${itemId}-${userId}`)
@@ -339,7 +435,7 @@ export default function ItemDetailPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [itemId, userId]);
+  }, [itemId, userId, postType]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -350,7 +446,7 @@ export default function ItemDetailPage() {
   }, []);
 
   const expiryText = formatExpiry(item?.expires_at ?? null);
-  const showSellerName = item && !item.is_anonymous && seller?.full_name;
+  const showName = item && !item.is_anonymous && seller?.full_name;
 
   const myStatus = (myInterest?.status ?? "").toLowerCase();
   const mineInterested = !!myInterest?.id;
@@ -361,7 +457,16 @@ export default function ItemDetailPage() {
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
       <button
         onClick={() => router.back()}
-        style={{ marginBottom: 14, background: "transparent", color: "white", border: "1px solid rgba(148,163,184,0.25)", padding: "8px 12px", borderRadius: 12, cursor: "pointer", fontWeight: 900 }}
+        style={{
+          marginBottom: 14,
+          background: "transparent",
+          color: "white",
+          border: "1px solid rgba(148,163,184,0.25)",
+          padding: "8px 12px",
+          borderRadius: 12,
+          cursor: "pointer",
+          fontWeight: 900,
+        }}
       >
         ← Back
       </button>
@@ -373,154 +478,242 @@ export default function ItemDetailPage() {
         <div style={{ maxWidth: 920 }}>
           <h1 style={{ fontSize: 38, fontWeight: 950, margin: 0, letterSpacing: -0.4 }}>{item.title}</h1>
 
-          {/* ✅ Less wordy: chip row */}
+          {/* chip row */}
           <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            {item.category ? <Chip>Category: {item.category}</Chip> : null}
-            {item.pickup_location ? <Chip>Pickup: {item.pickup_location}</Chip> : null}
+            {postType === "give" && item.category ? <Chip>Category: {item.category}</Chip> : null}
+            {postType === "give" && item.pickup_location ? <Chip>Pickup: {item.pickup_location}</Chip> : null}
+
+            {postType === "request" ? (
+              <>
+                <Chip>Type: {requestGroupLabel(item.request_group)}</Chip>
+                {item.request_timeframe ? <Chip>Timeframe: {requestTimeframeLabel(item.request_timeframe)}</Chip> : null}
+                {item.request_location ? <Chip>Location: {item.request_location}</Chip> : null}
+              </>
+            ) : null}
 
             <Chip>
-              Seller:{" "}
-              {item.is_anonymous ? "Anonymous" : showSellerName ? seller!.full_name : "Ashland user"}
+              {postType === "give" ? "Seller" : "Poster"}:{" "}
+              {item.is_anonymous ? "Anonymous" : showName ? seller!.full_name : "Ashland user"}
               {!item.is_anonymous && seller?.user_role ? ` (${seller.user_role})` : ""}
             </Chip>
 
-            <Chip>{interestCount} interested</Chip>
+            {postType === "give" && <Chip>{interestCount} interested</Chip>}
 
             <Chip>
-              {item.expires_at ? `Available • ${new Date(item.expires_at).toLocaleDateString()}` : "Available • until delisted"}{" "}
+              {item.expires_at ? `Auto-archives • ${new Date(item.expires_at).toLocaleDateString()}` : "Active • until delisted"}{" "}
               <span style={{ opacity: 0.75 }}>({expiryText})</span>
             </Chip>
           </div>
 
-          {/* photo */}
+          {/* media */}
           <div style={{ marginTop: 14 }}>
-            {item.photo_url ? (
-              <button
-                type="button"
-                onClick={() => setOpenImg(item.photo_url!)}
-                style={{ padding: 0, border: "none", background: "transparent", cursor: "pointer", width: "100%" }}
-                aria-label="Open photo"
-                title="Open photo"
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={item.photo_url}
-                  alt={item.title}
+            {postType === "give" ? (
+              item.photo_url ? (
+                <button
+                  type="button"
+                  onClick={() => setOpenImg(item.photo_url!)}
+                  style={{ padding: 0, border: "none", background: "transparent", cursor: "pointer", width: "100%" }}
+                  aria-label="Open photo"
+                  title="Open photo"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={item.photo_url}
+                    alt={item.title}
+                    style={{
+                      width: "100%",
+                      maxWidth: 920,
+                      height: 420,
+                      objectFit: "cover",
+                      borderRadius: 16,
+                      border: "1px solid rgba(148,163,184,0.18)",
+                      display: "block",
+                    }}
+                  />
+                </button>
+              ) : (
+                <div
                   style={{
                     width: "100%",
                     maxWidth: 920,
-                    height: 420,
-                    objectFit: "cover",
+                    height: 240,
                     borderRadius: 16,
-                    border: "1px solid rgba(148,163,184,0.18)",
-                    display: "block",
+                    border: "1px dashed rgba(148,163,184,0.35)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "rgba(148,163,184,0.9)",
                   }}
-                />
-              </button>
+                >
+                  No photo
+                </div>
+              )
             ) : (
+              // request hero block (beautiful + subtle)
               <div
                 style={{
                   width: "100%",
                   maxWidth: 920,
-                  height: 240,
+                  minHeight: 220,
                   borderRadius: 16,
-                  border: "1px dashed rgba(148,163,184,0.35)",
+                  border: "1px solid rgba(34,197,94,0.22)",
+                  background: "linear-gradient(180deg, rgba(34,197,94,0.10), rgba(0,0,0,0.25))",
+                  padding: 16,
                   display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "rgba(148,163,184,0.9)",
+                  flexDirection: "column",
+                  justifyContent: "flex-end",
                 }}
               >
-                No photo
+                <div style={{ fontWeight: 950, fontSize: 14, opacity: 0.9 }}>
+                  {requestGroupLabel(item.request_group)}
+                  {item.request_timeframe ? ` • ${requestTimeframeLabel(item.request_timeframe)}` : ""}
+                  {item.request_location ? ` • ${item.request_location}` : ""}
+                </div>
+                <div style={{ marginTop: 10, opacity: 0.8, lineHeight: 1.5 }}>
+                  {item.description || "No extra details provided."}
+                </div>
               </div>
             )}
           </div>
 
-          {/* description */}
-          <div style={{ marginTop: 14, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(148,163,184,0.16)", borderRadius: 16, padding: 14 }}>
-            <div style={{ fontWeight: 950, marginBottom: 8 }}>Description</div>
-            <div style={{ opacity: 0.9, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
-              {item.description && item.description.trim().toLowerCase() !== "until i cancel" ? item.description : "—"}
+          {/* description (for give only; requests already show it in hero) */}
+          {postType === "give" && (
+            <div
+              style={{
+                marginTop: 14,
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(148,163,184,0.16)",
+                borderRadius: 16,
+                padding: 14,
+              }}
+            >
+              <div style={{ fontWeight: 950, marginBottom: 8 }}>Description</div>
+              <div style={{ opacity: 0.9, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
+                {item.description && item.description.trim().toLowerCase() !== "until i cancel" ? item.description : "—"}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* actions */}
           <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            {/* Interested */}
-            <button
-              onClick={() => {
-                if (!isLoggedIn) return router.push("/me");
-                if (isMineListing) return;
-                if (mineInterested) return;
-                setInterestMsg(null);
-                setShowInterest(true);
-              }}
-              disabled={saving || mineInterested || isMineListing || (item.status ?? "available") !== "available"}
-              style={{
-                background: isMineListing ? "rgba(255,255,255,0.03)" : mineInterested ? "rgba(255,255,255,0.05)" : "rgba(16,185,129,0.18)",
-                border: "1px solid rgba(148,163,184,0.22)",
-                color: "white",
-                padding: "10px 14px",
-                borderRadius: 12,
-                cursor: saving || mineInterested || isMineListing ? "not-allowed" : "pointer",
-                fontWeight: 950,
-                opacity: saving ? 0.8 : 1,
-              }}
-            >
-              {isMineListing
-                ? "Your listing"
-                : !isLoggedIn
-                ? "Interested (login required)"
-                : mineInterested
-                ? isReserved
-                  ? "Reserved ✅"
-                  : isAccepted
-                  ? "Accepted ✅"
-                  : "Request sent"
-                : "Interested"}
-            </button>
+            {postType === "give" ? (
+              <>
+                <button
+                  onClick={() => {
+                    if (!isLoggedIn) return router.push("/me");
+                    if (isMinePost) return;
+                    if (mineInterested) return;
+                    setInterestMsg(null);
+                    setShowInterest(true);
+                  }}
+                  disabled={saving || mineInterested || isMinePost || (item.status ?? "available") !== "available"}
+                  style={{
+                    background: isMinePost ? "rgba(255,255,255,0.03)" : mineInterested ? "rgba(255,255,255,0.05)" : "rgba(16,185,129,0.18)",
+                    border: "1px solid rgba(148,163,184,0.22)",
+                    color: "white",
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    cursor: saving || mineInterested || isMinePost ? "not-allowed" : "pointer",
+                    fontWeight: 950,
+                    opacity: saving ? 0.8 : 1,
+                  }}
+                >
+                  {isMinePost
+                    ? "Your listing"
+                    : !isLoggedIn
+                      ? "Interested (login required)"
+                      : mineInterested
+                        ? isReserved
+                          ? "Reserved ✅"
+                          : isAccepted
+                            ? "Accepted ✅"
+                            : "Request sent"
+                        : "Interested"}
+                </button>
 
-            {/* Uninterested */}
+                <button
+                  onClick={withdrawInterest}
+                  disabled={saving || !mineInterested || isAccepted || isReserved || isMinePost}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid rgba(148,163,184,0.22)",
+                    color: "white",
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    cursor: saving || !mineInterested || isAccepted || isReserved || isMinePost ? "not-allowed" : "pointer",
+                    fontWeight: 950,
+                    opacity: saving || !mineInterested || isAccepted || isReserved || isMinePost ? 0.55 : 1,
+                  }}
+                >
+                  Withdraw
+                </button>
+
+                {isAccepted && !isMinePost && (
+                  <button
+                    onClick={confirmPickupAndChat}
+                    disabled={saving}
+                    style={{
+                      background: "rgba(20,83,45,1)",
+                      border: "1px solid rgba(22,101,52,1)",
+                      color: "white",
+                      padding: "10px 14px",
+                      borderRadius: 12,
+                      cursor: saving ? "not-allowed" : "pointer",
+                      fontWeight: 950,
+                      opacity: saving ? 0.8 : 1,
+                    }}
+                  >
+                    Confirm pickup ✅
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={offerHelpAndChat}
+                  disabled={saving || isMinePost}
+                  style={{
+                    background: isMinePost ? "rgba(255,255,255,0.03)" : "rgba(34,197,94,0.18)",
+                    border: "1px solid rgba(34,197,94,0.30)",
+                    color: "white",
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    cursor: saving || isMinePost ? "not-allowed" : "pointer",
+                    fontWeight: 950,
+                    opacity: saving ? 0.8 : 1,
+                  }}
+                >
+                  {isMinePost ? "Your request" : !isLoggedIn ? "Offer help (login required)" : saving ? "Opening…" : "Offer help"}
+                </button>
+
+                <button
+                  onClick={() => router.push("/messages")}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid rgba(148,163,184,0.22)",
+                    color: "white",
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    cursor: "pointer",
+                    fontWeight: 950,
+                  }}
+                >
+                  Messages
+                </button>
+              </>
+            )}
+
             <button
-              onClick={withdrawInterest}
-              disabled={saving || !mineInterested || isAccepted || isReserved || isMineListing}
+              onClick={() => router.push("/me")}
               style={{
                 background: "transparent",
                 border: "1px solid rgba(148,163,184,0.22)",
                 color: "white",
                 padding: "10px 14px",
                 borderRadius: 12,
-                cursor: saving || !mineInterested || isAccepted || isReserved || isMineListing ? "not-allowed" : "pointer",
+                cursor: "pointer",
                 fontWeight: 950,
-                opacity: saving || !mineInterested || isAccepted || isReserved || isMineListing ? 0.55 : 1,
               }}
-            >
-              Withdraw
-            </button>
-
-            {/* Confirm pickup */}
-            {isAccepted && !isMineListing && (
-              <button
-                onClick={confirmPickupAndChat}
-                disabled={saving}
-                style={{
-                  background: "rgba(20,83,45,1)",
-                  border: "1px solid rgba(22,101,52,1)",
-                  color: "white",
-                  padding: "10px 14px",
-                  borderRadius: 12,
-                  cursor: saving ? "not-allowed" : "pointer",
-                  fontWeight: 950,
-                  opacity: saving ? 0.8 : 1,
-                }}
-              >
-                Confirm pickup ✅
-              </button>
-            )}
-
-            <button
-              onClick={() => router.push("/me")}
-              style={{ background: "transparent", border: "1px solid rgba(148,163,184,0.22)", color: "white", padding: "10px 14px", borderRadius: 12, cursor: "pointer", fontWeight: 950 }}
             >
               Account
             </button>
@@ -532,21 +725,45 @@ export default function ItemDetailPage() {
             </div>
           )}
 
-          {/* interest modal */}
-          {showInterest && (
+          {/* GIVE: interest modal */}
+          {postType === "give" && showInterest && (
             <div
               onClick={() => setShowInterest(false)}
-              style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}
+              style={{
+                position: "fixed",
+                inset: 0,
+                background: "rgba(0,0,0,0.65)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 16,
+                zIndex: 50,
+              }}
             >
               <div
                 onClick={(e) => e.stopPropagation()}
-                style={{ width: "100%", maxWidth: 520, borderRadius: 18, border: "1px solid rgba(148,163,184,0.22)", background: "rgba(2,6,23,1)", padding: 16 }}
+                style={{
+                  width: "100%",
+                  maxWidth: 520,
+                  borderRadius: 18,
+                  border: "1px solid rgba(148,163,184,0.22)",
+                  background: "rgba(2,6,23,1)",
+                  padding: 16,
+                }}
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                   <div style={{ fontSize: 18, fontWeight: 950 }}>Request this item</div>
                   <button
                     onClick={() => setShowInterest(false)}
-                    style={{ background: "transparent", border: "1px solid rgba(148,163,184,0.22)", color: "white", padding: "6px 10px", borderRadius: 10, cursor: "pointer", fontWeight: 950 }}
+                    style={{
+                      background: "transparent",
+                      border: "1px solid rgba(148,163,184,0.22)",
+                      color: "white",
+                      padding: "6px 10px",
+                      borderRadius: 10,
+                      cursor: "pointer",
+                      fontWeight: 950,
+                    }}
                   >
                     ✕
                   </button>
@@ -559,7 +776,14 @@ export default function ItemDetailPage() {
                   <select
                     value={earliestPickup}
                     onChange={(e) => setEarliestPickup(e.target.value as any)}
-                    style={{ width: "100%", background: "black", color: "white", border: "1px solid rgba(148,163,184,0.22)", padding: "10px 12px", borderRadius: 12 }}
+                    style={{
+                      width: "100%",
+                      background: "black",
+                      color: "white",
+                      border: "1px solid rgba(148,163,184,0.22)",
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                    }}
                   >
                     <option value="today">Today</option>
                     <option value="tomorrow">Tomorrow</option>
@@ -572,7 +796,14 @@ export default function ItemDetailPage() {
                   <select
                     value={timeWindow}
                     onChange={(e) => setTimeWindow(e.target.value as any)}
-                    style={{ width: "100%", background: "black", color: "white", border: "1px solid rgba(148,163,184,0.22)", padding: "10px 12px", borderRadius: 12 }}
+                    style={{
+                      width: "100%",
+                      background: "black",
+                      color: "white",
+                      border: "1px solid rgba(148,163,184,0.22)",
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                    }}
                   >
                     <option value="morning">Morning</option>
                     <option value="afternoon">Afternoon</option>
@@ -599,12 +830,24 @@ export default function ItemDetailPage() {
                   />
                 </div>
 
-                {interestMsg && <div style={{ marginTop: 12, border: "1px solid rgba(148,163,184,0.22)", borderRadius: 12, padding: 10, opacity: 0.92 }}>{interestMsg}</div>}
+                {interestMsg && (
+                  <div style={{ marginTop: 12, border: "1px solid rgba(148,163,184,0.22)", borderRadius: 12, padding: 10, opacity: 0.92 }}>
+                    {interestMsg}
+                  </div>
+                )}
 
                 <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end" }}>
                   <button
                     onClick={() => setShowInterest(false)}
-                    style={{ background: "transparent", border: "1px solid rgba(148,163,184,0.22)", color: "white", padding: "10px 12px", borderRadius: 12, cursor: "pointer", fontWeight: 950 }}
+                    style={{
+                      background: "transparent",
+                      border: "1px solid rgba(148,163,184,0.22)",
+                      color: "white",
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      cursor: "pointer",
+                      fontWeight: 950,
+                    }}
                   >
                     Cancel
                   </button>
@@ -630,29 +873,74 @@ export default function ItemDetailPage() {
             </div>
           )}
 
-          {/* fullscreen image modal */}
-          {openImg && (
+          {/* fullscreen image modal (give only) */}
+          {postType === "give" && openImg && (
             <div
               onClick={() => setOpenImg(null)}
-              style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 9999 }}
+              style={{
+                position: "fixed",
+                inset: 0,
+                background: "rgba(0,0,0,0.75)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 20,
+                zIndex: 9999,
+              }}
             >
               <div
                 onClick={(e) => e.stopPropagation()}
-                style={{ width: "min(1000px, 95vw)", maxHeight: "90vh", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(148,163,184,0.18)", borderRadius: 16, overflow: "hidden" }}
+                style={{
+                  width: "min(1000px, 95vw)",
+                  maxHeight: "90vh",
+                  background: "rgba(255,255,255,0.04)",
+                  border: "1px solid rgba(148,163,184,0.18)",
+                  borderRadius: 16,
+                  overflow: "hidden",
+                }}
               >
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid rgba(148,163,184,0.15)" }}>
-                  <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "10px 12px",
+                    borderBottom: "1px solid rgba(148,163,184,0.15)",
+                  }}
+                >
+                  <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {item.title}
+                  </div>
                   <button
                     type="button"
                     onClick={() => setOpenImg(null)}
-                    style={{ background: "transparent", color: "white", border: "1px solid rgba(148,163,184,0.25)", padding: "6px 10px", borderRadius: 12, cursor: "pointer", fontWeight: 950 }}
+                    style={{
+                      background: "transparent",
+                      color: "white",
+                      border: "1px solid rgba(148,163,184,0.25)",
+                      padding: "6px 10px",
+                      borderRadius: 12,
+                      cursor: "pointer",
+                      fontWeight: 950,
+                    }}
                   >
                     ✕
                   </button>
                 </div>
 
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={openImg} alt={item.title} style={{ width: "100%", height: "auto", maxHeight: "80vh", objectFit: "contain", display: "block", background: "black" }} />
+                <img
+                  src={openImg}
+                  alt={item.title}
+                  style={{
+                    width: "100%",
+                    height: "auto",
+                    maxHeight: "80vh",
+                    objectFit: "contain",
+                    display: "block",
+                    background: "black",
+                  }}
+                />
               </div>
             </div>
           )}
