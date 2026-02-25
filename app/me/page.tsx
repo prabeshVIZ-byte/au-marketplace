@@ -17,6 +17,9 @@ type ProfileRow = {
   created_at?: string;
 };
 
+type PostType = "give" | "request";
+type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
+
 type MyItemRow = {
   id: string;
   title: string;
@@ -24,7 +27,7 @@ type MyItemRow = {
   status: string | null;
   created_at: string;
   photo_url: string | null;
-  post_type?: "give" | "request" | null;
+  post_type?: PostType | null;
 };
 
 type MyRequestRow = {
@@ -35,11 +38,10 @@ type MyRequestRow = {
     title: string;
     photo_url: string | null;
     status: string | null;
-    post_type?: "give" | "request" | null;
+    post_type?: PostType | null;
   } | null;
 };
 
-/** Incoming item interests (GIVE flow) */
 type IncomingInterestRow = {
   id: string; // interests.id
   item_id: string;
@@ -55,7 +57,7 @@ type IncomingInterestRow = {
     photo_url: string | null;
     status: string | null;
     owner_id: string;
-    post_type?: "give" | "request" | null;
+    post_type?: PostType | null;
   } | null;
 
   requester: {
@@ -64,9 +66,6 @@ type IncomingInterestRow = {
     user_role: string | null;
   } | null;
 };
-
-/** Incoming help offers (REQUEST flow) */
-type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
 
 type IncomingOfferRow = {
   id: string; // request_offers.id
@@ -83,7 +82,7 @@ type IncomingOfferRow = {
     title: string;
     status: string | null;
     owner_id: string;
-    post_type?: "give" | "request" | null;
+    post_type?: PostType | null;
   } | null;
 
   helper: {
@@ -106,7 +105,7 @@ type MyOfferRow = {
     id: string;
     title: string;
     status: string | null;
-    post_type?: "give" | "request" | null;
+    post_type?: PostType | null;
   } | null;
 };
 
@@ -132,7 +131,10 @@ function normStatus(s: string | null | undefined) {
   return (s ?? "").trim().toLowerCase();
 }
 
-function niceNameFromProfile(p: { full_name: string | null; email: string | null } | null, fallbackId: string) {
+function niceNameFromProfile(
+  p: { full_name: string | null; email: string | null } | null,
+  fallbackId: string
+) {
   const name = (p?.full_name ?? "").trim();
   if (name) return name;
   const email = (p?.email ?? "").trim();
@@ -164,7 +166,9 @@ export default function AccountPage() {
   const [profile, setProfile] = useState<ProfileRow | null>(null);
 
   // tabs
-  const [tab, setTab] = useState<"listings" | "my_activity" | "requests" | "history">("listings");
+  const [tab, setTab] = useState<"listings" | "my_activity" | "requests" | "history">(
+    "listings"
+  );
 
   const [myItems, setMyItems] = useState<MyItemRow[]>([]);
   const [myRequests, setMyRequests] = useState<MyRequestRow[]>([]); // GIVE interests I made
@@ -172,7 +176,6 @@ export default function AccountPage() {
 
   const [incomingInterests, setIncomingInterests] = useState<IncomingInterestRow[]>([]);
   const [incomingOffers, setIncomingOffers] = useState<IncomingOfferRow[]>([]);
-
   const [incomingLoading, setIncomingLoading] = useState(false);
 
   const [stats, setStats] = useState<{ listed: number; requested: number; offers: number; chats: number }>({
@@ -196,14 +199,12 @@ export default function AccountPage() {
     return incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at).length;
   }, [incomingInterests]);
 
-  // We don't have "seen" columns on request_offers; treat pending/hold as attention-needed
   const unseenIncomingOfferCount = useMemo(() => {
     return incomingOffers.filter((o) => (o.status ?? "pending") === "pending").length;
   }, [incomingOffers]);
 
   const hasNewRequests = unseenIncomingInterestCount + unseenIncomingOfferCount > 0;
 
-  // Split listings vs history (claimed)
   const activeListings = useMemo(() => {
     return myItems.filter((x) => normStatus(x.status) !== "claimed");
   }, [myItems]);
@@ -257,7 +258,6 @@ export default function AccountPage() {
     return rows;
   }
 
-  /** GIVE flow: interests I made */
   async function loadMyRequests(uid: string) {
     const { data: rData, error: rErr } = await supabase
       .from("interests")
@@ -277,7 +277,6 @@ export default function AccountPage() {
     return rows;
   }
 
-  /** REQUEST flow: offers I made (request_offers where helper_id = me) */
   async function loadMyOffers(uid: string) {
     const { data, error } = await supabase
       .from("request_offers")
@@ -296,13 +295,11 @@ export default function AccountPage() {
     return (data as MyOfferRow[]) ?? [];
   }
 
-  /**
-   * Incoming GIVE interests: only interests for items YOU own.
-   * 2-step query is stable.
-   */
   async function loadIncomingInterests(uid: string) {
-    // 1) owned item ids
-    const { data: owned, error: ownedErr } = await supabase.from("items").select("id").eq("owner_id", uid);
+    const { data: owned, error: ownedErr } = await supabase
+      .from("items")
+      .select("id")
+      .eq("owner_id", uid);
 
     if (ownedErr) {
       console.warn("incoming interests: owned items load:", ownedErr.message);
@@ -311,13 +308,11 @@ export default function AccountPage() {
     }
 
     const ownedIds = (owned ?? []).map((x: any) => x.id).filter(Boolean);
-
     if (ownedIds.length === 0) {
       setIncomingInterests([]);
       return;
     }
 
-    // 2) interests for those items (include interests.id + status)
     const { data: ints, error: intsErr } = await supabase
       .from("interests")
       .select("id,item_id,user_id,created_at,owner_seen_at,owner_dismissed_at,status")
@@ -346,7 +341,6 @@ export default function AccountPage() {
       return;
     }
 
-    // 3) item details
     const uniqueItemIds = Array.from(new Set(interestRows.map((r) => r.item_id)));
 
     const { data: itemsData, error: itemsErr } = await supabase
@@ -356,39 +350,40 @@ export default function AccountPage() {
 
     if (itemsErr) console.warn("incoming interests: items load:", itemsErr.message);
 
-    const itemMap: Record<string, { id: string; title: string; photo_url: string | null; status: string | null; owner_id: string; post_type?: "give" | "request" | null }> =
-      {};
+    const itemMap: Record<string, any> = {};
     (itemsData ?? []).forEach((it: any) => {
-      itemMap[it.id] = {
+      itemMap[String(it.id)] = {
         id: String(it.id),
         title: String(it.title ?? ""),
         photo_url: it.photo_url ?? null,
         status: it.status ?? null,
         owner_id: String(it.owner_id ?? ""),
-        post_type: (it.post_type ?? null) as any,
+        post_type: (it.post_type ?? null) as PostType | null,
       };
     });
 
-    // 4) requester profiles
     const uniqueUserIds = Array.from(new Set(interestRows.map((r) => r.user_id)));
 
-    const { data: profs, error: profErr } = await supabase.from("profiles").select("id,full_name,email,user_role").in("id", uniqueUserIds);
+    const { data: profs, error: profErr } = await supabase
+      .from("profiles")
+      .select("id,full_name,email,user_role")
+      .in("id", uniqueUserIds);
+
     if (profErr) console.warn("incoming interests: profiles load:", profErr.message);
 
-    const profMap: Record<string, { full_name: string | null; email: string | null; user_role: string | null }> = {};
+    const profMap: Record<string, any> = {};
     (profs ?? []).forEach((p: any) => {
-      profMap[p.id] = {
+      profMap[String(p.id)] = {
         full_name: p.full_name ?? null,
         email: p.email ?? null,
         user_role: p.user_role ?? null,
       };
     });
 
-    // 5) merge + guardrail
     const merged: IncomingInterestRow[] = interestRows
       .map((r) => {
-        const it = itemMap[r.item_id] ?? null;
-        const req = profMap[r.user_id] ?? null;
+        const it = itemMap[String(r.item_id)] ?? null;
+        const req = profMap[String(r.user_id)] ?? null;
 
         return {
           id: String(r.id),
@@ -407,13 +402,12 @@ export default function AccountPage() {
     setIncomingInterests(merged);
   }
 
-  /**
-   * Incoming REQUEST offers: request_offers for requests YOU posted.
-   * We load owned request ids (items where owner_id = me AND post_type = 'request'),
-   * then fetch request_offers rows and helper profiles.
-   */
   async function loadIncomingOffers(uid: string) {
-    const { data: ownedReqs, error: ownedErr } = await supabase.from("items").select("id,title,status,owner_id,post_type").eq("owner_id", uid).eq("post_type", "request");
+    const { data: ownedReqs, error: ownedErr } = await supabase
+      .from("items")
+      .select("id,title,status,owner_id,post_type")
+      .eq("owner_id", uid)
+      .eq("post_type", "request");
 
     if (ownedErr) {
       console.warn("incoming offers: owned requests load:", ownedErr.message);
@@ -459,18 +453,28 @@ export default function AccountPage() {
     }
 
     const helperIds = Array.from(new Set(offerRows.map((o) => o.helper_id)));
-    const { data: helpers, error: hErr } = await supabase.from("profiles").select("id,full_name,email,user_role").in("id", helperIds);
+
+    const { data: helpers, error: hErr } = await supabase
+      .from("profiles")
+      .select("id,full_name,email,user_role")
+      .in("id", helperIds);
+
     if (hErr) console.warn("incoming offers: helper profiles load:", hErr.message);
 
     const helperMap: Record<string, any> = {};
     (helpers ?? []).forEach((p: any) => {
-      helperMap[String(p.id)] = { full_name: p.full_name ?? null, email: p.email ?? null, user_role: p.user_role ?? null };
+      helperMap[String(p.id)] = {
+        full_name: p.full_name ?? null,
+        email: p.email ?? null,
+        user_role: p.user_role ?? null,
+      };
     });
 
     const merged: IncomingOfferRow[] = offerRows
       .map((o) => {
         const reqItem = reqMap[String(o.request_id)] ?? null;
         const helper = helperMap[String(o.helper_id)] ?? null;
+
         return {
           id: String(o.id),
           request_id: String(o.request_id),
@@ -486,13 +490,31 @@ export default function AccountPage() {
                 title: String(reqItem.title ?? ""),
                 status: reqItem.status ?? null,
                 owner_id: String(reqItem.owner_id ?? ""),
-                post_type: (reqItem.post_type ?? null) as any,
+                post_type: (reqItem.post_type ?? null) as PostType | null,
               }
             : null,
           helper,
         };
       })
       .filter((x) => x.request_item?.owner_id === uid);
+
+    // sort: accepted first, then pending, then hold, then declined/completed
+    const rank: Record<OfferStatus, number> = {
+      accepted: 0,
+      pending: 1,
+      hold: 2,
+      declined: 3,
+      completed: 4,
+    };
+
+    merged.sort((a, b) => {
+      const ra = rank[(a.status ?? "pending") as OfferStatus] ?? 9;
+      const rb = rank[(b.status ?? "pending") as OfferStatus] ?? 9;
+      if (ra !== rb) return ra - rb;
+      const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return tb - ta;
+    });
 
     setIncomingOffers(merged);
   }
@@ -507,7 +529,6 @@ export default function AccountPage() {
   }
 
   async function markIncomingSeen() {
-    // only for GIVE interests (we have seen columns)
     const unseen = incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at);
     if (unseen.length === 0) return;
 
@@ -517,16 +538,12 @@ export default function AccountPage() {
     await supabase.from("interests").update({ owner_seen_at: nowIso }).in("id", ids);
 
     setIncomingInterests((prev) =>
-      prev.map((r) => {
-        if (r.owner_seen_at || r.owner_dismissed_at) return r;
-        return { ...r, owner_seen_at: nowIso };
-      })
+      prev.map((r) => (r.owner_seen_at || r.owner_dismissed_at ? r : { ...r, owner_seen_at: nowIso }))
     );
   }
 
-  /** Hard delete an incoming GIVE interest notification row */
   async function deleteNotification(r: IncomingInterestRow) {
-    if (!confirm("Delete this request notification? This will remove the request.")) return;
+    if (!confirm("Delete this item request? This will remove the request.")) return;
 
     setDeletingNotifId(r.id);
     const { error } = await supabase.from("interests").delete().eq("id", r.id);
@@ -537,7 +554,6 @@ export default function AccountPage() {
     setIncomingInterests((prev) => prev.filter((x) => x.id !== r.id));
   }
 
-  /** REQUEST offer actions (poster only) */
   async function updateOfferStatus(o: IncomingOfferRow, next: OfferStatus) {
     setOfferActingId(o.id);
     const { error } = await supabase.from("request_offers").update({ status: next }).eq("id", o.id);
@@ -547,22 +563,60 @@ export default function AccountPage() {
     setIncomingOffers((prev) => prev.map((x) => (x.id === o.id ? { ...x, status: next } : x)));
   }
 
-  /** Start chat with helper ONLY when accepted */
+  async function acceptOfferAndHoldRest(o: IncomingOfferRow) {
+    // ✅ Your rule: accept one; put others on hold (NOT decline)
+    const requestId = o.request_id;
+    if (!requestId) return;
+
+    setOfferActingId(o.id);
+
+    try {
+      const { error: acceptErr } = await supabase
+        .from("request_offers")
+        .update({ status: "accepted" })
+        .eq("id", o.id);
+
+      if (acceptErr) throw new Error(acceptErr.message);
+
+      // put all other pending offers on hold
+      const { error: holdErr } = await supabase
+        .from("request_offers")
+        .update({ status: "hold" })
+        .eq("request_id", requestId)
+        .neq("id", o.id)
+        .in("status", ["pending"]);
+
+      if (holdErr) throw new Error(holdErr.message);
+
+      setIncomingOffers((prev) =>
+        prev.map((x) => {
+          if (x.request_id !== requestId) return x;
+          if (x.id === o.id) return { ...x, status: "accepted" };
+          const st = (x.status ?? "pending") as OfferStatus;
+          if (st === "pending") return { ...x, status: "hold" };
+          return x;
+        })
+      );
+    } catch (e: any) {
+      alert(e?.message || "Could not accept offer.");
+    } finally {
+      setOfferActingId(null);
+    }
+  }
+
   async function startChatWithHelper(o: IncomingOfferRow) {
     if (!userId) return;
     if ((o.status ?? "pending") !== "accepted") return alert("Accept this helper first.");
-
     if (!o.request_item?.id) return alert("Missing request id.");
     if (!o.helper_id) return alert("Missing helper id.");
 
     try {
       setOfferActingId(o.id);
 
-      // owner = request poster (you), requester = helper
       const threadId = await ensureThread({
         itemId: o.request_item.id,
-        ownerId: userId,
-        requesterId: o.helper_id,
+        ownerId: userId, // poster
+        requesterId: o.helper_id, // helper
       });
 
       await insertSystemMessage({
@@ -579,12 +633,9 @@ export default function AccountPage() {
     }
   }
 
-  /** My offer: withdraw ONLY if not accepted/completed */
   async function withdrawMyOffer(off: MyOfferRow) {
     const st = (off.status ?? "pending") as OfferStatus;
-    if (st === "accepted" || st === "completed") {
-      return alert("This offer is already accepted/completed. You can't withdraw here.");
-    }
+    if (st === "accepted" || st === "completed") return alert("This offer is already accepted/completed.");
 
     if (!confirm("Withdraw this offer?")) return;
 
@@ -598,18 +649,17 @@ export default function AccountPage() {
     setStats((s) => ({ ...s, offers: Math.max(0, s.offers - 1) }));
   }
 
-  /** My offer: start chat ONLY if accepted */
   async function startChatFromMyOffer(off: MyOfferRow) {
     if (!userId) return;
     const st = (off.status ?? "pending") as OfferStatus;
-    if (st !== "accepted") return alert("You can chat only after the poster accepts your offer.");
+    if (st !== "accepted") return alert("Chat unlocks after the poster accepts your offer.");
 
     const reqId = off.request_item?.id ?? off.request_id;
     if (!reqId) return alert("Missing request id.");
 
-    // Need request owner id to create thread properly; fetch it.
     try {
       setMyOfferActingId(off.id);
+
       const { data, error } = await supabase.from("items").select("owner_id").eq("id", reqId).single();
       if (error) throw new Error(error.message);
 
@@ -618,7 +668,7 @@ export default function AccountPage() {
 
       const threadId = await ensureThread({
         itemId: reqId,
-        ownerId: ownerId,
+        ownerId,
         requesterId: userId,
       });
 
@@ -665,7 +715,10 @@ export default function AccountPage() {
 
     let chats = 0;
     try {
-      const { count, error: tErr } = await supabase.from("threads").select("id", { count: "exact", head: true }).or(`owner_id.eq.${uid},requester_id.eq.${uid}`);
+      const { count, error: tErr } = await supabase
+        .from("threads")
+        .select("id", { count: "exact", head: true })
+        .or(`owner_id.eq.${uid},requester_id.eq.${uid}`);
       if (!tErr) chats = count ?? 0;
     } catch {
       chats = 0;
@@ -682,7 +735,7 @@ export default function AccountPage() {
   }
 
   async function deleteListing(id: string) {
-    if (!confirm("Delete this listing? This cannot be undone.")) return;
+    if (!confirm("Delete this post? This cannot be undone.")) return;
 
     setDeletingId(id);
     const { error } = await supabase.from("items").delete().eq("id", id);
@@ -737,12 +790,11 @@ export default function AccountPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const displayName = (profile?.full_name ?? "").trim() || (userEmail ? userEmail.split("@")[0] : "") || "Account";
+  const displayName =
+    (profile?.full_name ?? "").trim() || (userEmail ? userEmail.split("@")[0] : "") || "Account";
   const roleLabel = (profile?.user_role ?? "").trim() || "member";
 
-  if (loading) {
-    return <div style={pageWrap}>Loading…</div>;
-  }
+  if (loading) return <div style={pageWrap}>Loading…</div>;
 
   /* ---------------- LOGGED OUT ---------------- */
 
@@ -764,9 +816,18 @@ export default function AccountPage() {
         </div>
 
         <div style={panel}>
-          <div style={{ fontWeight: 1000, marginBottom: 10 }}>{authMode === "signin" ? "Welcome back" : "Create an account"}</div>
+          <div style={{ fontWeight: 1000, marginBottom: 10 }}>
+            {authMode === "signin" ? "Welcome back" : "Create an account"}
+          </div>
 
-          <input value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="you@ashland.edu" autoComplete="email" inputMode="email" style={inputStyle} />
+          <input
+            value={authEmail}
+            onChange={(e) => setAuthEmail(e.target.value)}
+            placeholder="you@ashland.edu"
+            autoComplete="email"
+            inputMode="email"
+            style={inputStyle}
+          />
 
           <input
             value={authPassword}
@@ -786,7 +847,9 @@ export default function AccountPage() {
 
           {authMsg && <div style={{ marginTop: 10, color: "#fca5a5", fontWeight: 900 }}>{authMsg}</div>}
 
-          <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>You can still browse the feed without logging in.</div>
+          <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>
+            You can still browse the feed without logging in.
+          </div>
 
           <button onClick={() => router.push("/feed")} style={{ ...outlineBtn, width: "100%", height: 44 }}>
             Browse feed
@@ -861,8 +924,28 @@ export default function AccountPage() {
             </div>
 
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 18, fontWeight: 1000, lineHeight: 1.1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName}</div>
-              <div style={{ opacity: 0.75, fontSize: 12, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <div
+                style={{
+                  fontSize: 18,
+                  fontWeight: 1000,
+                  lineHeight: 1.1,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {displayName}
+              </div>
+              <div
+                style={{
+                  opacity: 0.75,
+                  fontSize: 12,
+                  marginTop: 2,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
                 {roleLabel} • {userEmail}
               </div>
             </div>
@@ -900,8 +983,17 @@ export default function AccountPage() {
           </button>
         </div>
 
-        {/* small stats */}
-        <div style={{ marginTop: 6, display: "flex", gap: 10, flexWrap: "wrap", opacity: 0.78, fontSize: 12, fontWeight: 900 }}>
+        <div
+          style={{
+            marginTop: 6,
+            display: "flex",
+            gap: 10,
+            flexWrap: "wrap",
+            opacity: 0.78,
+            fontSize: 12,
+            fontWeight: 900,
+          }}
+        >
           <span>Listed: {stats.listed}</span>
           <span>Interests: {stats.requested}</span>
           <span>Offers: {stats.offers}</span>
@@ -943,10 +1035,9 @@ export default function AccountPage() {
         <>
           <div style={sectionHint}>Your activity across both flows.</div>
 
-          {/* MY INTERESTS (GIVE) */}
           <div style={{ marginTop: 14 }}>
             <div style={{ fontWeight: 1000, fontSize: 18 }}>My interests (items I requested)</div>
-            <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>These are GIVE posts you requested.</div>
+            <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>GIVE posts you requested.</div>
           </div>
 
           {myRequests.length === 0 ? (
@@ -965,10 +1056,14 @@ export default function AccountPage() {
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={rowTitle}>{it?.title ?? "Unknown item"}</div>
                       <div style={rowMeta}>
-                        Item: <span style={{ fontWeight: 900 }}>{shortId(r.item_id)}</span> • Status: <b>{it?.status ?? "—"}</b>
+                        Item: <span style={{ fontWeight: 900 }}>{shortId(r.item_id)}</span> • Status:{" "}
+                        <b>{it?.status ?? "—"}</b>
                       </div>
                     </div>
-                    <button onClick={() => router.push(`/item/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}>
+                    <button
+                      onClick={() => router.push(`/item/${r.item_id}`)}
+                      style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}
+                    >
                       View
                     </button>
                   </div>
@@ -977,11 +1072,10 @@ export default function AccountPage() {
             </div>
           )}
 
-          {/* MY OFFERS (REQUEST) */}
           <div style={{ marginTop: 18 }}>
             <div style={{ fontWeight: 1000, fontSize: 18 }}>My offers (help I offered)</div>
             <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>
-              These are REQUEST posts where you offered help. Chat is only available after acceptance.
+              REQUEST posts where you offered help. Chat unlocks after acceptance.
             </div>
           </div>
 
@@ -1000,6 +1094,8 @@ export default function AccountPage() {
 
                 return (
                   <div key={o.id} style={rowCard}>
+                    <div style={{ ...thumbWrap, width: 54, height: 54 }}>🤝</div>
+
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={rowTitle}>
                         Offered help on <span style={{ opacity: 0.9 }}>{title}</span>
@@ -1007,16 +1103,22 @@ export default function AccountPage() {
                       <div style={rowMeta}>
                         Request: <span style={{ fontWeight: 900 }}>{shortId(o.request_id)}</span>
                         {o.created_at ? ` • Sent: ${fmtWhen(o.created_at)}` : ""}
-                        {" • "}
-                        Status: <b>{st}</b>
+                        {" • "}Status: <b>{st}</b>
                         {o.availability ? ` • Availability: ${o.availability}` : ""}
                       </div>
-                      {o.note ? <div style={{ marginTop: 8, opacity: 0.82, fontSize: 13, whiteSpace: "pre-wrap" }}>{o.note}</div> : null}
+                      {o.note ? (
+                        <div style={{ marginTop: 8, opacity: 0.82, fontSize: 13, whiteSpace: "pre-wrap" }}>
+                          {o.note}
+                        </div>
+                      ) : null}
                     </div>
 
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                      <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}>
-                        View request
+                      <button
+                        onClick={() => router.push(`/item/${o.request_id}`)}
+                        style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}
+                      >
+                        View
                       </button>
 
                       <button
@@ -1031,7 +1133,7 @@ export default function AccountPage() {
                           opacity: acting || st !== "accepted" ? 0.65 : 1,
                           whiteSpace: "nowrap",
                         }}
-                        title={st !== "accepted" ? "Chat unlocks after acceptance" : "Chat with poster"}
+                        title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
                       >
                         {acting ? "Opening…" : "Start chat"}
                       </button>
@@ -1062,13 +1164,13 @@ export default function AccountPage() {
 
       {tab === "requests" && (
         <>
-          <div style={sectionHint}>Requests people sent to your GIVE listings, and offers people sent to your REQUEST posts.</div>
+          <div style={sectionHint}>
+            People requesting your GIVE items, and helpers offering to assist your REQUEST posts.
+          </div>
 
           <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button
-              onClick={() => {
-                if (userId) loadIncomingAll(userId);
-              }}
+              onClick={() => userId && loadIncomingAll(userId)}
               disabled={incomingLoading}
               style={{
                 ...outlineBtn,
@@ -1081,7 +1183,6 @@ export default function AccountPage() {
             </button>
           </div>
 
-          {/* Section A: incoming interests (give) */}
           <div style={{ marginTop: 16 }}>
             <div style={{ fontWeight: 1000, fontSize: 18 }}>Incoming item requests (GIVE)</div>
             <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>People who requested your items.</div>
@@ -1099,42 +1200,42 @@ export default function AccountPage() {
 
                 return (
                   <div key={r.id} style={rowCard}>
-                    <div className="reqRow">
-                      <Thumb photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
-
-                      <div className="reqMain">
-                        <div style={rowTitle}>
-                          {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
-                        </div>
-                        <div style={rowMeta}>
-                          Item: <span style={{ fontWeight: 900 }}>{shortId(r.item_id)}</span>
-                          {when ? ` • Requested: ${when}` : ""}
-                          {r.owner_seen_at ? " • Seen" : " • New"}
-                          {r.status ? ` • ${r.status}` : ""}
-                        </div>
+                    <Thumb photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={rowTitle}>
+                        {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
                       </div>
-
-                      <div className="reqActions">
-                        <button onClick={() => router.push(`/manage/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}>
-                          Open
-                        </button>
-
-                        <button
-                          onClick={() => deleteNotification(r)}
-                          disabled={deleting}
-                          style={{
-                            ...outlineBtn,
-                            marginTop: 0,
-                            border: "1px solid #7f1d1d",
-                            cursor: deleting ? "not-allowed" : "pointer",
-                            opacity: deleting ? 0.75 : 1,
-                            whiteSpace: "nowrap",
-                          }}
-                          title="Delete notification"
-                        >
-                          {deleting ? "Deleting…" : "Delete"}
-                        </button>
+                      <div style={rowMeta}>
+                        Item: <span style={{ fontWeight: 900 }}>{shortId(r.item_id)}</span>
+                        {when ? ` • Requested: ${when}` : ""}
+                        {r.owner_seen_at ? " • Seen" : " • New"}
+                        {r.status ? ` • ${r.status}` : ""}
                       </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      <button
+                        onClick={() => router.push(`/manage/${r.item_id}`)}
+                        style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}
+                      >
+                        Open
+                      </button>
+
+                      <button
+                        onClick={() => deleteNotification(r)}
+                        disabled={deleting}
+                        style={{
+                          ...outlineBtn,
+                          marginTop: 0,
+                          border: "1px solid #7f1d1d",
+                          cursor: deleting ? "not-allowed" : "pointer",
+                          opacity: deleting ? 0.75 : 1,
+                          whiteSpace: "nowrap",
+                        }}
+                        title="Delete request"
+                      >
+                        {deleting ? "Deleting…" : "Delete"}
+                      </button>
                     </div>
                   </div>
                 );
@@ -1142,11 +1243,10 @@ export default function AccountPage() {
             </div>
           )}
 
-          {/* Section B: incoming offers (request) */}
           <div style={{ marginTop: 18 }}>
             <div style={{ fontWeight: 1000, fontSize: 18 }}>Incoming help offers (REQUEST)</div>
             <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>
-              People offering to help your request posts. You can accept one, keep others on hold, or decline. Chat is only opened after acceptance.
+              Accept one helper; others stay on hold. Chat opens only after acceptance.
             </div>
           </div>
 
@@ -1163,95 +1263,97 @@ export default function AccountPage() {
 
                 return (
                   <div key={o.id} style={rowCard}>
-                    <div className="reqRow">
-                      <div style={{ ...thumbWrap, width: 54, height: 54 }}>
-                        🤝
-                      </div>
+                    <div style={{ ...thumbWrap, width: 54, height: 54 }}>🤝</div>
 
-                      <div className="reqMain">
-                        <div style={rowTitle}>
-                          {who} offered help on <span style={{ opacity: 0.9 }}>{title}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={rowTitle}>
+                        {who} offered help on <span style={{ opacity: 0.9 }}>{title}</span>
+                      </div>
+                      <div style={rowMeta}>
+                        Request: <span style={{ fontWeight: 900 }}>{shortId(o.request_id)}</span>
+                        {when ? ` • Offered: ${when}` : ""}
+                        {" • "}Status: <b>{st}</b>
+                        {o.availability ? ` • Availability: ${o.availability}` : ""}
+                      </div>
+                      {o.note ? (
+                        <div style={{ marginTop: 8, opacity: 0.82, fontSize: 13, whiteSpace: "pre-wrap" }}>
+                          {o.note}
                         </div>
-                        <div style={rowMeta}>
-                          Request: <span style={{ fontWeight: 900 }}>{shortId(o.request_id)}</span>
-                          {when ? ` • Offered: ${when}` : ""}
-                          {" • "}
-                          Status: <b>{st}</b>
-                          {o.availability ? ` • Availability: ${o.availability}` : ""}
-                        </div>
-                        {o.note ? <div style={{ marginTop: 8, opacity: 0.82, fontSize: 13, whiteSpace: "pre-wrap" }}>{o.note}</div> : null}
-                      </div>
+                      ) : null}
+                    </div>
 
-                      <div className="reqActions">
-                        <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}>
-                          View request
-                        </button>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      <button
+                        onClick={() => router.push(`/item/${o.request_id}`)}
+                        style={{ ...outlineBtn, marginTop: 0, whiteSpace: "nowrap" }}
+                      >
+                        View
+                      </button>
 
-                        <button
-                          onClick={() => updateOfferStatus(o, "accepted")}
-                          disabled={acting || st === "accepted" || st === "completed"}
-                          style={{
-                            ...outlineBtn,
-                            marginTop: 0,
-                            border: "1px solid rgba(22,163,74,0.55)",
-                            background: "rgba(22,163,74,0.14)",
-                            cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                            opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                            whiteSpace: "nowrap",
-                          }}
-                          title="Accept this helper"
-                        >
-                          {acting ? "Working…" : "Accept"}
-                        </button>
+                      <button
+                        onClick={() => acceptOfferAndHoldRest(o)}
+                        disabled={acting || st === "accepted" || st === "completed"}
+                        style={{
+                          ...outlineBtn,
+                          marginTop: 0,
+                          border: "1px solid rgba(22,163,74,0.55)",
+                          background: "rgba(22,163,74,0.14)",
+                          cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
+                          opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
+                          whiteSpace: "nowrap",
+                        }}
+                        title="Accept this helper and put others on hold"
+                      >
+                        {acting ? "Working…" : "Accept"}
+                      </button>
 
-                        <button
-                          onClick={() => updateOfferStatus(o, "hold")}
-                          disabled={acting || st === "accepted" || st === "completed"}
-                          style={{
-                            ...outlineBtn,
-                            marginTop: 0,
-                            cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                            opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                            whiteSpace: "nowrap",
-                          }}
-                          title="Put this offer on hold"
-                        >
-                          Hold
-                        </button>
+                      <button
+                        onClick={() => updateOfferStatus(o, "hold")}
+                        disabled={acting || st === "accepted" || st === "completed"}
+                        style={{
+                          ...outlineBtn,
+                          marginTop: 0,
+                          cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
+                          opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
+                          whiteSpace: "nowrap",
+                        }}
+                        title="Put this offer on hold"
+                      >
+                        Hold
+                      </button>
 
-                        <button
-                          onClick={() => updateOfferStatus(o, "declined")}
-                          disabled={acting || st === "declined" || st === "completed"}
-                          style={{
-                            ...outlineBtn,
-                            marginTop: 0,
-                            border: "1px solid #7f1d1d",
-                            cursor: acting || st === "declined" || st === "completed" ? "not-allowed" : "pointer",
-                            opacity: acting || st === "declined" || st === "completed" ? 0.65 : 1,
-                            whiteSpace: "nowrap",
-                          }}
-                          title="Decline this offer"
-                        >
-                          Decline
-                        </button>
+                      <button
+                        onClick={() => updateOfferStatus(o, "declined")}
+                        disabled={acting || st === "declined" || st === "completed"}
+                        style={{
+                          ...outlineBtn,
+                          marginTop: 0,
+                          border: "1px solid #7f1d1d",
+                          cursor: acting || st === "declined" || st === "completed" ? "not-allowed" : "pointer",
+                          opacity: acting || st === "declined" || st === "completed" ? 0.65 : 1,
+                          whiteSpace: "nowrap",
+                        }}
+                        title="Decline this offer"
+                      >
+                        Decline
+                      </button>
 
-                        <button
-                          onClick={() => startChatWithHelper(o)}
-                          disabled={acting || st !== "accepted"}
-                          style={{
-                            ...outlineBtn,
-                            marginTop: 0,
-                            border: st === "accepted" ? "1px solid rgba(22,163,74,0.55)" : "1px solid #334155",
-                            background: st === "accepted" ? "rgba(22,163,74,0.14)" : "transparent",
-                            cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
-                            opacity: acting || st !== "accepted" ? 0.65 : 1,
-                            whiteSpace: "nowrap",
-                          }}
-                          title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
-                        >
-                          {acting ? "Opening…" : "Start chat"}
-                        </button>
-                      </div>
+                      <button
+                        onClick={() => startChatWithHelper(o)}
+                        disabled={acting || st !== "accepted"}
+                        style={{
+                          ...outlineBtn,
+                          marginTop: 0,
+                          border: st === "accepted" ? "1px solid rgba(22,163,74,0.55)" : "1px solid #334155",
+                          background: st === "accepted" ? "rgba(22,163,74,0.14)" : "transparent",
+                          cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
+                          opacity: acting || st !== "accepted" ? 0.65 : 1,
+                          whiteSpace: "nowrap",
+                        }}
+                        title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
+                      >
+                        {acting ? "Opening…" : "Start chat"}
+                      </button>
                     </div>
                   </div>
                 );
@@ -1264,12 +1366,14 @@ export default function AccountPage() {
       {tab === "history" && (
         <>
           <div style={{ marginTop: 14 }}>
-            <div style={{ fontWeight: 1000, fontSize: 20 }}>Completed listings</div>
-            <div style={{ opacity: 0.75, marginTop: 6 }}>These were picked up (claimed). No actions needed.</div>
+            <div style={{ fontWeight: 1000, fontSize: 20 }}>Completed posts</div>
+            <div style={{ opacity: 0.75, marginTop: 6 }}>
+              Picked up / completed posts. No actions needed.
+            </div>
           </div>
 
           {completedListings.length === 0 ? (
-            <EmptyBox title="No completed listings yet." body="When a pickup is marked, it will move here." />
+            <EmptyBox title="No completed posts yet." body="When something is marked claimed, it will move here." />
           ) : (
             <CardRail>
               {completedListings.map((item) => (
@@ -1282,7 +1386,10 @@ export default function AccountPage() {
 
       {/* Drawer */}
       {drawerOpen && (
-        <div onClick={() => setDrawerOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 9998 }}>
+        <div
+          onClick={() => setDrawerOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 9998 }}
+        >
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
@@ -1296,7 +1403,15 @@ export default function AccountPage() {
               overflow: "hidden",
             }}
           >
-            <div style={{ padding: 14, borderBottom: "1px solid #0f223f", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div
+              style={{
+                padding: 14,
+                borderBottom: "1px solid #0f223f",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
               <div style={{ fontWeight: 1000 }}>Menu</div>
               <button onClick={() => setDrawerOpen(false)} style={smallCloseBtn}>
                 ✕
@@ -1339,13 +1454,29 @@ export default function AccountPage() {
 
 function CardRail({ children }: { children: React.ReactNode }) {
   return (
-    <div>
-      <div style={railMobile}>{children}</div>
-      <div style={gridDesktop}>{children}</div>
+    <div className="cardRail">
+      {children}
+
       <style jsx>{`
+        .cardRail {
+          margin-top: 12px;
+          display: flex;
+          gap: 12px;
+          overflow-x: auto;
+          padding-bottom: 10px;
+          -webkit-overflow-scrolling: touch;
+        }
+        .cardRail::-webkit-scrollbar {
+          display: none;
+        }
+
         @media (min-width: 900px) {
-          div[style*="display: none"] {
-            display: grid !important;
+          .cardRail {
+            overflow-x: visible;
+            padding-bottom: 0;
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
           }
         }
       `}</style>
@@ -1369,7 +1500,7 @@ function ItemCard({
   deleting?: boolean;
 }) {
   const status = item.status ?? "—";
-  const type = (item.post_type ?? "give") as "give" | "request";
+  const type = (item.post_type ?? "give") as PostType;
 
   return (
     <div style={card}>
@@ -1423,7 +1554,15 @@ function Thumb({ photoUrl, label }: { photoUrl: string | null; label: string }) 
   );
 }
 
-function EmptyBox({ title, body, children }: { title: string; body: string; children?: React.ReactNode }) {
+function EmptyBox({
+  title,
+  body,
+  children,
+}: {
+  title: string;
+  body: string;
+  children?: React.ReactNode;
+}) {
   return (
     <div style={{ marginTop: 14, ...panel }}>
       <div style={{ fontWeight: 1000 }}>{title}</div>
@@ -1543,7 +1682,7 @@ const dot: React.CSSProperties = {
   borderRadius: 999,
   background: "#ef4444",
   marginLeft: 8,
-  boxShadow: "0 0 0 3px rgba(239,68,68,0.20)",
+  boxShadow: "0 0 0 3px rgba(239, 68, 68, 0.2)",
 };
 
 const sectionHint: React.CSSProperties = {
@@ -1552,28 +1691,13 @@ const sectionHint: React.CSSProperties = {
   fontSize: 13,
 };
 
-const railMobile: React.CSSProperties = {
-  marginTop: 12,
-  display: "flex",
-  gap: 12,
-  overflowX: "auto",
-  paddingBottom: 10,
-  WebkitOverflowScrolling: "touch",
-};
-
-const gridDesktop: React.CSSProperties = {
-  marginTop: 12,
-  display: "none",
-  gap: 12,
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-};
-
 const card: React.CSSProperties = {
   background: "#0b1730",
   padding: 14,
   borderRadius: 16,
   border: "1px solid #0f223f",
-  width: 280,
+  width: "100%",
+  maxWidth: 340,
   flex: "0 0 auto",
 };
 
