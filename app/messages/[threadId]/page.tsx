@@ -5,41 +5,64 @@ export const dynamic = "force-dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { insertSystemMessage } from "@/lib/ensureThread"; // ✅ helper you referenced
 
 type ProfileRow = {
   id: string;
   full_name: string | null;
-  user_role: string | null; // "student" | "faculty" (in your DB it's text)
+  user_role: string | null;
+};
+
+type ThreadRow = {
+  id: string;
+  item_id: string | null;
+  owner_id?: string | null;
+  requester_id?: string | null;
+  created_at?: string;
 };
 
 type ItemRow = {
   id: string;
   title: string;
   photo_url: string | null;
-  status: string | null;
+  status?: string | null;
+  owner_id: string | null;
 };
 
-type ThreadRow = {
+type MyInterestRow = {
   id: string;
-  item_id: string;
-  owner_id: string;
-  requester_id: string;
-  created_at: string;
-  items: ItemRow | null; // joined
+  status: string | null;
 };
 
 type MessageRow = {
   id: string;
   thread_id: string;
-  sender_id: string;
+  sender_id: string | null;
   body: string;
   created_at: string;
+  is_system?: boolean | null;
 };
+
+function pillStyle() {
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "8px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(148,163,184,0.20)",
+    background: "rgba(255,255,255,0.04)",
+    color: "rgba(255,255,255,0.88)",
+    fontSize: 13,
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+  } as const;
+}
 
 export default function ThreadPage() {
   const router = useRouter();
   const params = useParams();
-  const threadId = params?.threadId as string;
+  const threadId = (params?.threadId as string) || "";
 
   // auth
   const [userId, setUserId] = useState<string | null>(null);
@@ -47,6 +70,8 @@ export default function ThreadPage() {
 
   // data
   const [thread, setThread] = useState<ThreadRow | null>(null);
+  const [item, setItem] = useState<ItemRow | null>(null);
+  const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
   const [otherProfile, setOtherProfile] = useState<ProfileRow | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
 
@@ -55,12 +80,16 @@ export default function ThreadPage() {
   const [err, setErr] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const isAshland = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
+
+  const myStatus = (myInterest?.status ?? "").toLowerCase();
+  const canConfirm = myStatus === "accepted"; // ✅ show CTA only when seller accepted
 
   function scrollToBottom() {
     requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
@@ -73,11 +102,110 @@ export default function ThreadPage() {
     setUserEmail(session?.user?.email ?? null);
   }
 
+  async function loadThreadAndItem(uid: string) {
+    if (!threadId) return;
+
+    setErr(null);
+
+    // ✅ thread (keep it safe: assume at least id,item_id)
+    // If your column is different (ex: listing_id), rename it here.
+    const { data: th, error: thErr } = await supabase
+      .from("threads")
+      .select("id,item_id,owner_id,requester_id,created_at")
+      .eq("id", threadId)
+      .single();
+
+    if (thErr) throw new Error(thErr.message || "Error loading thread.");
+
+    const threadRow = th as ThreadRow;
+    setThread(threadRow);
+
+    // ✅ item
+    if (threadRow.item_id) {
+      const { data: it, error: itErr } = await supabase
+        .from("items")
+        .select("id,title,photo_url,status,owner_id")
+        .eq("id", threadRow.item_id)
+        .single();
+
+      if (!itErr && it) {
+        setItem(it as ItemRow);
+
+        // ✅ load OTHER profile if possible (owner vs requester)
+        // If threads doesn’t have owner_id/requester_id, we’ll just skip.
+        const ownerId = (threadRow.owner_id ?? (it as any).owner_id ?? null) as string | null;
+        const requesterId = (threadRow.requester_id ?? null) as string | null;
+
+        const otherId =
+          ownerId && requesterId
+            ? ownerId === uid
+              ? requesterId
+              : ownerId
+            : null;
+
+        if (otherId) {
+          const { data: pData, error: pErr } = await supabase
+            .from("profiles")
+            .select("id,full_name,user_role")
+            .eq("id", otherId)
+            .single();
+
+          if (!pErr && pData) setOtherProfile(pData as ProfileRow);
+          else setOtherProfile(null);
+        } else {
+          setOtherProfile(null);
+        }
+      } else {
+        setItem(null);
+        setOtherProfile(null);
+      }
+    } else {
+      setItem(null);
+      setOtherProfile(null);
+    }
+  }
+
+  async function loadMyInterest(uid: string, itemId: string | null) {
+    if (!uid || !itemId) {
+      setMyInterest(null);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("interests")
+      .select("id,status")
+      .eq("item_id", itemId)
+      .eq("user_id", uid)
+      .maybeSingle();
+
+    if (!error && data) {
+      setMyInterest({ id: (data as any).id, status: (data as any).status ?? null });
+    } else {
+      setMyInterest(null);
+    }
+  }
+
+  async function loadMessages() {
+    if (!threadId) return;
+
+    const { data, error } = await supabase
+      .from("messages")
+      .select("id,thread_id,sender_id,body,created_at,is_system")
+      .eq("thread_id", threadId)
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      setMessages([]);
+      throw new Error(error.message || "Error loading messages.");
+    }
+
+    setMessages((data as MessageRow[]) || []);
+  }
+
   async function loadAll() {
     setLoading(true);
     setErr(null);
 
-    // Must have session
     const { data: s } = await supabase.auth.getSession();
     const uid = s.session?.user?.id ?? null;
     const email = s.session?.user?.email ?? null;
@@ -87,60 +215,21 @@ export default function ThreadPage() {
       return;
     }
 
-    // 1) load thread + joined item
-    const { data: tData, error: tErr } = await supabase
-      .from("threads")
-      .select("id,item_id,owner_id,requester_id,created_at, items:items(id,title,photo_url,status)")
-      .eq("id", threadId)
-      .single();
-
-    if (tErr) {
-      setErr(tErr.message || "Error loading conversation.");
+    try {
+      await loadThreadAndItem(uid);
+      await loadMyInterest(uid, (thread?.item_id ?? null) as any); // thread state may not be set yet
+      await loadMessages();
+      setLoading(false);
+      setTimeout(scrollToBottom, 50);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to load conversation.");
       setThread(null);
+      setItem(null);
+      setMyInterest(null);
       setOtherProfile(null);
       setMessages([]);
       setLoading(false);
-      return;
     }
-
-    const t = tData as unknown as ThreadRow;
-    setThread(t);
-
-    // 2) load the OTHER person profile
-    const otherId = t.owner_id === uid ? t.requester_id : t.owner_id;
-
-    const { data: pData, error: pErr } = await supabase
-      .from("profiles")
-      .select("id,full_name,user_role")
-      .eq("id", otherId)
-      .single();
-
-    if (pErr) {
-      // don't hard fail chat if profile missing
-      setOtherProfile(null);
-    } else {
-      setOtherProfile(pData as ProfileRow);
-    }
-
-    // 3) load messages
-    const { data: mData, error: mErr } = await supabase
-      .from("messages")
-      .select("id,thread_id,sender_id,body,created_at")
-      .eq("thread_id", threadId)
-      .order("created_at", { ascending: true });
-
-    if (mErr) {
-      setErr(mErr.message || "Error loading messages.");
-      setMessages([]);
-      setLoading(false);
-      return;
-    }
-
-    setMessages((mData as MessageRow[]) || []);
-    setLoading(false);
-
-    // Scroll to bottom after initial load
-    setTimeout(scrollToBottom, 50);
   }
 
   async function sendMessage() {
@@ -148,18 +237,16 @@ export default function ThreadPage() {
       router.push("/me");
       return;
     }
-    if (!thread) return;
-
     const body = text.trim();
     if (!body) return;
 
     setSending(true);
     setErr(null);
 
-    // optimistic
+    // optimistic insert
     const temp: MessageRow = {
       id: `temp-${Date.now()}`,
-      thread_id: thread.id,
+      thread_id: threadId,
       sender_id: userId,
       body,
       created_at: new Date().toISOString(),
@@ -171,26 +258,56 @@ export default function ThreadPage() {
 
     const { data, error } = await supabase
       .from("messages")
-      .insert([{ thread_id: thread.id, sender_id: userId, body }])
-      .select("id,thread_id,sender_id,body,created_at")
+      .insert([{ thread_id: threadId, sender_id: userId, body }])
+      .select("id,thread_id,sender_id,body,created_at,is_system")
       .single();
 
     setSending(false);
 
     if (error) {
-      // remove optimistic
       setMessages((prev) => prev.filter((x) => x.id !== temp.id));
       setErr(error.message);
       return;
     }
 
-    // replace temp with real row
     const real = data as MessageRow;
     setMessages((prev) => prev.map((x) => (x.id === temp.id ? real : x)));
     scrollToBottom();
   }
 
-  // realtime (optional but nice)
+  // ✅ confirm pickup inside chat (only when accepted)
+  async function confirmPickupFromChat() {
+    if (!isAshland || !userId) return router.push("/me");
+    if (!thread?.item_id || !myInterest?.id) return;
+    if (!canConfirm) return;
+
+    setActionBusy(true);
+    setErr(null);
+
+    try {
+      // 1) reserve atomically (your SQL RPC)
+      const { error: rpcErr } = await supabase.rpc("confirm_pickup", { p_interest_id: myInterest.id });
+      if (rpcErr) throw new Error(rpcErr.message);
+
+      // 2) system message in this thread
+      await insertSystemMessage({
+        threadId,
+        senderId: userId,
+        body: "✅ Buyer confirmed pickup. Let’s coordinate a time and place here.",
+      });
+
+      // 3) refresh
+      await loadMyInterest(userId, thread.item_id);
+      await loadMessages();
+      scrollToBottom();
+    } catch (e: any) {
+      setErr(e?.message || "Could not confirm pickup.");
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  // realtime: INSERT messages
   useEffect(() => {
     if (!threadId) return;
 
@@ -202,9 +319,10 @@ export default function ThreadPage() {
         (payload) => {
           const row = payload.new as MessageRow;
           setMessages((prev) => {
-            // avoid dupes if we already inserted/received it
             if (prev.some((m) => m.id === row.id)) return prev;
-            return [...prev, row].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+            return [...prev, row].sort(
+              (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+            );
           });
           scrollToBottom();
         }
@@ -231,19 +349,33 @@ export default function ThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
+  // after thread/item loads, refresh interest status (so CTA appears immediately)
+  useEffect(() => {
+    (async () => {
+      if (!userId || !thread?.item_id) return;
+      await loadMyInterest(userId, thread.item_id);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, thread?.item_id]);
+
   if (!isAshland) {
-    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Checking access…</div>;
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+        Checking access…
+      </div>
+    );
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24, paddingBottom: 120 }}>
+    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 18, paddingBottom: 120 }}>
       <button
         onClick={() => router.push("/messages")}
         style={{
-          border: "1px solid #334155",
+          marginBottom: 14,
           background: "transparent",
           color: "white",
-          padding: "10px 12px",
+          border: "1px solid rgba(148,163,184,0.25)",
+          padding: "8px 12px",
           borderRadius: 12,
           cursor: "pointer",
           fontWeight: 900,
@@ -252,126 +384,159 @@ export default function ThreadPage() {
         ← Back
       </button>
 
-      <h1 style={{ marginTop: 16, fontSize: 28, fontWeight: 900 }}>Conversation</h1>
+      <h1 style={{ marginTop: 8, fontSize: 26, fontWeight: 950 }}>Conversation</h1>
 
-      {err && <p style={{ color: "#f87171", marginTop: 10 }}>{err}</p>}
-      {loading && <p style={{ opacity: 0.8, marginTop: 10 }}>Loading…</p>}
+      {err && <div style={{ color: "#f87171", marginTop: 10 }}>{err}</div>}
+      {loading && <div style={{ opacity: 0.8, marginTop: 10 }}>Loading…</div>}
 
-      {/* Sticky context header */}
-      {!loading && thread && (
+      {/* header card */}
+      {!loading && item && (
         <div
           style={{
-            position: "sticky",
-            top: 0,
-            zIndex: 10,
-            background: "black",
-            paddingTop: 8,
-            paddingBottom: 12,
-            borderBottom: "1px solid #0f223f",
-            marginBottom: 14,
+            marginTop: 12,
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(148,163,184,0.15)",
+            borderRadius: 18,
+            padding: 14,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
           }}
         >
           <div
             style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-              padding: 14,
-              borderRadius: 14,
-              background: "#0b1730",
-              border: "1px solid #0f223f",
+              width: 52,
+              height: 52,
+              borderRadius: 12,
+              overflow: "hidden",
+              border: "1px solid rgba(148,163,184,0.18)",
+              background: "rgba(255,255,255,0.03)",
+              flexShrink: 0,
             }}
           >
-            {thread.items?.photo_url ? (
+            {item.photo_url ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={thread.items.photo_url}
-                alt={thread.items.title}
-                style={{
-                  width: 56,
-                  height: 56,
-                  borderRadius: 12,
-                  objectFit: "cover",
-                  border: "1px solid #0f223f",
-                  flexShrink: 0,
-                }}
-              />
-            ) : (
-              <div
-                style={{
-                  width: 56,
-                  height: 56,
-                  borderRadius: 12,
-                  border: "1px dashed #334155",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "#94a3b8",
-                  fontSize: 12,
-                  flexShrink: 0,
-                }}
-              >
-                No photo
-              </div>
-            )}
+              <img src={item.photo_url} alt={item.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            ) : null}
+          </div>
 
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontWeight: 900, fontSize: 18, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {thread.items?.title || "Listing"}
-              </div>
-
-              <div style={{ opacity: 0.85, marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                Talking with: <b>{otherProfile?.full_name || "Campus user"}</b>{" "}
-                <span style={{ opacity: 0.7 }}>• {otherProfile?.user_role || "student"}</span>
-              </div>
-
-              <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  onClick={() => router.push(`/item/${thread.item_id}`)}
-                  style={{
-                    border: "1px solid #334155",
-                    background: "transparent",
-                    color: "white",
-                    padding: "8px 10px",
-                    borderRadius: 10,
-                    cursor: "pointer",
-                    fontWeight: 900,
-                  }}
-                >
-                  View item
-                </button>
-              </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 950, fontSize: 18, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {item.title}
             </div>
+
+            <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <span style={pillStyle()}>Thread: {threadId.slice(0, 8)}…</span>
+              {myInterest?.status ? <span style={pillStyle()}>Status: {myInterest.status}</span> : null}
+              {otherProfile?.full_name ? (
+                <span style={pillStyle()}>
+                  Talking with: {otherProfile.full_name}
+                  <span style={{ opacity: 0.75 }}>• {otherProfile.user_role || "student"}</span>
+                </span>
+              ) : null}
+            </div>
+          </div>
+
+          <button
+            onClick={() => router.push(`/item/${item.id}`)}
+            style={{
+              background: "transparent",
+              border: "1px solid rgba(148,163,184,0.22)",
+              color: "white",
+              padding: "10px 12px",
+              borderRadius: 12,
+              cursor: "pointer",
+              fontWeight: 950,
+              whiteSpace: "nowrap",
+            }}
+          >
+            View item
+          </button>
+        </div>
+      )}
+
+      {/* ✅ Confirm CTA inside chat */}
+      {!loading && item && canConfirm && (
+        <div
+          style={{
+            marginTop: 12,
+            borderRadius: 16,
+            border: "1px solid rgba(52,211,153,0.22)",
+            background: "rgba(16,185,129,0.10)",
+            padding: 12,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+          }}
+        >
+          <div style={{ fontWeight: 950 }}>
+            Seller accepted. <span style={{ opacity: 0.85 }}>Confirm pickup to start coordinating here.</span>
+          </div>
+
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <button
+              onClick={confirmPickupFromChat}
+              disabled={actionBusy}
+              style={{
+                background: "rgba(20,83,45,1)",
+                border: "1px solid rgba(22,101,52,1)",
+                color: "white",
+                padding: "10px 12px",
+                borderRadius: 12,
+                cursor: actionBusy ? "not-allowed" : "pointer",
+                fontWeight: 950,
+                opacity: actionBusy ? 0.8 : 1,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {actionBusy ? "Confirming…" : "Confirm pickup ✅"}
+            </button>
+
+            <button
+              onClick={() => router.push(`/item/${item.id}`)}
+              style={{
+                background: "transparent",
+                border: "1px solid rgba(148,163,184,0.22)",
+                color: "white",
+                padding: "10px 12px",
+                borderRadius: 12,
+                cursor: "pointer",
+                fontWeight: 950,
+                whiteSpace: "nowrap",
+              }}
+            >
+              Or view item
+            </button>
           </div>
         </div>
       )}
 
-      {/* Messages */}
-      <div style={{ marginTop: 12 }}>
+      {/* messages */}
+      <div style={{ marginTop: 14 }}>
         {messages.map((m) => {
-          const isMe = !!userId && m.sender_id === userId;
+          const mine = !!userId && m.sender_id === userId;
           const time = new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
           return (
-            <div key={m.id} style={{ display: "flex", justifyContent: isMe ? "flex-end" : "flex-start", marginTop: 10 }}>
+            <div key={m.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginTop: 10 }}>
               <div
                 style={{
                   maxWidth: "min(640px, 78vw)",
                   padding: "10px 12px",
                   borderRadius: 16,
-                  borderTopRightRadius: isMe ? 6 : 16,
-                  borderTopLeftRadius: isMe ? 16 : 6,
-                  background: isMe ? "rgba(22,163,74,0.25)" : "#0b1730",
-                  border: "1px solid #0f223f",
+                  borderTopRightRadius: mine ? 6 : 16,
+                  borderTopLeftRadius: mine ? 16 : 6,
+                  background: mine ? "rgba(22,163,74,0.25)" : "rgba(255,255,255,0.04)",
+                  border: "1px solid rgba(148,163,184,0.18)",
                   color: "white",
                   whiteSpace: "pre-wrap",
                   wordBreak: "break-word",
-                  fontWeight: 600,
+                  fontWeight: 650,
                 }}
               >
-                <div style={{ opacity: 0.95 }}>{m.body}</div>
-                <div style={{ opacity: 0.55, fontSize: 12, marginTop: 6, textAlign: "right" }}>{time}</div>
+                <div style={{ opacity: 0.98 }}>{m.body}</div>
+                <div style={{ opacity: 0.6, fontSize: 12, marginTop: 6, textAlign: "right" }}>{time}</div>
               </div>
             </div>
           );
@@ -379,7 +544,7 @@ export default function ThreadPage() {
         <div ref={bottomRef} />
       </div>
 
-      {/* Composer */}
+      {/* composer */}
       <div style={{ marginTop: 16, display: "flex", gap: 10, alignItems: "center" }}>
         <input
           value={text}
@@ -395,8 +560,8 @@ export default function ThreadPage() {
             flex: 1,
             height: 48,
             borderRadius: 12,
-            border: "1px solid #0f223f",
-            background: "#0b1730",
+            border: "1px solid rgba(148,163,184,0.18)",
+            background: "rgba(255,255,255,0.04)",
             color: "white",
             padding: "0 12px",
             outline: "none",
@@ -405,17 +570,17 @@ export default function ThreadPage() {
 
         <button
           onClick={sendMessage}
-          disabled={sending}
+          disabled={sending || !text.trim()}
           style={{
             height: 48,
             padding: "0 16px",
             borderRadius: 12,
-            border: "1px solid #16a34a",
-            background: sending ? "rgba(22,163,74,0.25)" : "#052e16",
+            border: "1px solid rgba(16,185,129,0.35)",
+            background: sending ? "rgba(16,185,129,0.10)" : "rgba(16,185,129,0.18)",
             color: "white",
-            cursor: sending ? "not-allowed" : "pointer",
-            fontWeight: 900,
-            opacity: sending ? 0.8 : 1,
+            cursor: sending || !text.trim() ? "not-allowed" : "pointer",
+            fontWeight: 950,
+            opacity: sending || !text.trim() ? 0.65 : 1,
           }}
         >
           {sending ? "Sending…" : "Send"}

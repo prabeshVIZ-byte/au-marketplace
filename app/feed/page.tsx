@@ -1,4 +1,3 @@
-// /app/feed/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -7,7 +6,7 @@ import { supabase } from "@/lib/supabaseClient";
 
 type OwnerRole = "student" | "faculty" | null;
 
-type FeedRow = {
+type FeedRowFromView = {
   id: string;
   title: string;
   description: string | null;
@@ -17,8 +16,18 @@ type FeedRow = {
   photo_url: string | null;
   expires_at: string | null;
   interest_count: number;
-  owner_role?: OwnerRole; // from view
-  owner_id?: string | null; // ✅ MUST be selected from v_feed_items
+  owner_role?: OwnerRole;
+};
+
+type ItemMeta = {
+  id: string;
+  owner_id: string | null;
+  is_claimed: boolean | null;
+};
+
+type FeedRow = FeedRowFromView & {
+  owner_id?: string | null;
+  is_claimed?: boolean | null;
 };
 
 function formatExpiry(expiresAt: string | null) {
@@ -41,18 +50,9 @@ function formatExpiry(expiresAt: string | null) {
   return end.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function isAvailableNow(row: FeedRow) {
-  const st = (row.status ?? "available").toLowerCase();
-  if (st !== "available") return false;
-  if (!row.expires_at) return true;
-  const t = new Date(row.expires_at).getTime();
-  if (Number.isNaN(t)) return true;
-  return t > Date.now();
-}
-
 function statusBadge(status: string | null) {
   const st = (status ?? "available").toLowerCase();
-  const base: React.CSSProperties = {
+  const base = {
     padding: "6px 10px",
     borderRadius: 999,
     fontSize: 12,
@@ -60,7 +60,7 @@ function statusBadge(status: string | null) {
     border: "1px solid rgba(148,163,184,0.25)",
     background: "rgba(0,0,0,0.35)",
     color: "rgba(255,255,255,0.82)",
-  };
+  } as const;
 
   if (st === "reserved") {
     return {
@@ -76,6 +76,14 @@ function statusBadge(status: string | null) {
       border: "1px solid rgba(52,211,153,0.35)",
       background: "rgba(16,185,129,0.14)",
       color: "rgba(209,250,229,0.95)",
+    };
+  }
+  if (st === "claimed") {
+    return {
+      ...base,
+      border: "1px solid rgba(248,113,113,0.35)",
+      background: "rgba(239,68,68,0.12)",
+      color: "rgba(254,202,202,0.95)",
     };
   }
   if (st === "expired") {
@@ -99,7 +107,6 @@ export default function FeedPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // Requested map (interests table)
   const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
 
@@ -110,11 +117,6 @@ export default function FeedPage() {
   // filters
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
-  const [availabilityFilter, setAvailabilityFilter] = useState<"all" | "available" | "expiring_3d">("all");
-
-  const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-  }, [userId, userEmail]);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
@@ -123,15 +125,11 @@ export default function FeedPage() {
     setUserEmail(session?.user?.email ?? null);
   }
 
+  const isLoggedIn = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+
   async function loadMyInterestMap(uid: string, itemIds: string[]) {
     if (itemIds.length === 0) return;
-
-    const { data, error } = await supabase
-      .from("interests")
-      .select("item_id")
-      .eq("user_id", uid)
-      .in("item_id", itemIds);
-
+    const { data, error } = await supabase.from("interests").select("item_id").eq("user_id", uid).in("item_id", itemIds);
     if (error) return;
 
     const map: Record<string, boolean> = {};
@@ -139,15 +137,23 @@ export default function FeedPage() {
     setMyInterested(map);
   }
 
+  async function loadOwnerMeta(itemIds: string[]) {
+    if (itemIds.length === 0) return new Map<string, ItemMeta>();
+    const { data, error } = await supabase.from("items").select("id,owner_id,is_claimed").in("id", itemIds);
+    if (error) return new Map<string, ItemMeta>();
+
+    const m = new Map<string, ItemMeta>();
+    for (const r of (data as ItemMeta[]) || []) m.set(r.id, r);
+    return m;
+  }
+
   async function loadFeed() {
     setLoading(true);
     setErr(null);
 
-    // ✅ IMPORTANT: owner_id must exist in v_feed_items and be selected
     const { data, error } = await supabase
       .from("v_feed_items")
-      .select("id,title,description,category,status,created_at,photo_url,expires_at,owner_role,interest_count,owner_id")
-      .neq("status", "claimed")
+      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -158,14 +164,31 @@ export default function FeedPage() {
       return;
     }
 
-    const rows = (data as FeedRow[]) || [];
-    setItems(rows);
+    const rows = ((data as FeedRowFromView[]) || []).map((x) => ({ ...x })) as FeedRow[];
+    const ids = rows.map((x) => x.id);
+
+    // pull owner_id + is_claimed from real table (NOT the view)
+    const meta = await loadOwnerMeta(ids);
+    const merged = rows.map((x) => {
+      const m = meta.get(x.id);
+      return {
+        ...x,
+        owner_id: m?.owner_id ?? null,
+        is_claimed: m?.is_claimed ?? null,
+      };
+    });
+
+    // ✅ Hide claimed items (either status or is_claimed)
+    const visible = merged.filter((x) => {
+      const st = (x.status ?? "available").toLowerCase();
+      const claimed = !!x.is_claimed || st === "claimed";
+      return !claimed;
+    });
+
+    setItems(visible);
 
     if (isLoggedIn && userId) {
-      await loadMyInterestMap(
-        userId,
-        rows.map((x) => x.id)
-      );
+      await loadMyInterestMap(userId, visible.map((x) => x.id));
     } else {
       setMyInterested({});
     }
@@ -173,42 +196,45 @@ export default function FeedPage() {
     setLoading(false);
   }
 
-  async function toggleRequest(itemId: string) {
+  async function toggleRequest(item: FeedRow) {
     if (!isLoggedIn || !userId) {
       router.push("/me");
       return;
     }
 
-    const already = myInterested[itemId] === true;
-    setSavingId(itemId);
+    // ✅ block if it's your own listing
+    const isMineListing = !!item.owner_id && item.owner_id === userId;
+    if (isMineListing) return;
+
+    const already = myInterested[item.id] === true;
+    setSavingId(item.id);
 
     if (already) {
-      const { error } = await supabase.from("interests").delete().eq("item_id", itemId).eq("user_id", userId);
+      const { error } = await supabase.from("interests").delete().eq("item_id", item.id).eq("user_id", userId);
       setSavingId(null);
-
       if (error) return alert(error.message);
 
-      setMyInterested((p) => ({ ...p, [itemId]: false }));
+      setMyInterested((p) => ({ ...p, [item.id]: false }));
       setItems((prev) =>
-        prev.map((x) => (x.id === itemId ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) } : x))
+        prev.map((x) => (x.id === item.id ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) } : x))
       );
       return;
     }
 
-    const { error } = await supabase.from("interests").insert([{ item_id: itemId, user_id: userId }]);
+    const { error } = await supabase.from("interests").insert([{ item_id: item.id, user_id: userId }]);
     setSavingId(null);
 
     if (error) {
       const msg = error.message.toLowerCase();
       if (msg.includes("duplicate") || msg.includes("unique")) {
-        setMyInterested((p) => ({ ...p, [itemId]: true }));
+        setMyInterested((p) => ({ ...p, [item.id]: true }));
         return;
       }
       return alert(error.message);
     }
 
-    setMyInterested((p) => ({ ...p, [itemId]: true }));
-    setItems((prev) => prev.map((x) => (x.id === itemId ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
+    setMyInterested((p) => ({ ...p, [item.id]: true }));
+    setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
   }
 
   useEffect(() => {
@@ -244,9 +270,6 @@ export default function FeedPage() {
   }, [items]);
 
   const filteredItems = useMemo(() => {
-    const now = Date.now();
-    const threeDays = 3 * 24 * 60 * 60 * 1000;
-
     return items.filter((x) => {
       if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
 
@@ -256,21 +279,9 @@ export default function FeedPage() {
         if (r !== roleFilter) return false;
       }
 
-      if (availabilityFilter === "available") {
-        if (!isAvailableNow(x)) return false;
-      }
-
-      if (availabilityFilter === "expiring_3d") {
-        if (!isAvailableNow(x)) return false;
-        if (!x.expires_at) return false;
-        const t = new Date(x.expires_at).getTime();
-        if (Number.isNaN(t)) return false;
-        if (t - now > threeDays) return false;
-      }
-
       return true;
     });
-  }, [items, categoryFilter, roleFilter, availabilityFilter]);
+  }, [items, categoryFilter, roleFilter]);
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -278,17 +289,13 @@ export default function FeedPage() {
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
         <div>
           <h1 style={{ fontSize: 34, fontWeight: 900, margin: 0, letterSpacing: -0.2 }}>AU Zero Marketplace</h1>
-          <p style={{ marginTop: 10, opacity: 0.78, maxWidth: 760 }}>
-            Browse publicly. Login with <b>@ashland.edu</b> to list or request items.
-          </p>
-
           <div style={{ marginTop: 10, opacity: 0.78 }}>
             {isLoggedIn ? (
               <span>
                 Logged in as <b>{userEmail}</b>
               </span>
             ) : (
-              <span>Not logged in — browse only.</span>
+              <span>Browse publicly. Login with <b>@ashland.edu</b> to list or request.</span>
             )}
           </div>
         </div>
@@ -307,7 +314,7 @@ export default function FeedPage() {
             height: 44,
           }}
         >
-          {isLoggedIn ? "My listings" : "Request Access"}
+          {isLoggedIn ? "My listings" : "Account"}
         </button>
       </div>
 
@@ -339,16 +346,7 @@ export default function FeedPage() {
           </select>
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            overflowX: "auto",
-            paddingBottom: 6,
-            WebkitOverflowScrolling: "touch",
-            flex: "1 1 auto",
-          }}
-        >
+        <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 6, WebkitOverflowScrolling: "touch", flex: "1 1 auto" }}>
           {categories.map((c) => {
             const active = categoryFilter === c;
             const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
@@ -381,7 +379,6 @@ export default function FeedPage() {
           onClick={() => {
             setCategoryFilter("all");
             setRoleFilter("all");
-            setAvailabilityFilter("all");
           }}
           style={{
             borderRadius: 12,
@@ -401,25 +398,15 @@ export default function FeedPage() {
       <div style={{ marginTop: 16, display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
         <h2 style={{ margin: 0, fontSize: 18, fontWeight: 900, opacity: 0.92 }}>Public Feed</h2>
         <div style={{ opacity: 0.75 }}>
-          Showing <b>{filteredItems.length}</b> of <b>{items.length}</b>
+          Showing <b>{filteredItems.length}</b>
         </div>
       </div>
 
       {/* cards */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(270px, 1fr))",
-          gap: 18,
-          marginTop: 14,
-          paddingBottom: 90,
-        }}
-      >
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(270px, 1fr))", gap: 18, marginTop: 14, paddingBottom: 90 }}>
         {filteredItems.map((item) => {
-          const mine = myInterested[item.id] === true;
+          const mineRequested = myInterested[item.id] === true;
           const expiryText = formatExpiry(item.expires_at);
-
-          // ✅ block requesting your own listing
           const isMineListing = !!userId && !!item.owner_id && item.owner_id === userId;
 
           return (
@@ -434,13 +421,7 @@ export default function FeedPage() {
               }}
             >
               {/* image */}
-              <div
-                style={{
-                  position: "relative",
-                  height: 220,
-                  background: "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))",
-                }}
-              >
+              <div style={{ position: "relative", height: 220, background: "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))" }}>
                 {item.photo_url ? (
                   <button
                     type="button"
@@ -448,43 +429,19 @@ export default function FeedPage() {
                       setOpenImg(item.photo_url!);
                       setOpenTitle(item.title);
                     }}
-                    style={{
-                      padding: 0,
-                      border: "none",
-                      background: "transparent",
-                      cursor: "pointer",
-                      width: "100%",
-                      height: "100%",
-                    }}
+                    style={{ padding: 0, border: "none", background: "transparent", cursor: "pointer", width: "100%", height: "100%" }}
                     aria-label="Open photo"
                     title="Open photo"
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={item.photo_url}
-                      alt={item.title}
-                      loading="lazy"
-                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                    />
+                    <img src={item.photo_url} alt={item.title} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
                   </button>
                 ) : (
-                  <div
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      color: "rgba(255,255,255,0.45)",
-                      borderTop: "1px solid rgba(148,163,184,0.08)",
-                      borderBottom: "1px solid rgba(148,163,184,0.08)",
-                    }}
-                  >
+                  <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,0.45)" }}>
                     No photo
                   </div>
                 )}
 
-                {/* badge */}
                 <div style={{ position: "absolute", top: 12, left: 12 }}>
                   <span style={statusBadge(item.status)}>{(item.status ?? "available").toLowerCase()}</span>
                 </div>
@@ -521,7 +478,6 @@ export default function FeedPage() {
 
                 <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13 }}>{item.interest_count || 0} requests</div>
 
-                {/* actions */}
                 <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   <button
                     onClick={() => router.push(`/item/${item.id}`)}
@@ -540,10 +496,7 @@ export default function FeedPage() {
                   </button>
 
                   <button
-                    onClick={() => {
-                      if (isMineListing) return;
-                      toggleRequest(item.id);
-                    }}
+                    onClick={() => toggleRequest(item)}
                     disabled={savingId === item.id || isMineListing}
                     style={{
                       width: "100%",
@@ -551,7 +504,7 @@ export default function FeedPage() {
                       background: isMineListing
                         ? "rgba(255,255,255,0.03)"
                         : isLoggedIn
-                        ? mine
+                        ? mineRequested
                           ? "rgba(16,185,129,0.16)"
                           : "rgba(16,185,129,0.24)"
                         : "rgba(255,255,255,0.03)",
@@ -560,7 +513,7 @@ export default function FeedPage() {
                       borderRadius: 14,
                       cursor: savingId === item.id || isMineListing ? "not-allowed" : "pointer",
                       fontWeight: 950,
-                      opacity: savingId === item.id || isMineListing ? 0.6 : 1,
+                      opacity: savingId === item.id || isMineListing ? 0.75 : 1,
                     }}
                   >
                     {isMineListing
@@ -568,7 +521,7 @@ export default function FeedPage() {
                       : savingId === item.id
                       ? "Saving…"
                       : isLoggedIn
-                      ? mine
+                      ? mineRequested
                         ? "Requested"
                         : "Request item"
                       : "Request item (login required)"}
@@ -606,18 +559,8 @@ export default function FeedPage() {
               overflow: "hidden",
             }}
           >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "10px 12px",
-                borderBottom: "1px solid rgba(148,163,184,0.15)",
-              }}
-            >
-              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {openTitle || "Photo"}
-              </div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid rgba(148,163,184,0.15)" }}>
+              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{openTitle || "Photo"}</div>
               <button
                 type="button"
                 onClick={() => setOpenImg(null)}
@@ -639,14 +582,7 @@ export default function FeedPage() {
             <img
               src={openImg}
               alt={openTitle || "Full photo"}
-              style={{
-                width: "100%",
-                height: "auto",
-                maxHeight: "80vh",
-                objectFit: "contain",
-                display: "block",
-                background: "black",
-              }}
+              style={{ width: "100%", height: "auto", maxHeight: "80vh", objectFit: "contain", display: "block", background: "black" }}
             />
           </div>
         </div>
