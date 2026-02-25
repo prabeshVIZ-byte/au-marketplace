@@ -147,7 +147,7 @@ export default function FeedPage() {
     const { data, error } = await supabase
       .from("v_feed_items")
       .select("id,title,description,category,status,created_at,photo_url,expires_at,owner_role,interest_count,owner_id")
-      .eq("is_claimed", false)   
+      .neq("status", "claimed")
       .order("created_at", { ascending: false });
 
     if (error) {
