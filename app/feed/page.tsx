@@ -1,14 +1,14 @@
 "use client";
 
 import Image from "next/image";
-import { Grand_Hotel } from "next/font/google";
+import { Space_Grotesk } from "next/font/google";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-const brandFont = Grand_Hotel({
+const uiFont = Space_Grotesk({
   subsets: ["latin"],
-  weight: "400",
+  weight: ["400", "500", "600", "700"],
 });
 
 type OwnerRole = "student" | "faculty" | null;
@@ -63,7 +63,7 @@ function statusBadge(status: string | null) {
     padding: "6px 10px",
     borderRadius: 999,
     fontSize: 12,
-    fontWeight: 900,
+    fontWeight: 800,
     border: "1px solid rgba(148,163,184,0.25)",
     background: "rgba(0,0,0,0.35)",
     color: "rgba(255,255,255,0.82)",
@@ -162,7 +162,9 @@ export default function FeedPage() {
 
     const { data, error } = await supabase
       .from("v_feed_items")
-      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
+      .select(
+        "id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role"
+      )
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -320,65 +322,74 @@ export default function FeedPage() {
     color: "rgba(255,255,255,0.86)",
     padding: "10px 14px",
     cursor: "pointer",
-    fontWeight: 900,
+    fontWeight: 700,
     whiteSpace: "nowrap",
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white" }}>
+    <div className={uiFont.className} style={{ minHeight: "100vh", background: "black", color: "white" }}>
       {/* TOP BAR */}
       <div style={topWrap}>
         <div style={{ ...pagePad, paddingBottom: 10 }}>
-          {/* Header row with perfect center brand */}
+          {/* Perfect centered brand row */}
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "56px 1fr 56px",
+              gridTemplateColumns: "60px 1fr 60px",
               alignItems: "center",
               gap: 12,
             }}
           >
-            {/* Left: logo icon */}
+            {/* Left: logo */}
             <button
-              type="button"
-              onClick={() => router.push("/feed")}
-              aria-label="Home"
-              title="Home"
-              style={{
-                width: 56,
-                height: 56,
-                borderRadius: 16,
-                overflow: "hidden",
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.08)",
-                boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
-                cursor: "pointer",
-                padding: 0,
-              }}
-            >
-              <Image
-                src="/scholarswap-icon.png"
-                alt="ScholarSwap"
-                width={56}
-                height={56}
-                priority
-                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-              />
-            </button>
+  type="button"
+  onClick={() => router.push("/feed")}
+  aria-label="Home"
+  title="Home"
+  style={{
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    overflow: "hidden",
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "white", // ✅ makes logo visible always
+    boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+    cursor: "pointer",
+    padding: 0,
+    display: "grid",
+    placeItems: "center",
+  }}
+>
+  <Image
+    src="/scholarswap-logo.png"
+    alt="ScholarSwap"
+    width={52}
+    height={52}
+    priority
+    style={{
+      width: "100%",
+      height: "100%",
+      objectFit: "contain", // ✅ don't crop logo
+      padding: 6,          // ✅ keep it clean inside badge
+      display: "block",
+    }}
+  />
+</button>
 
-            {/* Center: brand wordmark (Instagram-like font) */}
+            {/* Center brand text */}
             <div style={{ textAlign: "center", lineHeight: 1 }}>
               <div
-                className={brandFont.className}
                 style={{
-                  fontSize: 44,
+                  fontSize: 22,
+                  fontWeight: 700,
                   letterSpacing: 0.2,
-                  transform: "translateY(2px)",
                   color: "rgba(255,255,255,0.96)",
-                  userSelect: "none",
                 }}
               >
                 ScholarSwap
+              </div>
+              <div style={{ marginTop: 4, fontSize: 12, fontWeight: 500, opacity: 0.65 }}>
+                Campus exchange feed
               </div>
             </div>
 
@@ -387,14 +398,14 @@ export default function FeedPage() {
               type="button"
               onClick={() => router.push("/create")}
               style={{
-                width: 56,
-                height: 56,
-                borderRadius: 16,
+                width: 60,
+                height: 60,
+                borderRadius: 18,
                 border: "1px solid rgba(52,211,153,0.25)",
                 background: "rgba(16,185,129,0.16)",
                 color: "rgba(209,250,229,0.95)",
                 cursor: "pointer",
-                fontWeight: 1000,
+                fontWeight: 800,
                 fontSize: 26,
                 display: "grid",
                 placeItems: "center",
@@ -436,7 +447,7 @@ export default function FeedPage() {
                     background: "transparent",
                     border: "none",
                     color: "white",
-                    fontWeight: 950,
+                    fontWeight: 700,
                     cursor: "pointer",
                     outline: "none",
                     padding: "10px 0",
@@ -474,17 +485,9 @@ export default function FeedPage() {
               })}
             </div>
 
-            <div
-              style={{
-                marginTop: 8,
-                display: "flex",
-                alignItems: "baseline",
-                justifyContent: "space-between",
-                gap: 12,
-              }}
-            >
-              <div style={{ fontSize: 14, fontWeight: 900, opacity: 0.9 }}>Public Feed</div>
-              <div style={{ fontSize: 13, opacity: 0.65, fontWeight: 900 }}>
+            <div style={{ marginTop: 8, display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, opacity: 0.9 }}>Public Feed</div>
+              <div style={{ fontSize: 13, opacity: 0.65, fontWeight: 700 }}>
                 Showing <b style={{ opacity: 0.95 }}>{filteredItems.length}</b>
               </div>
             </div>
@@ -514,6 +517,7 @@ export default function FeedPage() {
                   boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
                 }}
               >
+                {/* image */}
                 <div style={{ position: "relative", height: 220, background: "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))" }}>
                   {item.photo_url ? (
                     <button
@@ -540,13 +544,14 @@ export default function FeedPage() {
                   </div>
                 </div>
 
+                {/* body */}
                 <div style={{ padding: 14 }}>
                   <div style={{ fontSize: 12, opacity: 0.72 }}>
                     {item.category ? `Category: ${item.category}` : "Category: —"}
                     {item.owner_role ? ` • Lister: ${item.owner_role}` : ""}
                   </div>
 
-                  <div style={{ marginTop: 8, fontSize: 20, fontWeight: 950, letterSpacing: -0.2 }}>{item.title}</div>
+                  <div style={{ marginTop: 8, fontSize: 20, fontWeight: 800, letterSpacing: -0.2 }}>{item.title}</div>
 
                   <div style={{ marginTop: 8, opacity: 0.7, fontSize: 13 }}>
                     {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}` : "Contributor will de-list themselves"}{" "}
@@ -581,7 +586,7 @@ export default function FeedPage() {
                         padding: "10px 12px",
                         borderRadius: 14,
                         cursor: "pointer",
-                        fontWeight: 900,
+                        fontWeight: 700,
                       }}
                     >
                       View item
@@ -604,7 +609,7 @@ export default function FeedPage() {
                         padding: "10px 12px",
                         borderRadius: 14,
                         cursor: savingId === item.id || isMineListing ? "not-allowed" : "pointer",
-                        fontWeight: 950,
+                        fontWeight: 800,
                         opacity: savingId === item.id || isMineListing ? 0.75 : 1,
                       }}
                     >
@@ -653,7 +658,7 @@ export default function FeedPage() {
             }}
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid rgba(148,163,184,0.15)" }}>
-              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{openTitle || "Photo"}</div>
+              <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{openTitle || "Photo"}</div>
               <button
                 type="button"
                 onClick={() => setOpenImg(null)}
@@ -664,7 +669,7 @@ export default function FeedPage() {
                   padding: "6px 10px",
                   borderRadius: 12,
                   cursor: "pointer",
-                  fontWeight: 950,
+                  fontWeight: 800,
                 }}
               >
                 ✕
