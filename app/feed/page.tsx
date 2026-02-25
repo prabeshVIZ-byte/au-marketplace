@@ -12,6 +12,7 @@ const brandFont = Outfit({
 });
 
 type OwnerRole = "student" | "faculty" | null;
+type PostType = "give" | "request" | null;
 
 type FeedRowFromView = {
   id: string;
@@ -24,12 +25,22 @@ type FeedRowFromView = {
   expires_at: string | null;
   interest_count: number;
   owner_role?: OwnerRole;
+
+  // NEW (add to view)
+  post_type?: PostType;
+  request_group?: string | null;
+  request_timeframe?: string | null;
+  request_location?: string | null;
 };
 
 type ItemMeta = {
   id: string;
   owner_id: string | null;
   is_claimed: boolean | null;
+  post_type: PostType;
+  request_group: string | null;
+  request_timeframe: string | null;
+  request_location: string | null;
 };
 
 type FeedRow = FeedRowFromView & {
@@ -57,7 +68,7 @@ function formatExpiry(expiresAt: string | null) {
   return end.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function statusBadge(status: string | null) {
+function statusBadge(status: string | null, postType: PostType) {
   const st = (status ?? "available").toLowerCase();
   const base = {
     padding: "6px 10px",
@@ -68,6 +79,16 @@ function statusBadge(status: string | null) {
     background: "rgba(0,0,0,0.35)",
     color: "rgba(255,255,255,0.82)",
   } as const;
+
+  // subtle request label if no meaningful status
+  if ((postType ?? "give") === "request") {
+    return {
+      ...base,
+      border: "1px solid rgba(34,197,94,0.22)",
+      background: "rgba(34,197,94,0.10)",
+      color: "rgba(209,250,229,0.92)",
+    };
+  }
 
   if (st === "reserved") {
     return {
@@ -94,6 +115,23 @@ function statusBadge(status: string | null) {
     };
   }
   return base;
+}
+
+function requestGroupLabel(g: string | null | undefined) {
+  const k = (g ?? "").toLowerCase();
+  if (k === "logistics") return "Logistics";
+  if (k === "services") return "Services";
+  if (k === "urgent") return "Urgent";
+  if (k === "collaboration") return "Collaboration";
+  return "Request";
+}
+
+function requestTimeframeLabel(t: string | null | undefined) {
+  const k = (t ?? "").toLowerCase();
+  if (k === "today") return "Today";
+  if (k === "this_week") return "This week";
+  if (k === "flexible") return "Flexible";
+  return "";
 }
 
 export default function FeedPage() {
@@ -138,7 +176,13 @@ export default function FeedPage() {
 
   async function loadOwnerMeta(itemIds: string[]) {
     if (itemIds.length === 0) return new Map<string, ItemMeta>();
-    const { data, error } = await supabase.from("items").select("id,owner_id,is_claimed").in("id", itemIds);
+
+    // We fetch post_type + request fields from items table (reliable even if view not updated yet)
+    const { data, error } = await supabase
+      .from("items")
+      .select("id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location")
+      .in("id", itemIds);
+
     if (error) return new Map<string, ItemMeta>();
 
     const m = new Map<string, ItemMeta>();
@@ -150,6 +194,8 @@ export default function FeedPage() {
     setLoading(true);
     setErr(null);
 
+    // If your view doesn't include post_type/request fields, this still works,
+    // because we merge those fields from items table meta.
     const { data, error } = await supabase
       .from("v_feed_items")
       .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
@@ -166,7 +212,6 @@ export default function FeedPage() {
     const rows = ((data as FeedRowFromView[]) || []).map((x) => ({ ...x })) as FeedRow[];
     const ids = rows.map((x) => x.id);
 
-    // pull owner_id + is_claimed from real table (NOT the view)
     const meta = await loadOwnerMeta(ids);
     const merged = rows.map((x) => {
       const m = meta.get(x.id);
@@ -174,6 +219,10 @@ export default function FeedPage() {
         ...x,
         owner_id: m?.owner_id ?? null,
         is_claimed: m?.is_claimed ?? null,
+        post_type: (m?.post_type ?? x.post_type ?? "give") as PostType,
+        request_group: m?.request_group ?? x.request_group ?? null,
+        request_timeframe: m?.request_timeframe ?? x.request_timeframe ?? null,
+        request_location: m?.request_location ?? x.request_location ?? null,
       };
     });
 
@@ -186,8 +235,11 @@ export default function FeedPage() {
 
     setItems(visible);
 
+    // Interests only apply to GIVE posts (requests use "offer help" later)
+    const giveIds = visible.filter((x) => (x.post_type ?? "give") === "give").map((x) => x.id);
+
     if (isLoggedIn && userId) {
-      await loadMyInterestMap(userId, visible.map((x) => x.id));
+      await loadMyInterestMap(userId, giveIds);
     } else {
       setMyInterested({});
     }
@@ -201,7 +253,16 @@ export default function FeedPage() {
       return;
     }
 
-    // block if it's your own listing
+    const postType = (item.post_type ?? "give") as PostType;
+
+    // Requests: "Offer help" should route to item detail for now
+    // (Later: offer -> requester accepts -> thread opens)
+    if (postType === "request") {
+      router.push(`/item/${item.id}`);
+      return;
+    }
+
+    // GIVE logic stays the same
     const isMineListing = !!item.owner_id && item.owner_id === userId;
     if (isMineListing) return;
 
@@ -259,9 +320,11 @@ export default function FeedPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Keep category pills ONLY for GIVE posts, so requests don't pollute the UI
   const categories = useMemo(() => {
     const set = new Set<string>();
     for (const x of items) {
+      if ((x.post_type ?? "give") !== "give") continue;
       const c = (x.category ?? "").trim();
       if (c) set.add(c);
     }
@@ -270,7 +333,13 @@ export default function FeedPage() {
 
   const filteredItems = useMemo(() => {
     return items.filter((x) => {
-      if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
+      const postType = (x.post_type ?? "give") as PostType;
+
+      // Category filter applies ONLY to give posts.
+      // Requests always pass through (mixed subtly, as you asked).
+      if (postType === "give") {
+        if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
+      }
 
       if (roleFilter !== "all") {
         const r = (x.owner_role ?? null) as OwnerRole;
@@ -379,8 +448,8 @@ export default function FeedPage() {
                 placeItems: "center",
                 cursor: "pointer",
               }}
-              aria-label="Create listing"
-              title="Create listing"
+              aria-label="Create post"
+              title="Create post"
             >
               +
             </button>
@@ -398,7 +467,7 @@ export default function FeedPage() {
                 alignItems: "center",
               }}
             >
-              {/* Lister pill (embedded) */}
+              {/* Lister pill */}
               <div
                 style={{
                   ...pill,
@@ -429,7 +498,7 @@ export default function FeedPage() {
                 </select>
               </div>
 
-              {/* Category pills */}
+              {/* Category pills (give-only set) */}
               {categories.map((c) => {
                 const active = categoryFilter === c;
                 const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
@@ -469,9 +538,14 @@ export default function FeedPage() {
       <div style={{ padding: "14px 16px 90px" }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(270px, 1fr))", gap: 18 }}>
           {filteredItems.map((item) => {
-            const mineRequested = myInterested[item.id] === true;
+            const postType = (item.post_type ?? "give") as PostType;
+            const mineRequested = myInterested[item.id] === true; // only for give
             const expiryText = formatExpiry(item.expires_at);
             const isMineListing = !!userId && !!item.owner_id && item.owner_id === userId;
+
+            const requestLabel = requestGroupLabel(item.request_group);
+            const tfLabel = requestTimeframeLabel(item.request_timeframe);
+            const requestLoc = (item.request_location ?? "").trim();
 
             return (
               <div
@@ -479,49 +553,114 @@ export default function FeedPage() {
                 style={{
                   background: "rgba(255,255,255,0.04)",
                   borderRadius: 18,
-                  border: "1px solid rgba(148,163,184,0.15)",
+                  border:
+                    postType === "request"
+                      ? "1px solid rgba(34,197,94,0.22)"
+                      : "1px solid rgba(148,163,184,0.15)",
                   overflow: "hidden",
                   boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
                 }}
               >
-                {/* image */}
-                <div style={{ position: "relative", height: 220, background: "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))" }}>
-                  {item.photo_url ? (
+                {/* media */}
+                <div
+                  style={{
+                    position: "relative",
+                    height: 220,
+                    background:
+                      postType === "request"
+                        ? "linear-gradient(180deg, rgba(34,197,94,0.10), rgba(0,0,0,0.25))"
+                        : "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))",
+                  }}
+                >
+                  {postType === "give" && item.photo_url ? (
                     <button
                       type="button"
                       onClick={() => {
                         setOpenImg(item.photo_url!);
                         setOpenTitle(item.title);
                       }}
-                      style={{ padding: 0, border: "none", background: "transparent", cursor: "pointer", width: "100%", height: "100%" }}
+                      style={{
+                        padding: 0,
+                        border: "none",
+                        background: "transparent",
+                        cursor: "pointer",
+                        width: "100%",
+                        height: "100%",
+                      }}
                       aria-label="Open photo"
                       title="Open photo"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={item.photo_url} alt={item.title} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                      <img
+                        src={item.photo_url}
+                        alt={item.title}
+                        loading="lazy"
+                        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                      />
                     </button>
-                  ) : (
-                    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,0.45)" }}>
+                  ) : postType === "give" ? (
+                    <div
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "rgba(255,255,255,0.45)",
+                      }}
+                    >
                       No photo
+                    </div>
+                  ) : (
+                    // Request "hero" area (subtle, clean)
+                    <div style={{ padding: 16, height: "100%", display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+                      <div style={{ fontSize: 12, opacity: 0.78, fontWeight: 900 }}>
+                        {requestLabel}
+                        {tfLabel ? ` • ${tfLabel}` : ""}
+                        {requestLoc ? ` • ${requestLoc}` : ""}
+                      </div>
+                      <div
+                        style={{
+                          marginTop: 10,
+                          fontSize: 18,
+                          fontWeight: 950,
+                          letterSpacing: -0.2,
+                          display: "-webkit-box",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                          overflow: "hidden",
+                        }}
+                      >
+                        {item.title}
+                      </div>
                     </div>
                   )}
 
                   <div style={{ position: "absolute", top: 12, left: 12 }}>
-                    <span style={statusBadge(item.status)}>{(item.status ?? "available").toLowerCase()}</span>
+                    <span style={statusBadge(item.status, postType)}>
+                      {postType === "request" ? "request" : (item.status ?? "available").toLowerCase()}
+                    </span>
                   </div>
                 </div>
 
                 {/* body */}
                 <div style={{ padding: 14 }}>
                   <div style={{ fontSize: 12, opacity: 0.72 }}>
-                    {item.category ? `Category: ${item.category}` : "Category: —"}
-                    {item.owner_role ? ` • Lister: ${item.owner_role}` : ""}
+                    {postType === "give"
+                      ? item.category
+                        ? `Category: ${item.category}`
+                        : "Category: —"
+                      : `Type: ${requestLabel}`}
+                    {item.owner_role ? ` • ${postType === "give" ? "Lister" : "Poster"}: ${item.owner_role}` : ""}
                   </div>
 
-                  <div style={{ marginTop: 8, fontSize: 20, fontWeight: 950, letterSpacing: -0.2 }}>{item.title}</div>
+                  {/* Title for give only (requests already show title in hero) */}
+                  {postType === "give" && (
+                    <div style={{ marginTop: 8, fontSize: 20, fontWeight: 950, letterSpacing: -0.2 }}>{item.title}</div>
+                  )}
 
                   <div style={{ marginTop: 8, opacity: 0.7, fontSize: 13 }}>
-                    {item.expires_at ? `Available until: ${new Date(item.expires_at).toLocaleDateString()}` : "Contributor will de-list themselves"}{" "}
+                    {item.expires_at ? `Auto-archives: ${new Date(item.expires_at).toLocaleDateString()}` : "Contributor will de-list themselves"}{" "}
                     <span style={{ opacity: 0.75 }}>({expiryText})</span>
                   </div>
 
@@ -540,7 +679,9 @@ export default function FeedPage() {
                     {item.description || "—"}
                   </div>
 
-                  <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13 }}>{item.interest_count || 0} requests</div>
+                  <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13 }}>
+                    {postType === "give" ? `${item.interest_count || 0} requests` : "Tap to offer help"}
+                  </div>
 
                   <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                     <button
@@ -556,7 +697,7 @@ export default function FeedPage() {
                         fontWeight: 900,
                       }}
                     >
-                      View item
+                      View {postType === "give" ? "item" : "request"}
                     </button>
 
                     <button
@@ -564,14 +705,16 @@ export default function FeedPage() {
                       disabled={savingId === item.id || isMineListing}
                       style={{
                         width: "100%",
-                        border: "1px solid rgba(52,211,153,0.25)",
+                        border: postType === "request" ? "1px solid rgba(34,197,94,0.22)" : "1px solid rgba(52,211,153,0.25)",
                         background: isMineListing
                           ? "rgba(255,255,255,0.03)"
-                          : isLoggedIn
-                          ? mineRequested
-                            ? "rgba(16,185,129,0.16)"
-                            : "rgba(16,185,129,0.24)"
-                          : "rgba(255,255,255,0.03)",
+                          : postType === "request"
+                            ? "rgba(34,197,94,0.14)"
+                            : isLoggedIn
+                              ? mineRequested
+                                ? "rgba(16,185,129,0.16)"
+                                : "rgba(16,185,129,0.24)"
+                              : "rgba(255,255,255,0.03)",
                         color: "rgba(255,255,255,0.9)",
                         padding: "10px 12px",
                         borderRadius: 14,
@@ -581,14 +724,18 @@ export default function FeedPage() {
                       }}
                     >
                       {isMineListing
-                        ? "Your listing"
+                        ? "Your post"
                         : savingId === item.id
-                        ? "Saving…"
-                        : isLoggedIn
-                        ? mineRequested
-                          ? "Requested"
-                          : "Request item"
-                        : "Request (login)"}
+                          ? "Saving…"
+                          : postType === "request"
+                            ? isLoggedIn
+                              ? "Offer help"
+                              : "Offer (login)"
+                            : isLoggedIn
+                              ? mineRequested
+                                ? "Requested"
+                                : "Request item"
+                              : "Request (login)"}
                     </button>
                   </div>
                 </div>
@@ -624,8 +771,18 @@ export default function FeedPage() {
               overflow: "hidden",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderBottom: "1px solid rgba(148,163,184,0.15)" }}>
-              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{openTitle || "Photo"}</div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "10px 12px",
+                borderBottom: "1px solid rgba(148,163,184,0.15)",
+              }}
+            >
+              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {openTitle || "Photo"}
+              </div>
               <button
                 type="button"
                 onClick={() => setOpenImg(null)}
@@ -647,7 +804,14 @@ export default function FeedPage() {
             <img
               src={openImg}
               alt={openTitle || "Full photo"}
-              style={{ width: "100%", height: "auto", maxHeight: "80vh", objectFit: "contain", display: "block", background: "black" }}
+              style={{
+                width: "100%",
+                height: "auto",
+                maxHeight: "80vh",
+                objectFit: "contain",
+                display: "block",
+                background: "black",
+              }}
             />
           </div>
         </div>
