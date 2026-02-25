@@ -538,7 +538,6 @@ export default function AccountPage() {
   async function withdrawMyOffer(off: MyOfferRow) {
     const st = (off.status ?? "pending") as OfferStatus;
     if (st === "accepted" || st === "completed") return alert("This offer is already accepted/completed. You can't withdraw.");
-
     if (!confirm("Withdraw this offer?")) return;
 
     setMyOfferActingId(off.id);
@@ -748,23 +747,33 @@ export default function AccountPage() {
   /* ---------------- LOGGED IN ---------------- */
 
   return (
-    <div style={{ ...pageWrap, paddingBottom: 120 }}>
+    <div style={pageWrap}>
       <style jsx>{`
-        /* hard guardrail: nothing should overflow horizontally */
-        .page {
+        /* ====== IMPORTANT: sticky header reliability on mobile ======
+           Sticky breaks if any ancestor has overflow: hidden/auto/scroll.
+           We only clip X overflow on the outer shell, and never add overflow on parents of .header.
+        */
+
+        .shell {
           max-width: 1200px;
           margin: 0 auto;
-          overflow-x: hidden;
+          padding: 16px;
+          padding-bottom: calc(120px + env(safe-area-inset-bottom));
+          overflow-x: clip; /* safer than hidden for sticky on iOS */
         }
 
         .header {
           position: sticky;
-          top: 0;
+          top: env(safe-area-inset-top);
           z-index: 50;
-          background: rgba(0, 0, 0, 0.92);
-          backdrop-filter: blur(10px);
-          border-bottom: 1px solid #0f223f;
-          padding-bottom: 10px;
+          background: rgba(0, 0, 0, 0.94);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+          border: 1px solid #0f223f;
+          border-radius: 16px;
+          padding: 12px;
+          transform: translateZ(0); /* iOS paint fix */
+          will-change: transform;
         }
 
         .topRow {
@@ -775,24 +784,72 @@ export default function AccountPage() {
           min-width: 0;
         }
 
+        .identity {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          min-width: 0;
+        }
+
+        .nameLine {
+          font-size: 18px;
+          font-weight: 1000;
+          line-height: 1.1;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .subLine {
+          opacity: 0.75;
+          font-size: 12px;
+          margin-top: 2px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        /* Tabs: always a horizontal rail (never wrapped) */
         .tabs {
           display: flex;
           gap: 10px;
           overflow-x: auto;
           -webkit-overflow-scrolling: touch;
-          padding-bottom: 8px;
-          padding-right: 56px;
+          padding-top: 10px;
+          padding-bottom: 6px;
         }
         .tabs::-webkit-scrollbar {
           display: none;
         }
 
-        /* request rows never overflow */
+        .statsRow {
+          display: flex;
+          gap: 12px;
+          flex-wrap: nowrap; /* stays compact like your screenshot */
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          margin-top: 6px;
+          opacity: 0.78;
+          font-size: 12px;
+          font-weight: 900;
+          padding-bottom: 2px;
+        }
+        .statsRow::-webkit-scrollbar {
+          display: none;
+        }
+
+        /* CONTENT spacing so first section doesn't look glued under header */
+        .content {
+          margin-top: 12px;
+        }
+
+        /* guardrail: nothing should overflow horizontally */
         .reqCard {
           border: 1px solid #0f223f;
           background: #0b1730;
           border-radius: 16px;
           padding: 14px;
+          overflow: hidden;
         }
 
         .reqRow {
@@ -800,7 +857,7 @@ export default function AccountPage() {
           align-items: flex-start;
           gap: 12px;
           min-width: 0;
-          flex-wrap: wrap;
+          flex-wrap: wrap; /* forces buttons to go under on small screens */
         }
 
         .reqMain {
@@ -825,18 +882,22 @@ export default function AccountPage() {
           word-break: break-word;
         }
 
+        /* Buttons: on phones, always full-width row under content (prevents squeeze/overlap) */
         .reqActions {
           display: flex;
           gap: 10px;
           flex-wrap: wrap;
-          justify-content: flex-end;
+          justify-content: flex-start;
           align-items: center;
           width: 100%;
+          margin-top: 10px;
         }
 
         @media (min-width: 720px) {
           .reqActions {
             width: auto;
+            margin-top: 0;
+            justify-content: flex-end;
           }
         }
 
@@ -865,21 +926,30 @@ export default function AccountPage() {
             width: 340px;
           }
         }
+
+        /* Slightly tighter on very small screens so header "freeze" doesn't feel huge */
+        @media (max-width: 390px) {
+          .header {
+            padding: 10px;
+          }
+          .nameLine {
+            font-size: 17px;
+          }
+        }
       `}</style>
 
-      <div className="page">
+      <div className="shell">
+        {/* ====== STICKY HEADER (FREEZES ON TOP) ====== */}
         <div className="header">
           <div className="topRow">
-            <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+            <div className="identity">
               <div style={avatar} title={displayName}>
                 {displayName.slice(0, 1).toUpperCase()}
               </div>
 
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 18, fontWeight: 1000, lineHeight: 1.1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {displayName}
-                </div>
-                <div style={{ opacity: 0.75, fontSize: 12, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <div className="nameLine">{displayName}</div>
+                <div className="subLine">
                   {roleLabel} • {userEmail}
                 </div>
               </div>
@@ -892,7 +962,7 @@ export default function AccountPage() {
 
           {err && <div style={{ marginTop: 10, color: "#f87171", fontWeight: 900 }}>{err}</div>}
 
-          <div className="tabs" style={{ marginTop: 10 }}>
+          <div className="tabs">
             <button onClick={() => setTab("listings")} style={tabPill(tab === "listings")}>
               Listings
             </button>
@@ -917,7 +987,7 @@ export default function AccountPage() {
             </button>
           </div>
 
-          <div style={{ marginTop: 6, display: "flex", gap: 10, flexWrap: "wrap", opacity: 0.78, fontSize: 12, fontWeight: 900 }}>
+          <div className="statsRow">
             <span>Listed: {stats.listed}</span>
             <span>Interests: {stats.interests}</span>
             <span>Offers: {stats.offers}</span>
@@ -925,367 +995,368 @@ export default function AccountPage() {
           </div>
         </div>
 
-        {/* CONTENT */}
+        {/* ====== CONTENT ====== */}
+        <div className="content">
+          {tab === "listings" && (
+            <>
+              <div style={sectionHint}>Your active posts (give + requests). Completed (claimed) posts live in History.</div>
 
-        {tab === "listings" && (
-          <>
-            <div style={sectionHint}>Your active posts (give + requests). Completed (claimed) posts live in History.</div>
+              {activeListings.length === 0 ? (
+                <EmptyBox title="No active listings." body="List something or post a request to start exchanging.">
+                  <button onClick={() => router.push("/create")} style={outlineBtn}>
+                    ＋ Create post
+                  </button>
+                </EmptyBox>
+              ) : (
+                <div className="rail">
+                  {activeListings.map((item) => (
+                    <div className="railItem" key={item.id}>
+                      <ItemCard
+                        item={item}
+                        variant="active"
+                        onEdit={() => router.push(`/item/${item.id}/edit`)}
+                        onManage={() => router.push(`/manage/${item.id}`)}
+                        onDelete={() => deleteListing(item.id)}
+                        deleting={deletingId === item.id}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
 
-            {activeListings.length === 0 ? (
-              <EmptyBox title="No active listings." body="List something or post a request to start exchanging.">
-                <button onClick={() => router.push("/create")} style={outlineBtn}>
-                  ＋ Create post
+          {tab === "my_activity" && (
+            <>
+              <div style={sectionHint}>Your activity across both flows.</div>
+
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 1000, fontSize: 18 }}>My interests (items I requested)</div>
+                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>These are GIVE posts you requested.</div>
+              </div>
+
+              {myRequests.length === 0 ? (
+                <EmptyBox title="No interests yet." body="Go to the feed and request an item.">
+                  <button onClick={() => router.push("/feed")} style={outlineBtn}>
+                    Browse feed
+                  </button>
+                </EmptyBox>
+              ) : (
+                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                  {myRequests.map((r) => {
+                    const it = r.items;
+                    return (
+                      <div key={r.item_id + (r.created_at ?? "")} className="reqCard">
+                        <div className="reqRow">
+                          <Thumb photoUrl={it?.photo_url ?? null} label={it?.title ?? "Item"} />
+
+                          <div className="reqMain">
+                            <div className="reqTitle">{it?.title ?? "Unknown item"}</div>
+                            <div className="reqMeta">
+                              Status: <b>{it?.status ?? "—"}</b>
+                              {r.created_at ? ` • Sent: ${fmtWhen(r.created_at)}` : ""}
+                            </div>
+                          </div>
+
+                          <div className="reqActions">
+                            <button onClick={() => router.push(`/item/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
+                              View
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{ marginTop: 18 }}>
+                <div style={{ fontWeight: 1000, fontSize: 18 }}>My offers (help I offered)</div>
+                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>REQUEST posts where you offered help. Chat unlocks only after acceptance.</div>
+              </div>
+
+              {myOffers.length === 0 ? (
+                <EmptyBox title="No offers yet." body="Find a request post in the feed and tap “Offer help”.">
+                  <button onClick={() => router.push("/feed")} style={outlineBtn}>
+                    Browse feed
+                  </button>
+                </EmptyBox>
+              ) : (
+                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                  {myOffers.map((o) => {
+                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
+                    const st = (o.status ?? "pending") as OfferStatus;
+                    const acting = myOfferActingId === o.id;
+
+                    return (
+                      <div key={o.id} className="reqCard">
+                        <div className="reqRow">
+                          <div style={{ ...thumbWrap, width: 54, height: 54 }}>🤝</div>
+
+                          <div className="reqMain">
+                            <div className="reqTitle">
+                              Offered help on <span style={{ opacity: 0.9 }}>{title}</span>
+                            </div>
+                            <div className="reqMeta">
+                              Status: <b>{st}</b>
+                              {o.created_at ? ` • Offered: ${fmtWhen(o.created_at)}` : ""}
+                              {o.availability ? ` • Availability: ${o.availability}` : ""}
+                            </div>
+                            {o.note ? <div style={{ marginTop: 8, opacity: 0.82, fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.note}</div> : null}
+                          </div>
+
+                          <div className="reqActions">
+                            <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
+                              View
+                            </button>
+
+                            <button
+                              onClick={() => startChatFromMyOffer(o)}
+                              disabled={acting || st !== "accepted"}
+                              style={{
+                                ...outlineBtn,
+                                marginTop: 0,
+                                border: st === "accepted" ? "1px solid rgba(22,163,74,0.55)" : "1px solid #334155",
+                                background: st === "accepted" ? "rgba(22,163,74,0.14)" : "transparent",
+                                cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
+                                opacity: acting || st !== "accepted" ? 0.65 : 1,
+                              }}
+                              title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
+                            >
+                              {acting ? "Opening…" : "Start chat"}
+                            </button>
+
+                            <button
+                              onClick={() => withdrawMyOffer(o)}
+                              disabled={acting || st === "accepted" || st === "completed"}
+                              style={{
+                                ...outlineBtn,
+                                marginTop: 0,
+                                border: "1px solid #7f1d1d",
+                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
+                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
+                              }}
+                              title={st === "accepted" || st === "completed" ? "Cannot withdraw after acceptance/completion" : "Withdraw offer"}
+                            >
+                              {acting ? "Working…" : "Withdraw"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "requests" && (
+            <>
+              <div style={sectionHint}>Incoming requests for your GIVE listings + offers for your REQUEST posts.</div>
+
+              <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button
+                  onClick={() => {
+                    if (userId) loadIncomingAll(userId);
+                  }}
+                  disabled={incomingLoading}
+                  style={{
+                    ...outlineBtn,
+                    marginTop: 0,
+                    cursor: incomingLoading ? "not-allowed" : "pointer",
+                    opacity: incomingLoading ? 0.8 : 1,
+                  }}
+                >
+                  {incomingLoading ? "Refreshing…" : "Refresh"}
                 </button>
-              </EmptyBox>
-            ) : (
-              <div className="rail">
-                {activeListings.map((item) => (
-                  <div className="railItem" key={item.id}>
-                    <ItemCard
-                      item={item}
-                      variant="active"
-                      onEdit={() => router.push(`/item/${item.id}/edit`)}
-                      onManage={() => router.push(`/manage/${item.id}`)}
-                      onDelete={() => deleteListing(item.id)}
-                      deleting={deletingId === item.id}
-                    />
-                  </div>
-                ))}
               </div>
-            )}
-          </>
-        )}
 
-        {tab === "my_activity" && (
-          <>
-            <div style={sectionHint}>Your activity across both flows.</div>
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontWeight: 1000, fontSize: 18 }}>Incoming item requests (GIVE)</div>
+                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>People who requested your items.</div>
+              </div>
 
-            <div style={{ marginTop: 14 }}>
-              <div style={{ fontWeight: 1000, fontSize: 18 }}>My interests (items I requested)</div>
-              <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>These are GIVE posts you requested.</div>
-            </div>
+              {incomingInterests.length === 0 ? (
+                <EmptyBox title="No incoming item requests." body="When someone requests your item, it will appear here." />
+              ) : (
+                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                  {incomingInterests.map((r) => {
+                    const itemTitle = r.items?.title?.trim() ? r.items.title : "Unknown item";
+                    const who = niceNameFromProfile(r.requester, "Ashland user");
+                    const when = fmtWhen(r.created_at);
+                    const deleting = deletingNotifId === r.id;
 
-            {myRequests.length === 0 ? (
-              <EmptyBox title="No interests yet." body="Go to the feed and request an item.">
-                <button onClick={() => router.push("/feed")} style={outlineBtn}>
-                  Browse feed
-                </button>
-              </EmptyBox>
-            ) : (
-              <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                {myRequests.map((r) => {
-                  const it = r.items;
-                  return (
-                    <div key={r.item_id + (r.created_at ?? "")} className="reqCard">
-                      <div className="reqRow">
-                        <Thumb photoUrl={it?.photo_url ?? null} label={it?.title ?? "Item"} />
+                    return (
+                      <div key={r.id} className="reqCard">
+                        <div className="reqRow">
+                          <Thumb photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
 
-                        <div className="reqMain">
-                          <div className="reqTitle">{it?.title ?? "Unknown item"}</div>
-                          <div className="reqMeta">
-                            Status: <b>{it?.status ?? "—"}</b>
-                            {r.created_at ? ` • Sent: ${fmtWhen(r.created_at)}` : ""}
+                          <div className="reqMain">
+                            <div className="reqTitle">
+                              {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
+                            </div>
+                            <div className="reqMeta">
+                              {when ? `Requested: ${when} • ` : ""}
+                              {r.owner_seen_at ? "Seen" : "New"}
+                              {r.status ? ` • ${r.status}` : ""}
+                            </div>
                           </div>
-                        </div>
 
-                        <div className="reqActions">
-                          <button onClick={() => router.push(`/item/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
-                            View
-                          </button>
+                          <div className="reqActions">
+                            <button onClick={() => router.push(`/manage/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
+                              Open
+                            </button>
+
+                            <button
+                              onClick={() => deleteNotification(r)}
+                              disabled={deleting}
+                              style={{
+                                ...outlineBtn,
+                                marginTop: 0,
+                                border: "1px solid #7f1d1d",
+                                cursor: deleting ? "not-allowed" : "pointer",
+                                opacity: deleting ? 0.75 : 1,
+                              }}
+                              title="Delete request"
+                            >
+                              {deleting ? "Deleting…" : "Delete"}
+                            </button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{ marginTop: 18 }}>
+                <div style={{ fontWeight: 1000, fontSize: 18 }}>Incoming help offers (REQUEST)</div>
+                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>
+                  Accept one helper; put others on hold; decline if needed. Chat opens only after acceptance.
+                </div>
               </div>
-            )}
 
-            <div style={{ marginTop: 18 }}>
-              <div style={{ fontWeight: 1000, fontSize: 18 }}>My offers (help I offered)</div>
-              <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>REQUEST posts where you offered help. Chat unlocks only after acceptance.</div>
-            </div>
+              {incomingOffers.length === 0 ? (
+                <EmptyBox title="No incoming offers." body="When someone offers help on your request post, it will appear here." />
+              ) : (
+                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                  {incomingOffers.map((o) => {
+                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
+                    const who = niceNameFromProfile(o.helper, "Ashland user");
+                    const when = fmtWhen(o.created_at);
+                    const st = (o.status ?? "pending") as OfferStatus;
+                    const acting = offerActingId === o.id;
 
-            {myOffers.length === 0 ? (
-              <EmptyBox title="No offers yet." body="Find a request post in the feed and tap “Offer help”.">
-                <button onClick={() => router.push("/feed")} style={outlineBtn}>
-                  Browse feed
-                </button>
-              </EmptyBox>
-            ) : (
-              <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                {myOffers.map((o) => {
-                  const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
-                  const st = (o.status ?? "pending") as OfferStatus;
-                  const acting = myOfferActingId === o.id;
+                    return (
+                      <div key={o.id} className="reqCard">
+                        <div className="reqRow">
+                          <div style={{ ...thumbWrap, width: 54, height: 54 }}>🤝</div>
 
-                  return (
-                    <div key={o.id} className="reqCard">
-                      <div className="reqRow">
-                        <div style={{ ...thumbWrap, width: 54, height: 54 }}>🤝</div>
-
-                        <div className="reqMain">
-                          <div className="reqTitle">
-                            Offered help on <span style={{ opacity: 0.9 }}>{title}</span>
+                          <div className="reqMain">
+                            <div className="reqTitle">
+                              {who} offered help on <span style={{ opacity: 0.9 }}>{title}</span>
+                            </div>
+                            <div className="reqMeta">
+                              {when ? `Offered: ${when} • ` : ""}
+                              Status: <b>{st}</b>
+                              {o.availability ? ` • Availability: ${o.availability}` : ""}
+                            </div>
+                            {o.note ? <div style={{ marginTop: 8, opacity: 0.82, fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.note}</div> : null}
                           </div>
-                          <div className="reqMeta">
-                            Status: <b>{st}</b>
-                            {o.created_at ? ` • Offered: ${fmtWhen(o.created_at)}` : ""}
-                            {o.availability ? ` • Availability: ${o.availability}` : ""}
+
+                          <div className="reqActions">
+                            <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
+                              View
+                            </button>
+
+                            <button
+                              onClick={() => updateOfferStatus(o, "accepted")}
+                              disabled={acting || st === "accepted" || st === "completed"}
+                              style={{
+                                ...outlineBtn,
+                                marginTop: 0,
+                                border: "1px solid rgba(22,163,74,0.55)",
+                                background: "rgba(22,163,74,0.14)",
+                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
+                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
+                              }}
+                            >
+                              {acting ? "Working…" : "Accept"}
+                            </button>
+
+                            <button
+                              onClick={() => updateOfferStatus(o, "hold")}
+                              disabled={acting || st === "accepted" || st === "completed"}
+                              style={{
+                                ...outlineBtn,
+                                marginTop: 0,
+                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
+                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
+                              }}
+                            >
+                              Hold
+                            </button>
+
+                            <button
+                              onClick={() => updateOfferStatus(o, "declined")}
+                              disabled={acting || st === "declined" || st === "completed"}
+                              style={{
+                                ...outlineBtn,
+                                marginTop: 0,
+                                border: "1px solid #7f1d1d",
+                                cursor: acting || st === "declined" || st === "completed" ? "not-allowed" : "pointer",
+                                opacity: acting || st === "declined" || st === "completed" ? 0.65 : 1,
+                              }}
+                            >
+                              Decline
+                            </button>
+
+                            <button
+                              onClick={() => startChatWithHelper(o)}
+                              disabled={acting || st !== "accepted"}
+                              style={{
+                                ...outlineBtn,
+                                marginTop: 0,
+                                border: st === "accepted" ? "1px solid rgba(22,163,74,0.55)" : "1px solid #334155",
+                                background: st === "accepted" ? "rgba(22,163,74,0.14)" : "transparent",
+                                cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
+                                opacity: acting || st !== "accepted" ? 0.65 : 1,
+                              }}
+                              title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
+                            >
+                              {acting ? "Opening…" : "Start chat"}
+                            </button>
                           </div>
-                          {o.note ? <div style={{ marginTop: 8, opacity: 0.82, fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.note}</div> : null}
-                        </div>
-
-                        <div className="reqActions">
-                          <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
-                            View
-                          </button>
-
-                          <button
-                            onClick={() => startChatFromMyOffer(o)}
-                            disabled={acting || st !== "accepted"}
-                            style={{
-                              ...outlineBtn,
-                              marginTop: 0,
-                              border: st === "accepted" ? "1px solid rgba(22,163,74,0.55)" : "1px solid #334155",
-                              background: st === "accepted" ? "rgba(22,163,74,0.14)" : "transparent",
-                              cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
-                              opacity: acting || st !== "accepted" ? 0.65 : 1,
-                            }}
-                            title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
-                          >
-                            {acting ? "Opening…" : "Start chat"}
-                          </button>
-
-                          <button
-                            onClick={() => withdrawMyOffer(o)}
-                            disabled={acting || st === "accepted" || st === "completed"}
-                            style={{
-                              ...outlineBtn,
-                              marginTop: 0,
-                              border: "1px solid #7f1d1d",
-                              cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                              opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                            }}
-                            title={st === "accepted" || st === "completed" ? "Cannot withdraw after acceptance/completion" : "Withdraw offer"}
-                          >
-                            {acting ? "Working…" : "Withdraw"}
-                          </button>
                         </div>
                       </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "history" && (
+            <>
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 1000, fontSize: 20 }}>Completed listings</div>
+                <div style={{ opacity: 0.75, marginTop: 6 }}>These were picked up (claimed). No actions needed.</div>
+              </div>
+
+              {completedListings.length === 0 ? (
+                <EmptyBox title="No completed listings yet." body="When a pickup is marked, it will move here." />
+              ) : (
+                <div className="rail">
+                  {completedListings.map((item) => (
+                    <div className="railItem" key={item.id}>
+                      <ItemCard item={item} variant="history" />
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </>
-        )}
-
-        {tab === "requests" && (
-          <>
-            <div style={sectionHint}>Incoming requests for your GIVE listings + offers for your REQUEST posts.</div>
-
-            <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <button
-                onClick={() => {
-                  if (userId) loadIncomingAll(userId);
-                }}
-                disabled={incomingLoading}
-                style={{
-                  ...outlineBtn,
-                  marginTop: 0,
-                  cursor: incomingLoading ? "not-allowed" : "pointer",
-                  opacity: incomingLoading ? 0.8 : 1,
-                }}
-              >
-                {incomingLoading ? "Refreshing…" : "Refresh"}
-              </button>
-            </div>
-
-            <div style={{ marginTop: 16 }}>
-              <div style={{ fontWeight: 1000, fontSize: 18 }}>Incoming item requests (GIVE)</div>
-              <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>People who requested your items.</div>
-            </div>
-
-            {incomingInterests.length === 0 ? (
-              <EmptyBox title="No incoming item requests." body="When someone requests your item, it will appear here." />
-            ) : (
-              <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                {incomingInterests.map((r) => {
-                  const itemTitle = r.items?.title?.trim() ? r.items.title : "Unknown item";
-                  const who = niceNameFromProfile(r.requester, "Ashland user");
-                  const when = fmtWhen(r.created_at);
-                  const deleting = deletingNotifId === r.id;
-
-                  return (
-                    <div key={r.id} className="reqCard">
-                      <div className="reqRow">
-                        <Thumb photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
-
-                        <div className="reqMain">
-                          <div className="reqTitle">
-                            {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
-                          </div>
-                          <div className="reqMeta">
-                            {when ? `Requested: ${when} • ` : ""}
-                            {r.owner_seen_at ? "Seen" : "New"}
-                            {r.status ? ` • ${r.status}` : ""}
-                          </div>
-                        </div>
-
-                        <div className="reqActions">
-                          <button onClick={() => router.push(`/manage/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
-                            Open
-                          </button>
-
-                          <button
-                            onClick={() => deleteNotification(r)}
-                            disabled={deleting}
-                            style={{
-                              ...outlineBtn,
-                              marginTop: 0,
-                              border: "1px solid #7f1d1d",
-                              cursor: deleting ? "not-allowed" : "pointer",
-                              opacity: deleting ? 0.75 : 1,
-                            }}
-                            title="Delete request"
-                          >
-                            {deleting ? "Deleting…" : "Delete"}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            <div style={{ marginTop: 18 }}>
-              <div style={{ fontWeight: 1000, fontSize: 18 }}>Incoming help offers (REQUEST)</div>
-              <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>
-                Accept one helper; put others on hold; decline if needed. Chat opens only after acceptance.
-              </div>
-            </div>
-
-            {incomingOffers.length === 0 ? (
-              <EmptyBox title="No incoming offers." body="When someone offers help on your request post, it will appear here." />
-            ) : (
-              <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                {incomingOffers.map((o) => {
-                  const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
-                  const who = niceNameFromProfile(o.helper, "Ashland user");
-                  const when = fmtWhen(o.created_at);
-                  const st = (o.status ?? "pending") as OfferStatus;
-                  const acting = offerActingId === o.id;
-
-                  return (
-                    <div key={o.id} className="reqCard">
-                      <div className="reqRow">
-                        <div style={{ ...thumbWrap, width: 54, height: 54 }}>🤝</div>
-
-                        <div className="reqMain">
-                          <div className="reqTitle">
-                            {who} offered help on <span style={{ opacity: 0.9 }}>{title}</span>
-                          </div>
-                          <div className="reqMeta">
-                            {when ? `Offered: ${when} • ` : ""}
-                            Status: <b>{st}</b>
-                            {o.availability ? ` • Availability: ${o.availability}` : ""}
-                          </div>
-                          {o.note ? <div style={{ marginTop: 8, opacity: 0.82, fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.note}</div> : null}
-                        </div>
-
-                        <div className="reqActions">
-                          <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
-                            View
-                          </button>
-
-                          <button
-                            onClick={() => updateOfferStatus(o, "accepted")}
-                            disabled={acting || st === "accepted" || st === "completed"}
-                            style={{
-                              ...outlineBtn,
-                              marginTop: 0,
-                              border: "1px solid rgba(22,163,74,0.55)",
-                              background: "rgba(22,163,74,0.14)",
-                              cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                              opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                            }}
-                          >
-                            {acting ? "Working…" : "Accept"}
-                          </button>
-
-                          <button
-                            onClick={() => updateOfferStatus(o, "hold")}
-                            disabled={acting || st === "accepted" || st === "completed"}
-                            style={{
-                              ...outlineBtn,
-                              marginTop: 0,
-                              cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                              opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                            }}
-                          >
-                            Hold
-                          </button>
-
-                          <button
-                            onClick={() => updateOfferStatus(o, "declined")}
-                            disabled={acting || st === "declined" || st === "completed"}
-                            style={{
-                              ...outlineBtn,
-                              marginTop: 0,
-                              border: "1px solid #7f1d1d",
-                              cursor: acting || st === "declined" || st === "completed" ? "not-allowed" : "pointer",
-                              opacity: acting || st === "declined" || st === "completed" ? 0.65 : 1,
-                            }}
-                          >
-                            Decline
-                          </button>
-
-                          <button
-                            onClick={() => startChatWithHelper(o)}
-                            disabled={acting || st !== "accepted"}
-                            style={{
-                              ...outlineBtn,
-                              marginTop: 0,
-                              border: st === "accepted" ? "1px solid rgba(22,163,74,0.55)" : "1px solid #334155",
-                              background: st === "accepted" ? "rgba(22,163,74,0.14)" : "transparent",
-                              cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
-                              opacity: acting || st !== "accepted" ? 0.65 : 1,
-                            }}
-                            title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
-                          >
-                            {acting ? "Opening…" : "Start chat"}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </>
-        )}
-
-        {tab === "history" && (
-          <>
-            <div style={{ marginTop: 14 }}>
-              <div style={{ fontWeight: 1000, fontSize: 20 }}>Completed listings</div>
-              <div style={{ opacity: 0.75, marginTop: 6 }}>These were picked up (claimed). No actions needed.</div>
-            </div>
-
-            {completedListings.length === 0 ? (
-              <EmptyBox title="No completed listings yet." body="When a pickup is marked, it will move here." />
-            ) : (
-              <div className="rail">
-                {completedListings.map((item) => (
-                  <div className="railItem" key={item.id}>
-                    <ItemCard item={item} variant="history" />
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        )}
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
 
         {/* Drawer */}
         {drawerOpen && (
@@ -1431,7 +1502,6 @@ const pageWrap: React.CSSProperties = {
   minHeight: "100vh",
   background: "black",
   color: "white",
-  padding: 16,
 };
 
 const avatar: React.CSSProperties = {
