@@ -117,6 +117,10 @@ export default function FeedPage() {
   const [sort, setSort] = useState<"newest" | "popular">("newest");
   const [filtersOpen, setFiltersOpen] = useState(false);
 
+  // search UX
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [searchPulse, setSearchPulse] = useState(false);
+
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
     const session = data.session;
@@ -210,13 +214,11 @@ export default function FeedPage() {
 
     const postType = (item.post_type ?? "give") as PostType;
 
-    // Requests -> detail
     if (postType === "request") {
       router.push(`/item/${item.id}`);
       return;
     }
 
-    // Give -> toggle interest
     const isMine = !!item.owner_id && item.owner_id === userId;
     if (isMine) return;
 
@@ -251,6 +253,14 @@ export default function FeedPage() {
     setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
   }
 
+  // tiny delight: pulse ring when user is typing a query
+  useEffect(() => {
+    if (!query) return;
+    setSearchPulse(true);
+    const t = setTimeout(() => setSearchPulse(false), 240);
+    return () => clearTimeout(t);
+  }, [query]);
+
   useEffect(() => {
     (async () => {
       await syncAuth();
@@ -269,10 +279,15 @@ export default function FeedPage() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") setOpenImg(null);
+      if (e.key === "/" && !openImg) {
+        e.preventDefault();
+        const el = document.getElementById("feedSearch") as HTMLInputElement | null;
+        el?.focus();
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [openImg]);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -337,7 +352,7 @@ export default function FeedPage() {
   return (
     <div className={`${brandFont.className} page`}>
       <header className="topbar">
-        {/* Row 1: logo + brand + create */}
+        {/* Row 1 */}
         <div className="topRow">
           <button className="iconBtn" onClick={() => router.push("/feed")} aria-label="Home" type="button">
             <Image src="/scholarswap-logo.png" alt="ScholarSwap" width={36} height={36} priority className="logoImg" />
@@ -360,7 +375,7 @@ export default function FeedPage() {
           </button>
         </div>
 
-        {/* Row 2: Items/Requests (kept) */}
+        {/* Row 2: Items / Requests */}
         <div className="segTabs" role="tablist" aria-label="Feed tabs">
           <button
             className={`segTab ${tab === "items" ? "active" : ""}`}
@@ -369,7 +384,7 @@ export default function FeedPage() {
             role="tab"
             aria-selected={tab === "items"}
           >
-            <span className="segTxt">Items</span>
+            Items
           </button>
 
           <button
@@ -379,49 +394,85 @@ export default function FeedPage() {
             role="tab"
             aria-selected={tab === "requests"}
           >
-            <span className="segTxt">Requests</span>
+            Requests
           </button>
         </div>
 
-        {/* Row 3: ONE row = Newest + All + Filters + Search (no extra row) */}
+        {/* Row 3: ICON-ONLY pills + search */}
         <div className="oneRow">
-          <label className="pill" aria-label="Sort">
+          {/* Sort: icon-only pill */}
+          <label className="pillIconOnly" aria-label="Sort">
             <span className="ico">↕️</span>
-            <select value={sort} onChange={(e) => setSort(e.target.value as any)}>
+            <select value={sort} onChange={(e) => setSort(e.target.value as any)} aria-label="Sort menu">
               <option value="newest">Newest</option>
               <option value="popular">Popular</option>
             </select>
           </label>
 
-          <label className="pill" aria-label="Role filter">
+          {/* Role: icon-only pill */}
+          <label className="pillIconOnly" aria-label="Lister role">
             <span className="ico">👤</span>
-            <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as any)}>
+            <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as any)} aria-label="Role menu">
               <option value="all">All</option>
               <option value="student">Student</option>
               <option value="faculty">Faculty</option>
             </select>
           </label>
 
-          <button className="pillBtn" onClick={() => setFiltersOpen((v) => !v)} type="button" aria-label="Filters">
+          {/* Filters button (icon-only) */}
+          <button
+            className={`pillBtn ${filtersOpen ? "pillBtnActive" : ""}`}
+            onClick={() => setFiltersOpen((v) => !v)}
+            type="button"
+            aria-label="Filters"
+            title="Filters"
+          >
             <span className="ico">≡</span>
           </button>
 
-          <div className="searchInline" aria-label="Search">
-            <span className="sIco">🔎</span>
+          {/* Search: interactive expanding field */}
+          <div
+            className={`searchWrap ${searchFocused ? "searchFocused" : ""} ${searchPulse ? "searchPulse" : ""}`}
+            aria-label="Search"
+          >
+            <button
+              type="button"
+              className="searchIconBtn"
+              aria-label="Focus search"
+              onClick={() => {
+                const el = document.getElementById("feedSearch") as HTMLInputElement | null;
+                el?.focus();
+              }}
+              title="Search"
+            >
+              🔎
+            </button>
+
             <input
+              id="feedSearch"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder={tab === "items" ? "Search…" : "Search…"}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              placeholder={tab === "items" ? "Search items…" : "Search requests…"}
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
             />
+
+            <div className="kbdHint" aria-hidden="true">
+              /
+            </div>
+
             {query ? (
-              <button className="xBtn" onClick={() => setQuery("")} type="button" aria-label="Clear">
+              <button className="clearBtn" onClick={() => setQuery("")} type="button" aria-label="Clear search">
                 ✕
               </button>
             ) : null}
           </div>
         </div>
 
-        {/* Row 4: category chips only when Filters open */}
+        {/* Category chips only when Filters open */}
         {tab === "items" && filtersOpen && (
           <div className="chips">
             {categories.map((c) => {
@@ -654,7 +705,7 @@ export default function FeedPage() {
           cursor: pointer;
         }
 
-        /* Row 2: Tabs */
+        /* Row 2 */
         .segTabs {
           padding: 6px 14px 8px;
           display: grid;
@@ -671,10 +722,6 @@ export default function FeedPage() {
           color: rgba(255, 255, 255, 0.86);
           font-weight: 950;
           cursor: pointer;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          gap: 8px;
           min-width: 0;
         }
 
@@ -684,45 +731,34 @@ export default function FeedPage() {
           color: rgba(209, 250, 229, 0.95);
         }
 
-        /* Row 3: ONE row for pills + search */
+        /* Row 3: icon-only controls + animated search */
         .oneRow {
           padding: 0 14px 10px;
           display: grid;
-          grid-template-columns: 1.05fr 0.85fr 52px 1.25fr;
+          grid-template-columns: 52px 52px 52px 1fr;
           gap: 10px;
           align-items: center;
         }
 
-        .pill {
+        .pillIconOnly {
           height: 44px;
+          width: 52px;
           border-radius: 999px;
           border: 1px solid rgba(148, 163, 184, 0.22);
           background: rgba(255, 255, 255, 0.04);
-          color: rgba(255, 255, 255, 0.86);
-          padding: 0 12px;
-          font-weight: 950;
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          min-width: 0;
+          color: rgba(255, 255, 255, 0.9);
+          display: grid;
+          place-items: center;
+          position: relative;
+          overflow: hidden;
         }
 
-        .ico {
-          opacity: 0.9;
-          font-size: 16px;
-          width: 20px;
-          display: inline-flex;
-          justify-content: center;
-        }
-
-        .pill select {
+        .pillIconOnly select {
+          position: absolute;
+          inset: 0;
+          opacity: 0;
           width: 100%;
-          min-width: 0;
-          background: transparent;
-          border: none;
-          outline: none;
-          color: #fff;
-          font-weight: 950;
+          height: 100%;
           cursor: pointer;
         }
 
@@ -737,27 +773,84 @@ export default function FeedPage() {
           cursor: pointer;
           display: grid;
           place-items: center;
+          transition: transform 0.12s ease, border-color 0.18s ease, background 0.18s ease;
         }
 
-        .searchInline {
+        .pillBtn:active {
+          transform: scale(0.98);
+        }
+
+        .pillBtnActive {
+          border: 1px solid rgba(52, 211, 153, 0.45);
+          background: rgba(16, 185, 129, 0.14);
+        }
+
+        .ico {
+          opacity: 0.95;
+          font-size: 16px;
+          line-height: 1;
+        }
+
+        .searchWrap {
           height: 44px;
           border-radius: 999px;
           border: 1px solid rgba(148, 163, 184, 0.18);
           background: rgba(255, 255, 255, 0.03);
-          display: flex;
+          display: grid;
+          grid-template-columns: 40px 1fr auto auto;
           align-items: center;
           gap: 8px;
-          padding: 0 12px;
-          min-width: 0;
+          padding: 0 10px 0 6px;
+          position: relative;
+          overflow: hidden;
+          transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
         }
 
-        .sIco {
-          opacity: 0.7;
-          font-size: 15px;
+        .searchFocused {
+          border-color: rgba(52, 211, 153, 0.45);
+          box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.14);
         }
 
-        .searchInline input {
-          flex: 1;
+        .searchPulse::before {
+          content: "";
+          position: absolute;
+          inset: -2px;
+          border-radius: 999px;
+          border: 1px solid rgba(52, 211, 153, 0.35);
+          animation: pulse 0.24s ease-out;
+          pointer-events: none;
+        }
+
+        @keyframes pulse {
+          from {
+            opacity: 0.9;
+            transform: scale(0.98);
+          }
+          to {
+            opacity: 0;
+            transform: scale(1.02);
+          }
+        }
+
+        .searchIconBtn {
+          width: 40px;
+          height: 40px;
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.18);
+          background: rgba(255, 255, 255, 0.04);
+          color: #fff;
+          cursor: pointer;
+          display: grid;
+          place-items: center;
+          transition: transform 0.12s ease, border-color 0.18s ease, background 0.18s ease;
+        }
+
+        .searchIconBtn:active {
+          transform: scale(0.98);
+        }
+
+        .searchWrap input {
+          width: 100%;
           min-width: 0;
           border: none;
           outline: none;
@@ -767,23 +860,43 @@ export default function FeedPage() {
           font-size: 13px;
         }
 
-        .searchInline input::placeholder {
+        .searchWrap input::placeholder {
           color: rgba(255, 255, 255, 0.45);
           font-weight: 900;
         }
 
-        .xBtn {
+        .kbdHint {
+          height: 26px;
+          min-width: 26px;
+          padding: 0 8px;
+          border-radius: 10px;
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          background: rgba(0, 0, 0, 0.25);
+          opacity: 0.65;
+          font-weight: 950;
+          display: none; /* show on desktop only */
+          align-items: center;
+          justify-content: center;
+          font-size: 12px;
+        }
+
+        .clearBtn {
           border: 1px solid rgba(148, 163, 184, 0.22);
           background: rgba(255, 255, 255, 0.04);
           color: #fff;
           border-radius: 999px;
-          width: 28px;
-          height: 28px;
+          width: 32px;
+          height: 32px;
           display: grid;
           place-items: center;
           cursor: pointer;
           font-weight: 950;
           opacity: 0.9;
+          transition: transform 0.12s ease;
+        }
+
+        .clearBtn:active {
+          transform: scale(0.98);
         }
 
         /* Chips */
@@ -1089,38 +1202,16 @@ export default function FeedPage() {
           background: #000;
         }
 
-        /* Tiny phones: keep everything on one row by shrinking text */
-        @media (max-width: 380px) {
-          .oneRow {
-            grid-template-columns: 1.1fr 0.9fr 48px 1.1fr;
-            gap: 8px;
-          }
-          .brandName {
-            font-size: 18px;
-          }
-          .pill select {
-            font-size: 13px;
-          }
-          .searchInline input {
-            font-size: 12px;
+        /* Desktop: show "/" hint */
+        @media (min-width: 900px) {
+          .kbdHint {
+            display: inline-flex;
           }
         }
 
-        /* Desktop */
+        /* Desktop layout widen */
         @media (min-width: 900px) {
-          .topRow {
-            padding: 16px 16px 8px;
-            grid-template-columns: 52px 1fr 52px;
-          }
-          .iconBtn,
-          .createBtn {
-            width: 52px;
-            height: 52px;
-            border-radius: 16px;
-          }
-          .brandName {
-            font-size: 28px;
-          }
+          .topRow,
           .segTabs,
           .oneRow,
           .subline,
@@ -1134,6 +1225,19 @@ export default function FeedPage() {
             max-width: 1100px;
             margin: 0 auto;
             padding: 16px 16px 96px;
+          }
+          .topRow {
+            padding: 16px 16px 8px;
+            grid-template-columns: 52px 1fr 52px;
+          }
+          .iconBtn,
+          .createBtn {
+            width: 52px;
+            height: 52px;
+            border-radius: 16px;
+          }
+          .brandName {
+            font-size: 28px;
           }
         }
       `}</style>
