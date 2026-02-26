@@ -59,16 +59,11 @@ function normStatus(s: string | null | undefined) {
   return (s ?? "available").toLowerCase().trim();
 }
 
-/**
- * IMPORTANT PSYCHOLOGY:
- * - Reserved items still show as AVAILABLE (so waitlist can join).
- * - But we add a secondary hint “In talks • Waitlist open” so users understand.
- */
+// keep reserved visible but show AVAILABLE badge
 function badgeText(postType: PostType, status: string | null) {
   if ((postType ?? "give") === "request") return "REQUEST";
   const st = normStatus(status);
   if (st === "claimed") return "CLAIMED";
-  // reserved still displays as AVAILABLE
   return "AVAILABLE";
 }
 
@@ -96,10 +91,6 @@ function requestTimeframeLabel(t: string | null | undefined) {
   return "";
 }
 
-function safeTitle(s: string) {
-  return (s ?? "").trim();
-}
-
 export default function FeedPage() {
   const router = useRouter();
 
@@ -124,6 +115,9 @@ export default function FeedPage() {
   const [query, setQuery] = useState<string>("");
   const [sort, setSort] = useState<"new" | "popular">("new");
 
+  // NEW: mobile filter collapse
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
     const session = data.session;
@@ -139,13 +133,7 @@ export default function FeedPage() {
       setMyInterested({});
       return;
     }
-
-    const { data, error } = await supabase
-      .from("interests")
-      .select("item_id")
-      .eq("user_id", uid)
-      .in("item_id", itemIds);
-
+    const { data, error } = await supabase.from("interests").select("item_id").eq("user_id", uid).in("item_id", itemIds);
     if (error) return;
 
     const map: Record<string, boolean> = {};
@@ -204,11 +192,7 @@ export default function FeedPage() {
       };
     });
 
-    /**
-     * KEY RULE YOU ASKED FOR:
-     * - Keep reserved/in-talk items in feed.
-     * - Only hide if truly completed (claimed).
-     */
+    // Hide ONLY if completed/claimed
     const visible = merged.filter((x) => {
       const st = normStatus(x.status);
       const claimed = !!x.is_claimed || st === "claimed";
@@ -232,7 +216,6 @@ export default function FeedPage() {
 
     const postType = (item.post_type ?? "give") as PostType;
 
-    // Requests = Offer help -> detail page
     if (postType === "request") {
       router.push(`/item/${item.id}`);
       return;
@@ -272,7 +255,6 @@ export default function FeedPage() {
     setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
   }
 
-  // Initial load + auth changes
   useEffect(() => {
     (async () => {
       await syncAuth();
@@ -287,26 +269,6 @@ export default function FeedPage() {
     return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Optional realtime refresh for instant updates
-  useEffect(() => {
-    const ch = supabase
-      .channel("feed-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "items" }, () => {
-        // refresh when any item changes status/reservation/claimed
-        loadFeed();
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "interests" }, () => {
-        // refresh counts & waitlist state
-        loadFeed();
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(ch);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoggedIn, userId]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -339,19 +301,16 @@ export default function FeedPage() {
     let out = tabbed.filter((x) => {
       const pt = (x.post_type ?? "give") as PostType;
 
-      // category only for items
       if (pt !== "request") {
         if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
       }
 
-      // role filter
       if (roleFilter !== "all") {
         const r = (x.owner_role ?? null) as OwnerRole;
         if (!r) return false;
         if (r !== roleFilter) return false;
       }
 
-      // search
       if (q) {
         const hay = `${x.title ?? ""} ${x.description ?? ""} ${x.category ?? ""} ${x.request_location ?? ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -360,35 +319,24 @@ export default function FeedPage() {
       return true;
     });
 
-    // sort
-    if (sort === "popular") {
-      out = [...out].sort((a, b) => (b.interest_count || 0) - (a.interest_count || 0));
-    } else {
-      out = [...out].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    }
+    if (sort === "popular") out = [...out].sort((a, b) => (b.interest_count || 0) - (a.interest_count || 0));
+    else out = [...out].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
     return out;
   }, [tabbed, categoryFilter, roleFilter, query, sort]);
 
   return (
     <div className={`${brandFont.className} page`}>
-      {/* Top bar */}
       <header className="topbar">
-        <div className="topbarInner">
+        {/* COMPACT HEADER ROW */}
+        <div className="topRow">
           <button className="logoBtn" onClick={() => router.push("/feed")} aria-label="Home" type="button">
-            <Image src="/scholarswap-logo.png" alt="ScholarSwap" width={52} height={52} priority className="logoImg" />
+            <Image src="/scholarswap-logo.png" alt="ScholarSwap" width={44} height={44} priority className="logoImg" />
           </button>
 
-          <div className="brand">
+          <div className="brandCompact">
             <div className="brandName">ScholarSwap</div>
-            <Image
-              src="/Ashland_Eagles_logo.svg.png"
-              alt="Ashland University"
-              width={26}
-              height={26}
-              priority
-              className="brandMark"
-            />
+            <Image src="/Ashland_Eagles_logo.svg.png" alt="AU" width={18} height={18} priority className="brandMark" />
           </div>
 
           <button className="createBtn" onClick={() => router.push("/create")} aria-label="Create" type="button">
@@ -396,227 +344,205 @@ export default function FeedPage() {
           </button>
         </div>
 
-        {/* Tabs + filters */}
-        <div className="controls">
-          <div className="row">
-            <div className="tabs">
-              <button className={`tab ${tab === "items" ? "active" : ""}`} onClick={() => setTab("items")} type="button">
-                Items
-              </button>
-              <button
-                className={`tab ${tab === "requests" ? "active" : ""}`}
-                onClick={() => setTab("requests")}
-                type="button"
-              >
-                Requests
-              </button>
-            </div>
-
-            <div className="rightRow">
-              <div className="pill selectPill" aria-label="Sort">
-                <span className="pillIcon">↕️</span>
-                <select value={sort} onChange={(e) => setSort(e.target.value as any)}>
-                  <option value="new">Newest</option>
-                  <option value="popular">Most requested</option>
-                </select>
-              </div>
-
-              <div className="pill selectPill" aria-label="Filter by lister">
-                <span className="pillIcon">👤</span>
-                <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as any)}>
-                  <option value="all">All</option>
-                  <option value="student">Student</option>
-                  <option value="faculty">Faculty</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div className="searchRow">
-            <div className="search">
-              <span className="searchIcon">🔎</span>
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder={tab === "items" ? "Search items, categories, descriptions…" : "Search requests, locations…"}
-              />
-              {query ? (
-                <button className="clearBtn" onClick={() => setQuery("")} type="button" aria-label="Clear">
-                  ✕
-                </button>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="filters">
-            {tab === "items" && (
-              <div className="chipRow">
-                {categories.map((c) => {
-                  const active = categoryFilter === c;
-                  const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
-                  return (
-                    <button
-                      key={c}
-                      className={`pill chip ${active ? "chipActive" : ""}`}
-                      onClick={() => setCategoryFilter(c)}
-                      type="button"
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <div className="subline">
-            <div className="subTitle">{tab === "items" ? "Public Items" : "Public Requests"}</div>
-            <div className="count">
-              Showing <b>{filtered.length}</b>
-            </div>
-          </div>
-
-          {err && <div className="err">{err}</div>}
-          {loading && <div className="loading">Loading…</div>}
-        </div>
-      </header>
-
-      {/* Grid */}
-      <main className="main">
-        {(!loading && filtered.length === 0) ? (
-          <div className="empty">
-            <div className="emptyTitle">Nothing here yet.</div>
-            <div className="emptySub">
-              {tab === "items"
-                ? "Try changing filters or be the first to list something."
-                : "Try changing filters or post a request someone can help with."}
-            </div>
-            <button className="emptyBtn" onClick={() => router.push("/create")} type="button">
-              + Create
+        {/* SEGMENTED TABS + QUICK CONTROLS (1 row on mobile) */}
+        <div className="controlRow">
+          <div className="seg">
+            <button className={`segBtn ${tab === "items" ? "on" : ""}`} onClick={() => setTab("items")} type="button">
+              Items
+            </button>
+            <button
+              className={`segBtn ${tab === "requests" ? "on" : ""}`}
+              onClick={() => setTab("requests")}
+              type="button"
+            >
+              Requests
             </button>
           </div>
-        ) : (
-          <div className="grid">
-            {filtered.map((item) => {
-              const postType = (item.post_type ?? "give") as PostType;
-              const isMine = !!userId && !!item.owner_id && item.owner_id === userId;
 
-              const interested = myInterested[item.id] === true;
-              const st = normStatus(item.status);
-              const isReserved = postType !== "request" && st === "reserved";
+          <div className="miniControls">
+            <div className="miniPill" aria-label="Sort">
+              <span className="miniIcon">↕️</span>
+              <select value={sort} onChange={(e) => setSort(e.target.value as any)}>
+                <option value="new">Newest</option>
+                <option value="popular">Popular</option>
+              </select>
+            </div>
 
-              const group = requestGroupLabel(item.request_group);
-              const tf = requestTimeframeLabel(item.request_timeframe);
-              const loc = (item.request_location ?? "").trim();
+            <div className="miniPill" aria-label="Role">
+              <span className="miniIcon">👤</span>
+              <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as any)}>
+                <option value="all">All</option>
+                <option value="student">Student</option>
+                <option value="faculty">Faculty</option>
+              </select>
+            </div>
 
-              const primaryLabel = (() => {
-                if (isMine) return "Yours";
-                if (savingId === item.id) return "Saving…";
-                if (postType === "request") return isLoggedIn ? "Offer help" : "Offer (login)";
-                // give
-                if (!isLoggedIn) return "Request (login)";
-                if (interested) return isReserved ? "Waitlisted" : "Requested";
-                return isReserved ? "Join waitlist" : "Request";
-              })();
+            <button
+              className={`filtersBtn ${filtersOpen ? "filtersOn" : ""}`}
+              onClick={() => setFiltersOpen((v) => !v)}
+              type="button"
+            >
+              ☰
+            </button>
+          </div>
+        </div>
 
-              return (
-                <article
-                  key={item.id}
-                  className={`card ${postType === "request" ? "cardRequest" : ""} ${isReserved ? "cardReserved" : ""}`}
-                >
-                  {/* Media / Header */}
-                  {postType === "request" ? (
-                    <div className="reqHero">
-                      <div className="badge badgeRequest">{badgeText(postType, item.status)}</div>
-                      <div className="reqMeta">
-                        {group}
-                        {tf ? ` • ${tf}` : ""}
-                        {loc ? ` • ${loc}` : ""}
-                      </div>
-                      <div className="title clamp2">{safeTitle(item.title)}</div>
-                    </div>
-                  ) : (
-                    <div className="media">
-                      <div className="badge badgeItem">{badgeText(postType, item.status)}</div>
-                      {statusHint(postType, item.status) ? (
-                        <div className="subBadge">{statusHint(postType, item.status)}</div>
-                      ) : null}
+        {/* SEARCH (still there but shorter) */}
+        <div className="searchRow">
+          <div className="search">
+            <span className="searchIcon">🔎</span>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={tab === "items" ? "Search items…" : "Search requests, locations…"}
+            />
+            {query ? (
+              <button className="clearBtn" onClick={() => setQuery("")} type="button" aria-label="Clear">
+                ✕
+              </button>
+            ) : null}
+          </div>
+        </div>
 
-                      {item.photo_url ? (
-                        <button
-                          className="mediaBtn"
-                          onClick={() => {
-                            setOpenImg(item.photo_url!);
-                            setOpenTitle(item.title);
-                          }}
-                          aria-label="Open photo"
-                          type="button"
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={item.photo_url} alt={item.title} loading="lazy" className="mediaImg" />
-                        </button>
-                      ) : (
-                        <div className="noPhoto">
-                          <div className="noPhotoIcon">📦</div>
-                          <div className="noPhotoText">No photo</div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Body */}
-                  <div className="body">
-                    <div className="metaRow">
-                      <span className="meta">
-                        {postType === "request"
-                          ? `Type: ${group}`
-                          : item.category
-                          ? `Category: ${item.category}`
-                          : "Category: —"}
-                      </span>
-                      {item.owner_role ? <span className="meta">• {item.owner_role}</span> : null}
-                      {isMine ? <span className="mine">Yours</span> : null}
-                      {isReserved && !isMine ? <span className="waitlistPill">Waitlist</span> : null}
-                    </div>
-
-                    {postType !== "request" ? <div className="title">{safeTitle(item.title)}</div> : null}
-                    <div className="desc clamp2">{item.description || "—"}</div>
-
-                    <div className="footerRow">
-                      {postType === "request" ? (
-                        <span className="small">Tap to offer help</span>
-                      ) : (
-                        <span className="small">
-                          {(item.interest_count || 0)} {isReserved ? "waiting" : "requests"}
-                        </span>
-                      )}
-
-                      {item.expires_at ? <span className="small">Ends: {formatShortDate(item.expires_at)}</span> : null}
-                    </div>
-
-                    <div className="actions">
-                      <button className="btn btnGhost" onClick={() => router.push(`/item/${item.id}`)} type="button">
-                        View
-                      </button>
-
-                      <button
-                        className={`btn btnPrimary ${isMine ? "btnDisabled" : ""}`}
-                        onClick={() => onPrimaryAction(item)}
-                        disabled={savingId === item.id || isMine}
-                        type="button"
-                      >
-                        {primaryLabel}
-                      </button>
-                    </div>
-                  </div>
-                </article>
-              );
-            })}
+        {/* COLLAPSIBLE FILTERS (mobile) */}
+        {(filtersOpen || typeof window === "undefined") && tab === "items" && (
+          <div className="chipsWrap">
+            <div className="chipRow">
+              {categories.map((c) => {
+                const active = categoryFilter === c;
+                const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
+                return (
+                  <button
+                    key={c}
+                    className={`chip ${active ? "chipOn" : ""}`}
+                    onClick={() => setCategoryFilter(c)}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         )}
+
+        {/* SUBLINE */}
+        <div className="subline">
+          <div className="subTitle">{tab === "items" ? "Public Items" : "Public Requests"}</div>
+          <div className="count">
+            Showing <b>{filtered.length}</b>
+          </div>
+        </div>
+
+        {err && <div className="err">{err}</div>}
+        {loading && <div className="loading">Loading…</div>}
+      </header>
+
+      <main className="main">
+        <div className="grid">
+          {filtered.map((item) => {
+            const postType = (item.post_type ?? "give") as PostType;
+            const isMine = !!userId && !!item.owner_id && item.owner_id === userId;
+            const interested = myInterested[item.id] === true;
+
+            const st = normStatus(item.status);
+            const isReserved = postType !== "request" && st === "reserved";
+
+            const group = requestGroupLabel(item.request_group);
+            const tf = requestTimeframeLabel(item.request_timeframe);
+            const loc = (item.request_location ?? "").trim();
+
+            const primaryLabel = (() => {
+              if (isMine) return "Yours";
+              if (savingId === item.id) return "Saving…";
+              if (postType === "request") return isLoggedIn ? "Offer help" : "Offer (login)";
+              if (!isLoggedIn) return "Request (login)";
+              if (interested) return isReserved ? "Waitlisted" : "Requested";
+              return isReserved ? "Join waitlist" : "Request";
+            })();
+
+            return (
+              <article key={item.id} className={`card ${postType === "request" ? "cardRequest" : ""} ${isReserved ? "cardReserved" : ""}`}>
+                {postType === "request" ? (
+                  <div className="reqHero">
+                    <div className="badge badgeRequest">{badgeText(postType, item.status)}</div>
+                    <div className="reqMeta">
+                      {group}
+                      {tf ? ` • ${tf}` : ""}
+                      {loc ? ` • ${loc}` : ""}
+                    </div>
+                    <div className="title clamp2">{item.title}</div>
+                  </div>
+                ) : (
+                  <div className="media">
+                    <div className="badge badgeItem">{badgeText(postType, item.status)}</div>
+                    {statusHint(postType, item.status) ? <div className="subBadge">{statusHint(postType, item.status)}</div> : null}
+
+                    {item.photo_url ? (
+                      <button
+                        className="mediaBtn"
+                        onClick={() => {
+                          setOpenImg(item.photo_url!);
+                          setOpenTitle(item.title);
+                        }}
+                        aria-label="Open photo"
+                        type="button"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={item.photo_url} alt={item.title} loading="lazy" className="mediaImg" />
+                      </button>
+                    ) : (
+                      <div className="noPhoto">No photo</div>
+                    )}
+                  </div>
+                )}
+
+                <div className="body">
+                  <div className="metaRow">
+                    <span className="meta">
+                      {postType === "request"
+                        ? `Type: ${group}`
+                        : item.category
+                        ? `Category: ${item.category}`
+                        : "Category: —"}
+                    </span>
+                    {item.owner_role ? <span className="meta">• {item.owner_role}</span> : null}
+                    {isMine ? <span className="mine">Yours</span> : null}
+                    {isReserved && !isMine ? <span className="waitlistPill">Waitlist</span> : null}
+                  </div>
+
+                  {postType !== "request" ? <div className="title">{item.title}</div> : null}
+                  <div className="desc clamp2">{item.description || "—"}</div>
+
+                  <div className="footerRow">
+                    {postType === "request" ? (
+                      <span className="small">Tap to offer help</span>
+                    ) : (
+                      <span className="small">{item.interest_count || 0} {isReserved ? "waiting" : "requests"}</span>
+                    )}
+                    {item.expires_at ? <span className="small">Ends: {formatShortDate(item.expires_at)}</span> : null}
+                  </div>
+
+                  <div className="actions">
+                    <button className="btn btnGhost" onClick={() => router.push(`/item/${item.id}`)} type="button">
+                      View
+                    </button>
+                    <button
+                      className={`btn btnPrimary ${isMine ? "btnDisabled" : ""}`}
+                      onClick={() => onPrimaryAction(item)}
+                      disabled={savingId === item.id || isMine}
+                      type="button"
+                    >
+                      {primaryLabel}
+                    </button>
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
       </main>
 
-      {/* Image Modal */}
       {openImg && (
         <div className="modal" onClick={() => setOpenImg(null)} role="dialog" aria-modal="true">
           <div className="modalInner" onClick={(e) => e.stopPropagation()}>
@@ -635,12 +561,11 @@ export default function FeedPage() {
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background: radial-gradient(1200px 500px at 50% -10%, rgba(16, 185, 129, 0.18), rgba(0, 0, 0, 0) 55%),
-            #000;
+          background: #000;
           color: #fff;
         }
 
-        /* Topbar */
+        /* Compact sticky header */
         .topbar {
           position: sticky;
           top: 0;
@@ -648,28 +573,28 @@ export default function FeedPage() {
           background: rgba(0, 0, 0, 0.92);
           backdrop-filter: blur(14px);
           border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+          padding-bottom: 10px;
         }
 
-        .topbarInner {
-          padding: 16px 16px 10px;
+        .topRow {
+          padding: 12px 14px 8px;
           display: grid;
-          grid-template-columns: 52px 1fr 52px;
+          grid-template-columns: 44px 1fr 44px;
           align-items: center;
           gap: 10px;
         }
 
         .logoBtn {
-          width: 52px;
-          height: 52px;
-          border-radius: 16px;
+          width: 44px;
+          height: 44px;
+          border-radius: 14px;
           overflow: hidden;
-          background: rgba(255, 255, 255, 0.9);
-          border: 1px solid rgba(255, 255, 255, 0.10);
+          background: #fff;
+          border: 1px solid rgba(255, 255, 255, 0.08);
           display: grid;
           place-items: center;
           padding: 0;
           cursor: pointer;
-          box-shadow: 0 10px 25px rgba(0,0,0,0.35);
         }
 
         .logoImg {
@@ -679,20 +604,19 @@ export default function FeedPage() {
           padding: 6px;
         }
 
-        .brand {
+        .brandCompact {
           display: flex;
           align-items: center;
           justify-content: center;
-          gap: 10px;
+          gap: 8px;
           min-width: 0;
         }
 
         .brandName {
-          font-size: 28px;
-          font-weight: 700;
-          letter-spacing: -0.6px;
+          font-size: 22px;
+          font-weight: 800;
+          letter-spacing: -0.5px;
           white-space: nowrap;
-          text-shadow: 0 14px 30px rgba(0,0,0,0.55);
         }
 
         .brandMark {
@@ -700,100 +624,101 @@ export default function FeedPage() {
         }
 
         .createBtn {
-          width: 52px;
-          height: 52px;
-          border-radius: 16px;
+          width: 44px;
+          height: 44px;
+          border-radius: 14px;
           border: 1px solid rgba(52, 211, 153, 0.35);
           background: rgba(16, 185, 129, 0.18);
           color: #fff;
-          font-size: 26px;
-          font-weight: 700;
+          font-size: 24px;
+          font-weight: 900;
           display: grid;
           place-items: center;
           cursor: pointer;
-          box-shadow: 0 10px 26px rgba(0,0,0,0.45);
-          transition: transform 120ms ease, background 120ms ease;
         }
 
-        .createBtn:hover { transform: translateY(-1px); background: rgba(16,185,129,0.24); }
-
-        .controls {
-          padding: 0 16px 14px;
-        }
-
-        .row {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          margin-top: 6px;
-          flex-wrap: wrap;
-        }
-
-        .tabs {
-          display: flex;
+        .controlRow {
+          padding: 0 14px;
+          display: grid;
+          grid-template-columns: 1fr auto;
           gap: 10px;
+          align-items: center;
         }
 
-        .tab {
-          flex: 0 0 auto;
-          padding: 10px 14px;
+        /* segmented tabs */
+        .seg {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
           border-radius: 999px;
           border: 1px solid rgba(148, 163, 184, 0.22);
           background: rgba(255, 255, 255, 0.04);
-          color: rgba(255, 255, 255, 0.86);
-          font-weight: 800;
+          overflow: hidden;
+        }
+
+        .segBtn {
+          padding: 10px 12px;
+          background: transparent;
+          border: none;
+          color: rgba(255, 255, 255, 0.82);
+          font-weight: 900;
           cursor: pointer;
         }
 
-        .tab.active {
-          border: 1px solid rgba(52, 211, 153, 0.45);
+        .segBtn.on {
           background: rgba(16, 185, 129, 0.14);
           color: rgba(209, 250, 229, 0.95);
         }
 
-        .rightRow {
+        .miniControls {
           display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-          justify-content: flex-end;
+          gap: 8px;
+          align-items: center;
         }
 
-        .pill {
+        .miniPill {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
           border-radius: 999px;
           border: 1px solid rgba(148, 163, 184, 0.22);
           background: rgba(255, 255, 255, 0.04);
-          color: rgba(255, 255, 255, 0.86);
-          padding: 10px 14px;
-          font-weight: 900;
-          cursor: pointer;
-          white-space: nowrap;
+          padding: 0 10px;
+          height: 40px;
         }
 
-        .selectPill {
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          padding: 0 12px;
-        }
-
-        .pillIcon {
-          font-size: 14px;
+        .miniIcon {
           opacity: 0.9;
+          font-size: 14px;
         }
 
-        .selectPill select {
+        .miniPill select {
           background: transparent;
           border: none;
           outline: none;
           color: #fff;
           font-weight: 900;
           cursor: pointer;
-          padding: 10px 0;
+          height: 40px;
+        }
+
+        .filtersBtn {
+          height: 40px;
+          width: 40px;
+          border-radius: 14px;
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          background: rgba(255, 255, 255, 0.04);
+          color: #fff;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .filtersOn {
+          border: 1px solid rgba(52, 211, 153, 0.45);
+          background: rgba(16, 185, 129, 0.14);
         }
 
         .searchRow {
-          margin-top: 10px;
+          padding: 10px 14px 0;
         }
 
         .search {
@@ -806,7 +731,7 @@ export default function FeedPage() {
           padding: 10px 12px;
         }
 
-        .searchIcon { opacity: 0.8; }
+        .searchIcon { opacity: 0.7; }
 
         .search input {
           flex: 1;
@@ -814,7 +739,7 @@ export default function FeedPage() {
           outline: none;
           background: transparent;
           color: #fff;
-          font-weight: 800;
+          font-weight: 900;
         }
 
         .clearBtn {
@@ -827,30 +752,38 @@ export default function FeedPage() {
           font-weight: 950;
         }
 
-        .filters {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          margin-top: 10px;
-          overflow: hidden;
+        .chipsWrap {
+          padding: 10px 14px 0;
         }
 
         .chipRow {
           display: flex;
-          gap: 10px;
+          gap: 8px;
           overflow-x: auto;
-          padding-bottom: 6px;
           -webkit-overflow-scrolling: touch;
+          padding-bottom: 6px;
         }
 
-        .chipActive {
+        .chip {
+          flex: 0 0 auto;
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          background: rgba(255, 255, 255, 0.04);
+          color: rgba(255, 255, 255, 0.86);
+          padding: 8px 12px;
+          font-weight: 900;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .chipOn {
           border: 1px solid rgba(52, 211, 153, 0.45);
           background: rgba(16, 185, 129, 0.14);
           color: rgba(209, 250, 229, 0.95);
         }
 
         .subline {
-          margin-top: 10px;
+          padding: 10px 14px 0;
           display: flex;
           justify-content: space-between;
           align-items: baseline;
@@ -858,38 +791,38 @@ export default function FeedPage() {
         }
 
         .subTitle {
-          font-size: 14px;
-          font-weight: 900;
+          font-size: 13px;
+          font-weight: 950;
           opacity: 0.9;
         }
 
         .count {
-          font-size: 13px;
+          font-size: 12px;
           opacity: 0.65;
-          font-weight: 900;
+          font-weight: 950;
         }
 
         .err {
-          margin-top: 10px;
+          padding: 10px 14px 0;
           color: #f87171;
           font-weight: 800;
         }
 
         .loading {
-          margin-top: 10px;
+          padding: 10px 14px 0;
           opacity: 0.7;
           font-weight: 800;
         }
 
-        /* Main grid */
+        /* Grid */
         .main {
-          padding: 14px 16px 96px;
+          padding: 14px 14px 96px;
         }
 
         .grid {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
-          gap: 16px;
+          gap: 14px;
         }
 
         .card {
@@ -897,23 +830,16 @@ export default function FeedPage() {
           border-radius: 18px;
           border: 1px solid rgba(148, 163, 184, 0.15);
           overflow: hidden;
-          box-shadow: 0 12px 34px rgba(0, 0, 0, 0.38);
-          transform: translateZ(0);
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
         }
 
-        .cardReserved {
-          border: 1px solid rgba(34, 197, 94, 0.22);
-          box-shadow: 0 14px 44px rgba(16,185,129,0.10), 0 12px 34px rgba(0,0,0,0.38);
-        }
-
-        .cardRequest {
-          border: 1px solid rgba(34, 197, 94, 0.22);
-        }
+        .cardRequest { border: 1px solid rgba(34, 197, 94, 0.22); }
+        .cardReserved { border: 1px solid rgba(34, 197, 94, 0.22); }
 
         .media {
           position: relative;
           height: 210px;
-          background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(0, 0, 0, 0.25));
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.25));
         }
 
         .mediaBtn {
@@ -930,20 +856,17 @@ export default function FeedPage() {
           height: 100%;
           object-fit: cover;
           display: block;
-          filter: saturate(1.05) contrast(1.02);
         }
 
         .noPhoto {
           width: 100%;
           height: 100%;
-          display: grid;
-          place-items: center;
-          color: rgba(255, 255, 255, 0.55);
-          font-weight: 900;
-          gap: 6px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: rgba(255, 255, 255, 0.45);
+          font-weight: 800;
         }
-        .noPhotoIcon { font-size: 28px; opacity: 0.85; }
-        .noPhotoText { font-size: 13px; opacity: 0.85; }
 
         .reqHero {
           position: relative;
@@ -952,7 +875,7 @@ export default function FeedPage() {
           display: flex;
           flex-direction: column;
           justify-content: flex-end;
-          background: linear-gradient(180deg, rgba(34, 197, 94, 0.14), rgba(0, 0, 0, 0.25));
+          background: linear-gradient(180deg, rgba(34, 197, 94, 0.12), rgba(0, 0, 0, 0.25));
         }
 
         .badge {
@@ -962,10 +885,10 @@ export default function FeedPage() {
           padding: 6px 10px;
           border-radius: 999px;
           font-size: 12px;
-          font-weight: 950;
+          font-weight: 900;
           border: 1px solid rgba(148, 163, 184, 0.25);
           background: rgba(0, 0, 0, 0.35);
-          color: rgba(255, 255, 255, 0.9);
+          color: rgba(255, 255, 255, 0.85);
         }
 
         .subBadge {
@@ -975,10 +898,10 @@ export default function FeedPage() {
           padding: 6px 10px;
           border-radius: 999px;
           font-size: 12px;
-          font-weight: 950;
+          font-weight: 900;
           border: 1px solid rgba(34, 197, 94, 0.22);
-          background: rgba(16,185,129,0.12);
-          color: rgba(209,250,229,0.92);
+          background: rgba(16, 185, 129, 0.12);
+          color: rgba(209, 250, 229, 0.92);
         }
 
         .badgeRequest {
@@ -1000,9 +923,7 @@ export default function FeedPage() {
           margin-bottom: 6px;
         }
 
-        .body {
-          padding: 14px;
-        }
+        .body { padding: 14px; }
 
         .metaRow {
           display: flex;
@@ -1014,7 +935,7 @@ export default function FeedPage() {
         .meta {
           font-size: 12px;
           opacity: 0.72;
-          font-weight: 900;
+          font-weight: 800;
         }
 
         .mine {
@@ -1023,8 +944,8 @@ export default function FeedPage() {
           border-radius: 999px;
           border: 1px solid rgba(148, 163, 184, 0.22);
           background: rgba(255, 255, 255, 0.04);
-          opacity: 0.92;
-          font-weight: 950;
+          opacity: 0.9;
+          font-weight: 900;
         }
 
         .waitlistPill {
@@ -1057,12 +978,8 @@ export default function FeedPage() {
           justify-content: space-between;
           gap: 10px;
           opacity: 0.72;
-          font-weight: 950;
+          font-weight: 900;
           font-size: 12px;
-        }
-
-        .small {
-          opacity: 0.72;
         }
 
         .actions {
@@ -1079,10 +996,7 @@ export default function FeedPage() {
           cursor: pointer;
           font-weight: 950;
           border: 1px solid rgba(148, 163, 184, 0.25);
-          transition: transform 120ms ease, background 120ms ease, border 120ms ease;
         }
-
-        .btn:hover { transform: translateY(-1px); }
 
         .btnGhost {
           background: rgba(255, 255, 255, 0.03);
@@ -1107,29 +1021,6 @@ export default function FeedPage() {
           -webkit-line-clamp: 2;
           -webkit-box-orient: vertical;
           overflow: hidden;
-        }
-
-        /* Empty */
-        .empty {
-          border: 1px solid rgba(148,163,184,0.18);
-          background: rgba(255,255,255,0.03);
-          border-radius: 18px;
-          padding: 22px;
-          text-align: center;
-          max-width: 720px;
-          margin: 22px auto;
-        }
-        .emptyTitle { font-weight: 950; font-size: 18px; }
-        .emptySub { opacity: 0.75; font-weight: 850; margin-top: 8px; }
-        .emptyBtn {
-          margin-top: 14px;
-          border-radius: 14px;
-          border: 1px solid rgba(52,211,153,0.25);
-          background: rgba(16,185,129,0.22);
-          color: #fff;
-          font-weight: 950;
-          padding: 10px 14px;
-          cursor: pointer;
         }
 
         /* Modal */
@@ -1187,10 +1078,18 @@ export default function FeedPage() {
           background: #000;
         }
 
-        /* Mobile tweaks */
-        @media (max-width: 520px) {
-          .brandName { font-size: 22px; }
-          .grid { grid-template-columns: 1fr; }
+        /* Desktop: allow chips always visible + more breathing room */
+        @media (min-width: 860px) {
+          .topRow { padding: 16px 16px 10px; grid-template-columns: 52px 1fr 52px; }
+          .logoBtn, .createBtn { width: 52px; height: 52px; border-radius: 16px; }
+          .brandName { font-size: 28px; }
+          .controlRow { padding: 0 16px; }
+          .searchRow { padding: 12px 16px 0; }
+          .chipsWrap { padding: 12px 16px 0; }
+          .subline { padding: 12px 16px 0; }
+          .main { padding: 14px 16px 96px; }
+          .filtersBtn { display: none; }
+          .chipsWrap { display: block; }
         }
       `}</style>
     </div>
