@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { Outfit } from "next/font/google";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -59,8 +59,7 @@ function normStatus(s: string | null | undefined) {
   return (s ?? "available").toLowerCase().trim();
 }
 
-// Show AVAILABLE even if reserved/in talk, to keep waitlist open.
-// Hide ONLY when claimed/completed.
+// Keep waitlist alive: show AVAILABLE unless truly completed.
 function statusLabel(status: string | null, postType: PostType) {
   if ((postType ?? "give") === "request") return "REQUEST";
   const st = normStatus(status);
@@ -109,17 +108,18 @@ export default function FeedPage() {
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState<string>("");
 
-  // UI
+  // compact UI state
   const [tab, setTab] = useState<"items" | "requests">("items");
-  const [categoryFilter, setCategoryFilter] = useState<string>("all");
-  const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
-  const [query, setQuery] = useState<string>("");
+  const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"newest" | "popular">("newest");
+  const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [filtersOpen, setFiltersOpen] = useState(false);
 
-  // search UX
+  // search delight
   const [searchFocused, setSearchFocused] = useState(false);
   const [searchPulse, setSearchPulse] = useState(false);
+  const searchRef = useRef<HTMLInputElement | null>(null);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
@@ -190,7 +190,7 @@ export default function FeedPage() {
       };
     });
 
-    // Hide ONLY completed/claimed
+    // Hide ONLY confirmed/completed
     const visible = merged.filter((x) => {
       const st = normStatus(x.status);
       const claimed = !!x.is_claimed || st === "claimed";
@@ -253,11 +253,11 @@ export default function FeedPage() {
     setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
   }
 
-  // tiny delight: pulse ring when user is typing a query
+  // micro-delight pulse while typing
   useEffect(() => {
     if (!query) return;
     setSearchPulse(true);
-    const t = setTimeout(() => setSearchPulse(false), 240);
+    const t = setTimeout(() => setSearchPulse(false), 220);
     return () => clearTimeout(t);
   }, [query]);
 
@@ -278,11 +278,13 @@ export default function FeedPage() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpenImg(null);
+      if (e.key === "Escape") {
+        setOpenImg(null);
+        setFiltersOpen(false);
+      }
       if (e.key === "/" && !openImg) {
         e.preventDefault();
-        const el = document.getElementById("feedSearch") as HTMLInputElement | null;
-        el?.focus();
+        searchRef.current?.focus();
       }
     }
     window.addEventListener("keydown", onKey);
@@ -312,14 +314,14 @@ export default function FeedPage() {
     let list = tabbed.filter((x) => {
       const pt = (x.post_type ?? "give") as PostType;
 
-      if (pt !== "request") {
-        if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
-      }
-
       if (roleFilter !== "all") {
         const r = (x.owner_role ?? null) as OwnerRole;
         if (!r) return false;
         if (r !== roleFilter) return false;
+      }
+
+      if (pt !== "request" && tab === "items") {
+        if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
       }
 
       if (q) {
@@ -347,19 +349,20 @@ export default function FeedPage() {
     }
 
     return list;
-  }, [tabbed, categoryFilter, roleFilter, query, sort]);
+  }, [tabbed, query, sort, roleFilter, categoryFilter, tab]);
 
   return (
     <div className={`${brandFont.className} page`}>
+      {/* TOP (MAX 3 ROWS total) */}
       <header className="topbar">
-        {/* Row 1 */}
-        <div className="topRow">
-          <button className="iconBtn" onClick={() => router.push("/feed")} aria-label="Home" type="button">
-            <Image src="/scholarswap-logo.png" alt="ScholarSwap" width={36} height={36} priority className="logoImg" />
+        {/* Row 1: Brand */}
+        <div className="row brandRow">
+          <button className="logoBtn" onClick={() => router.push("/feed")} aria-label="Home" type="button">
+            <Image src="/scholarswap-logo.png" alt="ScholarSwap" width={34} height={34} priority className="logoImg" />
           </button>
 
-          <div className="brand">
-            <div className="brandName">ScholarSwap</div>
+          <div className="brandCenter" role="heading" aria-level={1}>
+            <span className="brandName">ScholarSwap</span>
             <Image
               src="/Ashland_Eagles_logo.svg.png"
               alt="Ashland University"
@@ -370,128 +373,74 @@ export default function FeedPage() {
             />
           </div>
 
-          <button className="createBtn" onClick={() => router.push("/create")} aria-label="Create" type="button">
+          <button className="plusBtn" onClick={() => router.push("/create")} aria-label="Create" type="button">
             +
           </button>
         </div>
 
-        {/* Row 2: Items / Requests */}
-        <div className="segTabs" role="tablist" aria-label="Feed tabs">
-          <button
-            className={`segTab ${tab === "items" ? "active" : ""}`}
-            onClick={() => setTab("items")}
-            type="button"
-            role="tab"
-            aria-selected={tab === "items"}
-          >
-            Items
-          </button>
+        {/* Row 2: Tabs + ONE smart controls button */}
+        <div className="row tabsRow">
+          <div className="seg" role="tablist" aria-label="Feed tabs">
+            <button className={`segBtn ${tab === "items" ? "active" : ""}`} onClick={() => setTab("items")} type="button">
+              Items
+            </button>
+            <button
+              className={`segBtn ${tab === "requests" ? "active" : ""}`}
+              onClick={() => setTab("requests")}
+              type="button"
+            >
+              Requests
+            </button>
+            <span className="segGlow" aria-hidden="true" />
+          </div>
 
           <button
-            className={`segTab ${tab === "requests" ? "active" : ""}`}
-            onClick={() => setTab("requests")}
+            className={`ctrlBtn ${filtersOpen ? "ctrlActive" : ""}`}
+            onClick={() => setFiltersOpen((v) => !v)}
             type="button"
-            role="tab"
-            aria-selected={tab === "requests"}
+            aria-label="Open filters"
+            title="Filters"
           >
-            Requests
+            <span className="ctrlIcon">≡</span>
           </button>
         </div>
 
-        {/* Row 3: ICON-ONLY pills + search */}
-        <div className="oneRow">
-          {/* Sort: icon-only pill */}
-          <label className="pillIconOnly" aria-label="Sort">
-            <span className="ico">↕️</span>
-            <select value={sort} onChange={(e) => setSort(e.target.value as any)} aria-label="Sort menu">
-              <option value="newest">Newest</option>
-              <option value="popular">Popular</option>
-            </select>
-          </label>
-
-          {/* Role: icon-only pill */}
-          <label className="pillIconOnly" aria-label="Lister role">
-            <span className="ico">👤</span>
-            <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as any)} aria-label="Role menu">
-              <option value="all">All</option>
-              <option value="student">Student</option>
-              <option value="faculty">Faculty</option>
-            </select>
-          </label>
-
-          {/* Filters button (icon-only) */}
+        {/* Row 3: Search (interactive) */}
+        <div className={`row searchRow ${searchFocused ? "searchFocused" : ""} ${searchPulse ? "searchPulse" : ""}`}>
           <button
-            className={`pillBtn ${filtersOpen ? "pillBtnActive" : ""}`}
-            onClick={() => setFiltersOpen((v) => !v)}
             type="button"
-            aria-label="Filters"
-            title="Filters"
+            className="searchIconBtn"
+            aria-label="Focus search"
+            onClick={() => searchRef.current?.focus()}
+            title="Search"
           >
-            <span className="ico">≡</span>
+            🔎
           </button>
 
-          {/* Search: interactive expanding field */}
-          <div
-            className={`searchWrap ${searchFocused ? "searchFocused" : ""} ${searchPulse ? "searchPulse" : ""}`}
-            aria-label="Search"
-          >
-            <button
-              type="button"
-              className="searchIconBtn"
-              aria-label="Focus search"
-              onClick={() => {
-                const el = document.getElementById("feedSearch") as HTMLInputElement | null;
-                el?.focus();
-              }}
-              title="Search"
-            >
-              🔎
+          <input
+            ref={searchRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onFocus={() => setSearchFocused(true)}
+            onBlur={() => setSearchFocused(false)}
+            placeholder={tab === "items" ? "Search items, categories…" : "Search requests, locations…"}
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+          />
+
+          {query ? (
+            <button className="clearBtn" onClick={() => setQuery("")} type="button" aria-label="Clear search">
+              ✕
             </button>
-
-            <input
-              id="feedSearch"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onFocus={() => setSearchFocused(true)}
-              onBlur={() => setSearchFocused(false)}
-              placeholder={tab === "items" ? "Search items…" : "Search requests…"}
-              autoCorrect="off"
-              autoCapitalize="none"
-              spellCheck={false}
-            />
-
+          ) : (
             <div className="kbdHint" aria-hidden="true">
               /
             </div>
-
-            {query ? (
-              <button className="clearBtn" onClick={() => setQuery("")} type="button" aria-label="Clear search">
-                ✕
-              </button>
-            ) : null}
-          </div>
+          )}
         </div>
 
-        {/* Category chips only when Filters open */}
-        {tab === "items" && filtersOpen && (
-          <div className="chips">
-            {categories.map((c) => {
-              const active = categoryFilter === c;
-              const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
-              return (
-                <button
-                  key={c}
-                  className={`chip ${active ? "chipActive" : ""}`}
-                  onClick={() => setCategoryFilter(c)}
-                  type="button"
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
+        {/* Minimal subline (still within the same sticky header block, not a new “row” visually tall) */}
         <div className="subline">
           <div className="subTitle">{tab === "items" ? "Public Items" : "Public Requests"}</div>
           <div className="count">
@@ -503,6 +452,110 @@ export default function FeedPage() {
         {loading && <div className="loading">Loading…</div>}
       </header>
 
+      {/* FILTER SHEET (opens from the single control button) */}
+      {filtersOpen && (
+        <div className="sheetBackdrop" onClick={() => setFiltersOpen(false)} role="dialog" aria-modal="true">
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheetTop">
+              <div className="sheetTitle">Filters</div>
+              <button className="sheetClose" onClick={() => setFiltersOpen(false)} type="button" aria-label="Close">
+                ✕
+              </button>
+            </div>
+
+            <div className="sheetGrid">
+              <div className="sheetBlock">
+                <div className="sheetLabel">Sort</div>
+                <div className="togRow">
+                  <button
+                    className={`tog ${sort === "newest" ? "togOn" : ""}`}
+                    onClick={() => setSort("newest")}
+                    type="button"
+                  >
+                    ↕️ Newest
+                  </button>
+                  <button
+                    className={`tog ${sort === "popular" ? "togOn" : ""}`}
+                    onClick={() => setSort("popular")}
+                    type="button"
+                  >
+                    🔥 Popular
+                  </button>
+                </div>
+              </div>
+
+              <div className="sheetBlock">
+                <div className="sheetLabel">Lister</div>
+                <div className="togRow">
+                  <button
+                    className={`tog ${roleFilter === "all" ? "togOn" : ""}`}
+                    onClick={() => setRoleFilter("all")}
+                    type="button"
+                  >
+                    👤 All
+                  </button>
+                  <button
+                    className={`tog ${roleFilter === "student" ? "togOn" : ""}`}
+                    onClick={() => setRoleFilter("student")}
+                    type="button"
+                  >
+                    🎓 Student
+                  </button>
+                  <button
+                    className={`tog ${roleFilter === "faculty" ? "togOn" : ""}`}
+                    onClick={() => setRoleFilter("faculty")}
+                    type="button"
+                  >
+                    🧑‍🏫 Faculty
+                  </button>
+                </div>
+              </div>
+
+              {tab === "items" && (
+                <div className="sheetBlock">
+                  <div className="sheetLabel">Category</div>
+                  <div className="chipRow">
+                    {categories.map((c) => {
+                      const active = categoryFilter === c;
+                      const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
+                      return (
+                        <button
+                          key={c}
+                          className={`chip ${active ? "chipOn" : ""}`}
+                          onClick={() => setCategoryFilter(c)}
+                          type="button"
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div className="sheetActions">
+                <button
+                  className="ghost"
+                  type="button"
+                  onClick={() => {
+                    setSort("newest");
+                    setRoleFilter("all");
+                    setCategoryFilter("all");
+                    setQuery("");
+                  }}
+                >
+                  Reset
+                </button>
+                <button className="primary" type="button" onClick={() => setFiltersOpen(false)}>
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* GRID */}
       <main className="main">
         <div className="grid">
           {filtered.map((item) => {
@@ -612,6 +665,7 @@ export default function FeedPage() {
         </div>
       </main>
 
+      {/* IMAGE MODAL */}
       {openImg && (
         <div className="modal" onClick={() => setOpenImg(null)} role="dialog" aria-modal="true">
           <div className="modalInner" onClick={(e) => e.stopPropagation()}>
@@ -634,45 +688,51 @@ export default function FeedPage() {
           color: #fff;
         }
 
+        /* ========= TOPBAR (3 rows max) ========= */
         .topbar {
           position: sticky;
           top: 0;
           z-index: 30;
           background: rgba(0, 0, 0, 0.92);
-          backdrop-filter: blur(14px);
+          backdrop-filter: blur(16px);
           border-bottom: 1px solid rgba(148, 163, 184, 0.12);
         }
 
-        /* Row 1 */
-        .topRow {
-          padding: 12px 14px 6px;
-          display: grid;
-          grid-template-columns: 40px 1fr 40px;
-          align-items: center;
-          gap: 10px;
+        .row {
+          padding: 10px 12px;
         }
 
-        .iconBtn {
-          width: 40px;
-          height: 40px;
-          border-radius: 14px;
+        .brandRow {
+          display: grid;
+          grid-template-columns: 44px 1fr 44px;
+          align-items: center;
+          gap: 10px;
+          padding-top: 12px;
+          padding-bottom: 8px;
+        }
+
+        .logoBtn {
+          width: 44px;
+          height: 44px;
+          border-radius: 16px;
           overflow: hidden;
           background: rgba(255, 255, 255, 0.06);
-          border: 1px solid rgba(255, 255, 255, 0.08);
+          border: 1px solid rgba(255, 255, 255, 0.10);
           display: grid;
           place-items: center;
           padding: 0;
           cursor: pointer;
+          box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
         }
 
         .logoImg {
           width: 100%;
           height: 100%;
           object-fit: contain;
-          padding: 5px;
+          padding: 6px;
         }
 
-        .brand {
+        .brandCenter {
           display: flex;
           align-items: center;
           justify-content: center;
@@ -681,154 +741,154 @@ export default function FeedPage() {
         }
 
         .brandName {
-          font-size: 20px;
-          font-weight: 700;
+          font-size: 22px;
+          font-weight: 800;
           letter-spacing: -0.6px;
           white-space: nowrap;
+          text-shadow: 0 10px 30px rgba(0, 0, 0, 0.65);
         }
 
         .brandMark {
           opacity: 0.9;
+          transform: translateY(1px);
         }
 
-        .createBtn {
-          width: 40px;
-          height: 40px;
-          border-radius: 14px;
+        .plusBtn {
+          width: 44px;
+          height: 44px;
+          border-radius: 16px;
           border: 1px solid rgba(52, 211, 153, 0.35);
-          background: rgba(16, 185, 129, 0.18);
+          background: radial-gradient(circle at 30% 30%, rgba(16, 185, 129, 0.28), rgba(16, 185, 129, 0.12));
           color: #fff;
-          font-size: 22px;
-          font-weight: 800;
+          font-size: 24px;
+          font-weight: 900;
           display: grid;
           place-items: center;
           cursor: pointer;
+          box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+          transition: transform 0.12s ease;
         }
-
-        /* Row 2 */
-        .segTabs {
-          padding: 6px 14px 8px;
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 10px;
-        }
-
-        .segTab {
-          width: 100%;
-          padding: 10px 12px;
-          border-radius: 999px;
-          border: 1px solid rgba(148, 163, 184, 0.22);
-          background: rgba(255, 255, 255, 0.04);
-          color: rgba(255, 255, 255, 0.86);
-          font-weight: 950;
-          cursor: pointer;
-          min-width: 0;
-        }
-
-        .segTab.active {
-          border: 1px solid rgba(52, 211, 153, 0.45);
-          background: rgba(16, 185, 129, 0.14);
-          color: rgba(209, 250, 229, 0.95);
-        }
-
-        /* Row 3: icon-only controls + animated search */
-        .oneRow {
-          padding: 0 14px 10px;
-          display: grid;
-          grid-template-columns: 52px 52px 52px 1fr;
-          gap: 10px;
-          align-items: center;
-        }
-
-        .pillIconOnly {
-          height: 44px;
-          width: 52px;
-          border-radius: 999px;
-          border: 1px solid rgba(148, 163, 184, 0.22);
-          background: rgba(255, 255, 255, 0.04);
-          color: rgba(255, 255, 255, 0.9);
-          display: grid;
-          place-items: center;
-          position: relative;
-          overflow: hidden;
-        }
-
-        .pillIconOnly select {
-          position: absolute;
-          inset: 0;
-          opacity: 0;
-          width: 100%;
-          height: 100%;
-          cursor: pointer;
-        }
-
-        .pillBtn {
-          height: 44px;
-          width: 52px;
-          border-radius: 999px;
-          border: 1px solid rgba(148, 163, 184, 0.22);
-          background: rgba(255, 255, 255, 0.04);
-          color: rgba(255, 255, 255, 0.9);
-          font-weight: 950;
-          cursor: pointer;
-          display: grid;
-          place-items: center;
-          transition: transform 0.12s ease, border-color 0.18s ease, background 0.18s ease;
-        }
-
-        .pillBtn:active {
+        .plusBtn:active {
           transform: scale(0.98);
         }
 
-        .pillBtnActive {
-          border: 1px solid rgba(52, 211, 153, 0.45);
-          background: rgba(16, 185, 129, 0.14);
+        .tabsRow {
+          display: grid;
+          grid-template-columns: 1fr 46px;
+          gap: 10px;
+          align-items: center;
+          padding-top: 6px;
+          padding-bottom: 6px;
         }
 
-        .ico {
-          opacity: 0.95;
-          font-size: 16px;
-          line-height: 1;
-        }
-
-        .searchWrap {
+        .seg {
+          position: relative;
           height: 44px;
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.18);
+          background: rgba(255, 255, 255, 0.04);
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          overflow: hidden;
+        }
+
+        .segGlow {
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          background: radial-gradient(circle at 20% 0%, rgba(16, 185, 129, 0.18), transparent 55%);
+          opacity: 0.8;
+        }
+
+        .segBtn {
+          border: none;
+          background: transparent;
+          color: rgba(255, 255, 255, 0.74);
+          font-weight: 950;
+          cursor: pointer;
+          transition: color 0.18s ease;
+          z-index: 1;
+        }
+
+        .segBtn.active {
+          color: rgba(209, 250, 229, 0.98);
+        }
+
+        .segBtn.active:first-child {
+          background: rgba(16, 185, 129, 0.14);
+          box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.35);
+        }
+
+        .segBtn.active:last-child {
+          background: rgba(16, 185, 129, 0.14);
+          box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.35);
+        }
+
+        .ctrlBtn {
+          width: 46px;
+          height: 44px;
+          border-radius: 16px;
+          border: 1px solid rgba(148, 163, 184, 0.18);
+          background: rgba(255, 255, 255, 0.04);
+          color: #fff;
+          cursor: pointer;
+          display: grid;
+          place-items: center;
+          box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+          transition: transform 0.12s ease, border-color 0.18s ease, background 0.18s ease;
+        }
+        .ctrlBtn:active {
+          transform: scale(0.98);
+        }
+        .ctrlActive {
+          border-color: rgba(52, 211, 153, 0.45);
+          background: rgba(16, 185, 129, 0.12);
+        }
+
+        .ctrlIcon {
+          font-size: 18px;
+          font-weight: 900;
+          opacity: 0.92;
+        }
+
+        .searchRow {
+          height: 46px;
           border-radius: 999px;
           border: 1px solid rgba(148, 163, 184, 0.18);
           background: rgba(255, 255, 255, 0.03);
           display: grid;
-          grid-template-columns: 40px 1fr auto auto;
+          grid-template-columns: 40px 1fr 40px;
           align-items: center;
           gap: 8px;
-          padding: 0 10px 0 6px;
-          position: relative;
-          overflow: hidden;
-          transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+          padding: 0 6px;
+          margin: 8px 12px 10px;
+          box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+          transition: border-color 0.18s ease, box-shadow 0.18s ease;
         }
 
         .searchFocused {
           border-color: rgba(52, 211, 153, 0.45);
-          box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.14);
+          box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.14), 0 14px 40px rgba(0, 0, 0, 0.45);
         }
 
         .searchPulse::before {
           content: "";
           position: absolute;
-          inset: -2px;
+          inset: 0;
           border-radius: 999px;
-          border: 1px solid rgba(52, 211, 153, 0.35);
-          animation: pulse 0.24s ease-out;
+          box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.0);
+          animation: pulse 0.22s ease-out;
           pointer-events: none;
         }
 
         @keyframes pulse {
           from {
+            box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.22);
             opacity: 0.9;
-            transform: scale(0.98);
           }
           to {
+            box-shadow: 0 0 0 10px rgba(16, 185, 129, 0);
             opacity: 0;
-            transform: scale(1.02);
           }
         }
 
@@ -836,20 +896,19 @@ export default function FeedPage() {
           width: 40px;
           height: 40px;
           border-radius: 999px;
-          border: 1px solid rgba(148, 163, 184, 0.18);
+          border: 1px solid rgba(148, 163, 184, 0.16);
           background: rgba(255, 255, 255, 0.04);
           color: #fff;
           cursor: pointer;
           display: grid;
           place-items: center;
-          transition: transform 0.12s ease, border-color 0.18s ease, background 0.18s ease;
+          transition: transform 0.12s ease;
         }
-
         .searchIconBtn:active {
           transform: scale(0.98);
         }
 
-        .searchWrap input {
+        .searchRow input {
           width: 100%;
           min-width: 0;
           border: none;
@@ -857,76 +916,45 @@ export default function FeedPage() {
           background: transparent;
           color: #fff;
           font-weight: 950;
-          font-size: 13px;
+          font-size: 14px;
         }
 
-        .searchWrap input::placeholder {
+        .searchRow input::placeholder {
           color: rgba(255, 255, 255, 0.45);
           font-weight: 900;
         }
 
-        .kbdHint {
-          height: 26px;
-          min-width: 26px;
-          padding: 0 8px;
-          border-radius: 10px;
-          border: 1px solid rgba(148, 163, 184, 0.22);
-          background: rgba(0, 0, 0, 0.25);
-          opacity: 0.65;
-          font-weight: 950;
-          display: none; /* show on desktop only */
-          align-items: center;
-          justify-content: center;
-          font-size: 12px;
-        }
-
         .clearBtn {
-          border: 1px solid rgba(148, 163, 184, 0.22);
+          width: 40px;
+          height: 40px;
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.18);
           background: rgba(255, 255, 255, 0.04);
           color: #fff;
-          border-radius: 999px;
-          width: 32px;
-          height: 32px;
-          display: grid;
-          place-items: center;
           cursor: pointer;
           font-weight: 950;
-          opacity: 0.9;
+          display: grid;
+          place-items: center;
           transition: transform 0.12s ease;
         }
-
         .clearBtn:active {
           transform: scale(0.98);
         }
 
-        /* Chips */
-        .chips {
-          padding: 0 14px 10px;
-          display: flex;
-          gap: 10px;
-          overflow-x: auto;
-          -webkit-overflow-scrolling: touch;
-        }
-
-        .chip {
+        .kbdHint {
+          width: 40px;
+          height: 40px;
           border-radius: 999px;
-          border: 1px solid rgba(148, 163, 184, 0.22);
-          background: rgba(255, 255, 255, 0.04);
-          color: rgba(255, 255, 255, 0.86);
-          padding: 10px 14px;
-          font-weight: 900;
-          cursor: pointer;
-          white-space: nowrap;
-        }
-
-        .chipActive {
-          border: 1px solid rgba(52, 211, 153, 0.45);
-          background: rgba(16, 185, 129, 0.14);
-          color: rgba(209, 250, 229, 0.95);
+          border: 1px solid rgba(148, 163, 184, 0.16);
+          background: rgba(0, 0, 0, 0.22);
+          color: rgba(255, 255, 255, 0.55);
+          display: grid;
+          place-items: center;
+          font-weight: 950;
         }
 
         .subline {
-          padding: 0 14px 12px;
+          padding: 0 12px 10px;
           display: flex;
           justify-content: space-between;
           align-items: baseline;
@@ -935,37 +963,189 @@ export default function FeedPage() {
 
         .subTitle {
           font-size: 13px;
-          font-weight: 900;
+          font-weight: 950;
           opacity: 0.9;
         }
 
         .count {
           font-size: 12px;
           opacity: 0.65;
-          font-weight: 900;
+          font-weight: 950;
         }
 
         .err {
-          padding: 0 14px 10px;
+          padding: 0 12px 10px;
           color: #f87171;
           font-weight: 800;
         }
 
         .loading {
-          padding: 0 14px 10px;
-          opacity: 0.7;
+          padding: 0 12px 10px;
+          opacity: 0.75;
           font-weight: 800;
         }
 
-        /* Main */
+        /* ========= FILTER SHEET ========= */
+        .sheetBackdrop {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.62);
+          z-index: 9998;
+          display: flex;
+          align-items: flex-end;
+          justify-content: center;
+          padding: 12px;
+        }
+
+        .sheet {
+          width: min(720px, 100%);
+          border-radius: 18px;
+          border: 1px solid rgba(148, 163, 184, 0.18);
+          background: rgba(10, 10, 10, 0.92);
+          backdrop-filter: blur(18px);
+          box-shadow: 0 30px 80px rgba(0, 0, 0, 0.75);
+          overflow: hidden;
+        }
+
+        .sheetTop {
+          padding: 12px 12px 8px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+        }
+
+        .sheetTitle {
+          font-weight: 950;
+          font-size: 14px;
+          opacity: 0.9;
+        }
+
+        .sheetClose {
+          width: 38px;
+          height: 38px;
+          border-radius: 14px;
+          border: 1px solid rgba(148, 163, 184, 0.18);
+          background: rgba(255, 255, 255, 0.04);
+          color: #fff;
+          cursor: pointer;
+          font-weight: 950;
+        }
+
+        .sheetGrid {
+          padding: 12px;
+          display: grid;
+          gap: 12px;
+        }
+
+        .sheetBlock {
+          border: 1px solid rgba(148, 163, 184, 0.12);
+          background: rgba(255, 255, 255, 0.03);
+          border-radius: 16px;
+          padding: 12px;
+        }
+
+        .sheetLabel {
+          font-size: 12px;
+          font-weight: 950;
+          opacity: 0.72;
+          margin-bottom: 10px;
+        }
+
+        .togRow {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        .tog {
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.18);
+          background: rgba(0, 0, 0, 0.22);
+          color: rgba(255, 255, 255, 0.84);
+          padding: 10px 12px;
+          font-weight: 950;
+          cursor: pointer;
+        }
+
+        .togOn {
+          border-color: rgba(52, 211, 153, 0.45);
+          background: rgba(16, 185, 129, 0.14);
+          color: rgba(209, 250, 229, 0.95);
+        }
+
+        .chipRow {
+          display: flex;
+          gap: 10px;
+          overflow-x: auto;
+          padding-bottom: 6px;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        .chip {
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.18);
+          background: rgba(0, 0, 0, 0.22);
+          color: rgba(255, 255, 255, 0.82);
+          padding: 10px 12px;
+          font-weight: 950;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .chipOn {
+          border-color: rgba(52, 211, 153, 0.45);
+          background: rgba(16, 185, 129, 0.14);
+          color: rgba(209, 250, 229, 0.95);
+        }
+
+        .sheetActions {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+
+        .ghost {
+          height: 44px;
+          border-radius: 14px;
+          border: 1px solid rgba(148, 163, 184, 0.18);
+          background: rgba(255, 255, 255, 0.03);
+          color: rgba(255, 255, 255, 0.86);
+          font-weight: 950;
+          cursor: pointer;
+        }
+
+        .primary {
+          height: 44px;
+          border-radius: 14px;
+          border: 1px solid rgba(52, 211, 153, 0.25);
+          background: rgba(16, 185, 129, 0.22);
+          color: #fff;
+          font-weight: 950;
+          cursor: pointer;
+        }
+
+        /* ========= MAIN GRID ========= */
         .main {
-          padding: 14px 14px 96px;
+          padding: 14px 12px 96px;
         }
 
         .grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
-          gap: 16px;
+          grid-template-columns: 1fr;
+          gap: 14px;
+        }
+
+        @media (min-width: 720px) {
+          .main {
+            padding: 16px 16px 96px;
+            max-width: 1100px;
+            margin: 0 auto;
+          }
+          .grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 16px;
+          }
         }
 
         .card {
@@ -1045,6 +1225,13 @@ export default function FeedPage() {
           border: 1px solid rgba(52, 211, 153, 0.28);
           background: rgba(16, 185, 129, 0.14);
           color: rgba(209, 250, 229, 0.92);
+        }
+
+        .reqMeta {
+          font-size: 13px;
+          font-weight: 900;
+          opacity: 0.9;
+          margin-bottom: 8px;
         }
 
         .body {
@@ -1147,7 +1334,7 @@ export default function FeedPage() {
           overflow: hidden;
         }
 
-        /* Modal */
+        /* ========= MODAL ========= */
         .modal {
           position: fixed;
           inset: 0;
@@ -1200,45 +1387,6 @@ export default function FeedPage() {
           object-fit: contain;
           display: block;
           background: #000;
-        }
-
-        /* Desktop: show "/" hint */
-        @media (min-width: 900px) {
-          .kbdHint {
-            display: inline-flex;
-          }
-        }
-
-        /* Desktop layout widen */
-        @media (min-width: 900px) {
-          .topRow,
-          .segTabs,
-          .oneRow,
-          .subline,
-          .err,
-          .loading,
-          .chips {
-            max-width: 1100px;
-            margin: 0 auto;
-          }
-          .main {
-            max-width: 1100px;
-            margin: 0 auto;
-            padding: 16px 16px 96px;
-          }
-          .topRow {
-            padding: 16px 16px 8px;
-            grid-template-columns: 52px 1fr 52px;
-          }
-          .iconBtn,
-          .createBtn {
-            width: 52px;
-            height: 52px;
-            border-radius: 16px;
-          }
-          .brandName {
-            font-size: 28px;
-          }
         }
       `}</style>
     </div>
