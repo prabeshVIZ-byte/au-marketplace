@@ -308,43 +308,55 @@ export default function FeedPage() {
   }, [openImg]);
 
   // ✅ Make chip-row horizontally draggable without page hijacking
-  useEffect(() => {
-    const el = chipRowRef.current;
+ useEffect(() => {
+  const root = chipRowRef.current;
+  if (!root) return;
+
+  let down = false;
+  let startX = 0;
+  let startLeft = 0;
+
+  const getEl = () => chipRowRef.current as HTMLDivElement | null;
+
+  function onPointerDown(e: PointerEvent) {
+    const el = getEl();
     if (!el) return;
 
-    let down = false;
-    let startX = 0;
-    let startLeft = 0;
+    down = true;
+    startX = e.clientX;
+    startLeft = el.scrollLeft;
 
-    function onPointerDown(e: PointerEvent) {
-      // Only activate for touch / pen / mouse drag inside the chip row
-      down = true;
-      startX = e.clientX;
-      startLeft = el.scrollLeft;
-      el.setPointerCapture?.(e.pointerId);
+    // capture if supported (keeps drag stable)
+    if ("setPointerCapture" in el) {
+      (el as any).setPointerCapture(e.pointerId);
     }
-    function onPointerMove(e: PointerEvent) {
-      if (!down) return;
-      const dx = e.clientX - startX;
-      // drag feels natural: move opposite direction
-      el.scrollLeft = startLeft - dx;
-    }
-    function onPointerUp() {
-      down = false;
-    }
+  }
 
-    el.addEventListener("pointerdown", onPointerDown, { passive: true });
-    el.addEventListener("pointermove", onPointerMove, { passive: true });
-    el.addEventListener("pointerup", onPointerUp, { passive: true });
-    el.addEventListener("pointercancel", onPointerUp, { passive: true });
+  function onPointerMove(e: PointerEvent) {
+    if (!down) return;
+    const el = getEl();
+    if (!el) return;
 
-    return () => {
-      el.removeEventListener("pointerdown", onPointerDown);
-      el.removeEventListener("pointermove", onPointerMove);
-      el.removeEventListener("pointerup", onPointerUp);
-      el.removeEventListener("pointercancel", onPointerUp);
-    };
-  }, []);
+    const dx = e.clientX - startX;
+    el.scrollLeft = startLeft - dx;
+  }
+
+  function onPointerUp() {
+    down = false;
+  }
+
+  root.addEventListener("pointerdown", onPointerDown, { passive: true });
+  root.addEventListener("pointermove", onPointerMove, { passive: true });
+  root.addEventListener("pointerup", onPointerUp, { passive: true });
+  root.addEventListener("pointercancel", onPointerUp, { passive: true });
+
+  return () => {
+    root.removeEventListener("pointerdown", onPointerDown);
+    root.removeEventListener("pointermove", onPointerMove);
+    root.removeEventListener("pointerup", onPointerUp);
+    root.removeEventListener("pointercancel", onPointerUp);
+  };
+}, []);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
