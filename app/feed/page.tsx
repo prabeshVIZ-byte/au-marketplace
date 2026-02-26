@@ -26,7 +26,6 @@ type FeedRowFromView = {
   interest_count: number;
   owner_role?: OwnerRole;
 
-  // optional if present in your view
   post_type?: PostType;
   request_group?: string | null;
   request_timeframe?: string | null;
@@ -60,8 +59,8 @@ function normStatus(s: string | null | undefined) {
   return (s ?? "available").toLowerCase().trim();
 }
 
-// IMPORTANT: Reserved / in talk still shows as AVAILABLE badge (waitlist stays open).
-// Hidden ONLY when claimed/completed.
+// Show AVAILABLE even if reserved/in talk, to keep waitlist open.
+// Hide ONLY when claimed/completed.
 function statusLabel(status: string | null, postType: PostType) {
   if ((postType ?? "give") === "request") return "REQUEST";
   const st = normStatus(status);
@@ -110,14 +109,12 @@ export default function FeedPage() {
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState<string>("");
 
-  // UI filters
+  // UI
   const [tab, setTab] = useState<"items" | "requests">("items");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
   const [query, setQuery] = useState<string>("");
   const [sort, setSort] = useState<"newest" | "popular">("newest");
-
-  // Mobile: collapse advanced filters (chips)
   const [filtersOpen, setFiltersOpen] = useState(false);
 
   async function syncAuth() {
@@ -142,14 +139,12 @@ export default function FeedPage() {
 
   async function loadOwnerMeta(itemIds: string[]) {
     if (itemIds.length === 0) return new Map<string, ItemMeta>();
-
     const { data, error } = await supabase
       .from("items")
       .select("id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,status")
       .in("id", itemIds);
 
     if (error) return new Map<string, ItemMeta>();
-
     const m = new Map<string, ItemMeta>();
     for (const r of (data as ItemMeta[]) || []) m.set(r.id, r);
     return m;
@@ -215,13 +210,13 @@ export default function FeedPage() {
 
     const postType = (item.post_type ?? "give") as PostType;
 
-    // Requests = Offer help -> detail
+    // Requests -> detail
     if (postType === "request") {
       router.push(`/item/${item.id}`);
       return;
     }
 
-    // Give = toggle interest
+    // Give -> toggle interest
     const isMine = !!item.owner_id && item.owner_id === userId;
     if (isMine) return;
 
@@ -298,10 +293,10 @@ export default function FeedPage() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
+
     let list = tabbed.filter((x) => {
       const pt = (x.post_type ?? "give") as PostType;
 
-      // category only for items
       if (pt !== "request") {
         if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
       }
@@ -330,15 +325,10 @@ export default function FeedPage() {
       return true;
     });
 
-    // sorting
     if (sort === "popular") {
       list = [...list].sort((a, b) => (b.interest_count || 0) - (a.interest_count || 0));
     } else {
-      list = [...list].sort((a, b) => {
-        const ta = new Date(a.created_at).getTime();
-        const tb = new Date(b.created_at).getTime();
-        return tb - ta;
-      });
+      list = [...list].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
     }
 
     return list;
@@ -346,7 +336,6 @@ export default function FeedPage() {
 
   return (
     <div className={`${brandFont.className} page`}>
-      {/* Compact phone-first header */}
       <header className="topbar">
         {/* Row 1: logo + brand + create */}
         <div className="topRow">
@@ -371,74 +360,68 @@ export default function FeedPage() {
           </button>
         </div>
 
-        {/* Row 2: segmented tabs + sort + role + filters toggle */}
-        <div className="controlRow">
-          <div className="segTabs" role="tablist" aria-label="Feed tabs">
-            <button
-              className={`segTab ${tab === "items" ? "active" : ""}`}
-              onClick={() => setTab("items")}
-              type="button"
-              role="tab"
-              aria-selected={tab === "items"}
-            >
-              <span className="segIco">📦</span>
-              <span className="segTxt">Items</span>
-            </button>
-            <button
-              className={`segTab ${tab === "requests" ? "active" : ""}`}
-              onClick={() => setTab("requests")}
-              type="button"
-              role="tab"
-              aria-selected={tab === "requests"}
-            >
-              <span className="segIco">🆘</span>
-              <span className="segTxt">Requests</span>
-            </button>
-          </div>
+        {/* Row 2: Items/Requests (kept) */}
+        <div className="segTabs" role="tablist" aria-label="Feed tabs">
+          <button
+            className={`segTab ${tab === "items" ? "active" : ""}`}
+            onClick={() => setTab("items")}
+            type="button"
+            role="tab"
+            aria-selected={tab === "items"}
+          >
+            <span className="segTxt">Items</span>
+          </button>
 
-          <div className="miniPills">
-            <label className="miniPill" aria-label="Sort">
-              <span className="miniIco">↕️</span>
-              <select value={sort} onChange={(e) => setSort(e.target.value as any)}>
-                <option value="newest">Newest</option>
-                <option value="popular">Popular</option>
-              </select>
-            </label>
-
-            <label className="miniPill" aria-label="Role filter">
-              <span className="miniIco">👤</span>
-              <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as any)}>
-                <option value="all">All</option>
-                <option value="student">Student</option>
-                <option value="faculty">Faculty</option>
-              </select>
-            </label>
-
-            <button className="miniPillBtn" onClick={() => setFiltersOpen((v) => !v)} type="button" aria-label="Filters">
-              <span className="miniIco">☰</span>
-              <span className="miniTxt">Filters</span>
-            </button>
-          </div>
+          <button
+            className={`segTab ${tab === "requests" ? "active" : ""}`}
+            onClick={() => setTab("requests")}
+            type="button"
+            role="tab"
+            aria-selected={tab === "requests"}
+          >
+            <span className="segTxt">Requests</span>
+          </button>
         </div>
 
-        {/* Row 3: search */}
-        <div className="searchRow">
-          <div className="searchWrap">
-            <span className="searchIcon">🔎</span>
+        {/* Row 3: ONE row = Newest + All + Filters + Search (no extra row) */}
+        <div className="oneRow">
+          <label className="pill" aria-label="Sort">
+            <span className="ico">↕️</span>
+            <select value={sort} onChange={(e) => setSort(e.target.value as any)}>
+              <option value="newest">Newest</option>
+              <option value="popular">Popular</option>
+            </select>
+          </label>
+
+          <label className="pill" aria-label="Role filter">
+            <span className="ico">👤</span>
+            <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as any)}>
+              <option value="all">All</option>
+              <option value="student">Student</option>
+              <option value="faculty">Faculty</option>
+            </select>
+          </label>
+
+          <button className="pillBtn" onClick={() => setFiltersOpen((v) => !v)} type="button" aria-label="Filters">
+            <span className="ico">≡</span>
+          </button>
+
+          <div className="searchInline" aria-label="Search">
+            <span className="sIco">🔎</span>
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder={tab === "items" ? "Search items, categories..." : "Search requests, locations..."}
+              placeholder={tab === "items" ? "Search…" : "Search…"}
             />
             {query ? (
-              <button className="clearBtn" onClick={() => setQuery("")} type="button" aria-label="Clear search">
+              <button className="xBtn" onClick={() => setQuery("")} type="button" aria-label="Clear">
                 ✕
               </button>
             ) : null}
           </div>
         </div>
 
-        {/* Row 4: category chips (items only) */}
+        {/* Row 4: category chips only when Filters open */}
         {tab === "items" && filtersOpen && (
           <div className="chips">
             {categories.map((c) => {
@@ -469,7 +452,6 @@ export default function FeedPage() {
         {loading && <div className="loading">Loading…</div>}
       </header>
 
-      {/* Grid */}
       <main className="main">
         <div className="grid">
           {filtered.map((item) => {
@@ -483,7 +465,6 @@ export default function FeedPage() {
 
             return (
               <article key={item.id} className={`card ${postType === "request" ? "cardRequest" : ""}`}>
-                {/* Media / Header */}
                 {postType === "request" ? (
                   <div className="reqHero">
                     <div className="badge badgeRequest">{statusLabel(item.status, postType)}</div>
@@ -497,6 +478,7 @@ export default function FeedPage() {
                 ) : (
                   <div className="media">
                     <div className="badge badgeItem">{statusLabel(item.status, postType)}</div>
+
                     {item.photo_url ? (
                       <button
                         className="mediaBtn"
@@ -516,7 +498,6 @@ export default function FeedPage() {
                   </div>
                 )}
 
-                {/* Body */}
                 <div className="body">
                   <div className="metaRow">
                     <span className="meta">
@@ -532,8 +513,8 @@ export default function FeedPage() {
 
                   {postType !== "request" ? <div className="title">{item.title}</div> : null}
 
-                  {postType !== "request" ? (
-                    statusHint(item.status, postType) ? <div className="hint">{statusHint(item.status, postType)}</div> : null
+                  {postType !== "request" && statusHint(item.status, postType) ? (
+                    <div className="hint">{statusHint(item.status, postType)}</div>
                   ) : null}
 
                   <div className="desc clamp2">{item.description || "—"}</div>
@@ -544,7 +525,6 @@ export default function FeedPage() {
                     ) : (
                       <span className="small">{item.interest_count || 0} requests</span>
                     )}
-
                     {item.expires_at ? <span className="small">Ends: {formatShortDate(item.expires_at)}</span> : null}
                   </div>
 
@@ -581,7 +561,6 @@ export default function FeedPage() {
         </div>
       </main>
 
-      {/* Image Modal */}
       {openImg && (
         <div className="modal" onClick={() => setOpenImg(null)} role="dialog" aria-modal="true">
           <div className="modalInner" onClick={(e) => e.stopPropagation()}>
@@ -604,7 +583,6 @@ export default function FeedPage() {
           color: #fff;
         }
 
-        /* Header */
         .topbar {
           position: sticky;
           top: 0;
@@ -676,15 +654,9 @@ export default function FeedPage() {
           cursor: pointer;
         }
 
-        /* Row 2 */
-        .controlRow {
-          padding: 6px 14px 8px;
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-        }
-
+        /* Row 2: Tabs */
         .segTabs {
+          padding: 6px 14px 8px;
           display: grid;
           grid-template-columns: 1fr 1fr;
           gap: 10px;
@@ -697,7 +669,7 @@ export default function FeedPage() {
           border: 1px solid rgba(148, 163, 184, 0.22);
           background: rgba(255, 255, 255, 0.04);
           color: rgba(255, 255, 255, 0.86);
-          font-weight: 900;
+          font-weight: 950;
           cursor: pointer;
           display: inline-flex;
           align-items: center;
@@ -712,104 +684,109 @@ export default function FeedPage() {
           color: rgba(209, 250, 229, 0.95);
         }
 
-        .segTxt {
-          white-space: nowrap;
-        }
-
-        .miniPills {
+        /* Row 3: ONE row for pills + search */
+        .oneRow {
+          padding: 0 14px 10px;
           display: grid;
-          grid-template-columns: 1fr 1fr auto;
+          grid-template-columns: 1.05fr 0.85fr 52px 1.25fr;
           gap: 10px;
+          align-items: center;
         }
 
-        .miniPill,
-        .miniPillBtn {
+        .pill {
+          height: 44px;
           border-radius: 999px;
           border: 1px solid rgba(148, 163, 184, 0.22);
           background: rgba(255, 255, 255, 0.04);
           color: rgba(255, 255, 255, 0.86);
           padding: 0 12px;
-          font-weight: 900;
+          font-weight: 950;
           display: inline-flex;
           align-items: center;
           gap: 8px;
-          height: 44px;
           min-width: 0;
         }
 
-        .miniPill select {
+        .ico {
+          opacity: 0.9;
+          font-size: 16px;
+          width: 20px;
+          display: inline-flex;
+          justify-content: center;
+        }
+
+        .pill select {
+          width: 100%;
+          min-width: 0;
           background: transparent;
           border: none;
           outline: none;
           color: #fff;
-          font-weight: 900;
+          font-weight: 950;
           cursor: pointer;
-          width: 100%;
-          min-width: 0;
         }
 
-        .miniPillBtn {
+        .pillBtn {
+          height: 44px;
+          width: 52px;
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          background: rgba(255, 255, 255, 0.04);
+          color: rgba(255, 255, 255, 0.9);
+          font-weight: 950;
           cursor: pointer;
-          justify-content: center;
-          padding: 0 12px;
+          display: grid;
+          place-items: center;
         }
 
-        .miniTxt {
-          display: inline;
-        }
-
-        /* Row 3 */
-        .searchRow {
-          padding: 0 14px 10px;
-        }
-
-        .searchWrap {
-          height: 48px;
+        .searchInline {
+          height: 44px;
           border-radius: 999px;
           border: 1px solid rgba(148, 163, 184, 0.18);
           background: rgba(255, 255, 255, 0.03);
           display: flex;
           align-items: center;
-          gap: 10px;
-          padding: 0 14px;
+          gap: 8px;
+          padding: 0 12px;
+          min-width: 0;
         }
 
-        .searchIcon {
-          opacity: 0.75;
-          font-size: 16px;
+        .sIco {
+          opacity: 0.7;
+          font-size: 15px;
         }
 
-        .searchWrap input {
+        .searchInline input {
           flex: 1;
+          min-width: 0;
           border: none;
           outline: none;
           background: transparent;
           color: #fff;
-          font-weight: 900;
-          font-size: 14px;
-          min-width: 0;
+          font-weight: 950;
+          font-size: 13px;
         }
 
-        .searchWrap input::placeholder {
+        .searchInline input::placeholder {
           color: rgba(255, 255, 255, 0.45);
-          font-weight: 800;
+          font-weight: 900;
         }
 
-        .clearBtn {
+        .xBtn {
           border: 1px solid rgba(148, 163, 184, 0.22);
           background: rgba(255, 255, 255, 0.04);
           color: #fff;
           border-radius: 999px;
-          width: 30px;
-          height: 30px;
+          width: 28px;
+          height: 28px;
           display: grid;
           place-items: center;
           cursor: pointer;
-          font-weight: 900;
+          font-weight: 950;
           opacity: 0.9;
         }
 
-        /* Chips (only when Filters open) */
+        /* Chips */
         .chips {
           padding: 0 14px 10px;
           display: flex;
@@ -867,7 +844,7 @@ export default function FeedPage() {
           font-weight: 800;
         }
 
-        /* Main grid */
+        /* Main */
         .main {
           padding: 14px 14px 96px;
         }
@@ -1016,10 +993,6 @@ export default function FeedPage() {
           font-size: 12px;
         }
 
-        .small {
-          opacity: 0.72;
-        }
-
         .actions {
           margin-top: 12px;
           display: grid;
@@ -1116,23 +1089,24 @@ export default function FeedPage() {
           background: #000;
         }
 
-        /* Tiny phones: squeeze text, keep both tabs visible */
+        /* Tiny phones: keep everything on one row by shrinking text */
         @media (max-width: 380px) {
+          .oneRow {
+            grid-template-columns: 1.1fr 0.9fr 48px 1.1fr;
+            gap: 8px;
+          }
           .brandName {
             font-size: 18px;
           }
-          .segTxt {
-            display: none;
+          .pill select {
+            font-size: 13px;
           }
-          .miniTxt {
-            display: none;
-          }
-          .miniPills {
-            grid-template-columns: 1fr 1fr auto;
+          .searchInline input {
+            font-size: 12px;
           }
         }
 
-        /* Desktop: allow wider header, chips shown comfortably */
+        /* Desktop */
         @media (min-width: 900px) {
           .topRow {
             padding: 16px 16px 8px;
@@ -1147,12 +1121,8 @@ export default function FeedPage() {
           .brandName {
             font-size: 28px;
           }
-          .controlRow {
-            padding: 6px 16px 10px;
-            max-width: 1100px;
-            margin: 0 auto;
-          }
-          .searchRow,
+          .segTabs,
+          .oneRow,
           .subline,
           .err,
           .loading,
