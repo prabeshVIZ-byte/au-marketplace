@@ -2,11 +2,13 @@
 
 export const dynamic = "force-dynamic";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { insertSystemMessage } from "@/lib/ensureThread";
 
+
+// ================= TYPES =================
 type ProfileRow = { id: string; full_name: string | null; user_role: string | null };
 
 type ThreadRow = {
@@ -17,7 +19,13 @@ type ThreadRow = {
   created_at?: string;
 };
 
-type ItemRow = { id: string; title: string; photo_url: string | null; status?: string | null; owner_id: string | null };
+type ItemRow = {
+  id: string;
+  title: string;
+  photo_url: string | null;
+  status?: string | null;
+  owner_id: string | null;
+};
 
 type MyInterestRow = { id: string; status: string | null };
 
@@ -32,7 +40,7 @@ type MessageRow = {
   edited_at?: string | null;
   deleted_at?: string | null;
   reply_to?: string | null;
-  attachments?: any | null; // jsonb
+  attachments?: any | null;
 };
 
 type ReactionRow = {
@@ -45,10 +53,25 @@ type ReactionRow = {
 
 type ThreadReadRow = { thread_id: string; user_id: string; last_seen_at: string };
 
-// ===== CONFIG =====
-const PAGE_SIZE = 30;
-const MEDIA_BUCKET = "message-media"; // change if your bucket has a different name
+type TradeRow = {
+  id: string;
+  item_id: string;
+  thread_id: string;
+  seller_id: string;
+  buyer_id: string;
+  state: "proposed" | "confirmed" | "fulfilled" | "canceled";
+  proposed_by: string;
+  confirmed_by: string | null;
+  fulfilled_by: string | null;
+  canceled_by: string | null;
+  updated_at: string;
+};
 
+// ================= CONFIG =================
+const PAGE_SIZE = 30;
+const MEDIA_BUCKET = "message-media";
+
+// ================= HELPERS =================
 function isoToMs(iso: string) {
   const t = new Date(iso).getTime();
   return Number.isNaN(t) ? 0 : t;
@@ -79,46 +102,61 @@ function makeClientId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function isAllowedImage(file: File) {
+  return ["image/jpeg", "image/png", "image/webp"].includes(file.type);
+}
+
+// ================= PAGE =================
 export default function ThreadPage() {
   const router = useRouter();
   const params = useParams();
-  const threadId = (params?.threadId as string) || "";
 
-  // auth
+  // ✅ robust threadId
+  const threadId = useMemo(() => {
+    const raw = params?.threadId;
+    const id = typeof raw === "string" ? raw : Array.isArray(raw) ? raw[0] : "";
+    return (id || "").trim();
+  }, [params]);
+
+  // ---------- auth ----------
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // thread/item
+  // ---------- thread/item/profile ----------
   const [thread, setThread] = useState<ThreadRow | null>(null);
   const [item, setItem] = useState<ItemRow | null>(null);
   const [otherProfile, setOtherProfile] = useState<ProfileRow | null>(null);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
 
-  // messages + reactions
-  const [messages, setMessages] = useState<MessageRow[]>([]);
-  const [reactions, setReactions] = useState<Record<string, Record<string, number>>>({}); // messageId -> emoji -> count
-  const [myReactions, setMyReactions] = useState<Record<string, Record<string, boolean>>>({}); // messageId -> emoji -> true
+  // ---------- trade/fulfillment ----------
+  const [trade, setTrade] = useState<TradeRow | null>(null);
+  const [tradeLoading, setTradeLoading] = useState(false);
+  const [tradeErr, setTradeErr] = useState<string | null>(null);
 
-  // read receipts
+  // ---------- messages + reactions ----------
+  const [messages, setMessages] = useState<MessageRow[]>([]);
+  const [reactions, setReactions] = useState<Record<string, Record<string, number>>>({});
+  const [myReactions, setMyReactions] = useState<Record<string, Record<string, boolean>>>({});
+
+  // ---------- read receipts ----------
   const [myLastSeenAt, setMyLastSeenAt] = useState<string | null>(null);
   const [otherLastSeenAt, setOtherLastSeenAt] = useState<string | null>(null);
 
-  // typing/presence
+  // ---------- typing/presence ----------
   const [otherTyping, setOtherTyping] = useState(false);
   const typingTimeoutRef = useRef<any>(null);
 
-  // ui
+  // realtime channel refs (stable, no hunting)
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  // ---------- UI ----------
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
   const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
-
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState<string>("");
-
   const [replyTo, setReplyTo] = useState<MessageRow | null>(null);
-
   const [uploading, setUploading] = useState(false);
 
   // paging
@@ -130,14 +168,15 @@ export default function ThreadPage() {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
 
+  // ---------- derived ----------
   const isAshland = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
 
   const myStatus = (myInterest?.status ?? "").toLowerCase();
-  const canConfirm = myStatus === "accepted";
+  const canConfirmPickup = myStatus === "accepted";
   const isBuyer = !!userId && !!thread?.requester_id && userId === thread.requester_id;
-  const mustConfirmBeforeChat = isBuyer && canConfirm;
+  const mustConfirmBeforeChat = isBuyer && canConfirmPickup;
 
   const otherId = useMemo(() => {
     if (!userId || !thread) return null;
@@ -152,16 +191,18 @@ export default function ThreadPage() {
     requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
   }
 
-  // ---------- AUTH ----------
+  // ================= AUTH =================
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
     const session = data.session;
-    setUserId(session?.user?.id ?? null);
-    setUserEmail(session?.user?.email ?? null);
-    return { uid: session?.user?.id ?? null, email: session?.user?.email ?? null };
+    const uid = session?.user?.id ?? null;
+    const email = session?.user?.email ?? null;
+    setUserId(uid);
+    setUserEmail(email);
+    return { uid, email };
   }
 
-  // ---------- LOAD THREAD/ITEM/PROFILE ----------
+  // ================= LOAD THREAD/ITEM/PROFILE =================
   async function loadThreadAndItem(uid: string) {
     const { data: th, error: thErr } = await supabase
       .from("threads")
@@ -194,15 +235,24 @@ export default function ThreadPage() {
     const other = ownerId && requesterId ? (ownerId === uid ? requesterId : ownerId) : null;
 
     if (other) {
-      const { data: pData } = await supabase.from("profiles").select("id,full_name,user_role").eq("id", other).single();
+      const { data: pData } = await supabase
+        .from("profiles")
+        .select("id,full_name,user_role")
+        .eq("id", other)
+        .single();
       setOtherProfile((pData as any) ?? null);
-    } else setOtherProfile(null);
+    } else {
+      setOtherProfile(null);
+    }
 
     return threadRow;
   }
 
   async function loadMyInterest(uid: string, itemId: string | null) {
-    if (!uid || !itemId) return setMyInterest(null);
+    if (!uid || !itemId) {
+      setMyInterest(null);
+      return;
+    }
     const { data } = await supabase
       .from("interests")
       .select("id,status")
@@ -214,9 +264,8 @@ export default function ThreadPage() {
     else setMyInterest(null);
   }
 
-  // ---------- LOAD MESSAGES (PAGED) ----------
+  // ================= MESSAGES (PAGED) =================
   async function fetchMessagesPage(before?: string | null) {
-    // before = ISO timestamp: fetch older than this
     let q = supabase
       .from("messages")
       .select("id,thread_id,sender_id,body,created_at,client_id,edited_at,deleted_at,reply_to,attachments")
@@ -256,7 +305,7 @@ export default function ThreadPage() {
     }
   }
 
-  // ---------- READ RECEIPTS ----------
+  // ================= READ RECEIPTS =================
   async function loadReads(uid: string) {
     try {
       const { data: mine } = await supabase
@@ -293,17 +342,18 @@ export default function ThreadPage() {
       });
       setMyLastSeenAt(nowIso);
     } catch {
-      // ignore if table missing / policy blocks
+      // ignore
     }
   }
 
-  // ---------- REACTIONS ----------
-  async function loadReactions(uid: string) {
-    // loads counts + which ones I reacted to
+  // ================= REACTIONS =================
+  async function loadReactions(uid: string, msgIds: string[]) {
+    if (msgIds.length === 0) return;
+
     const { data, error } = await supabase
       .from("message_reactions")
       .select("id,message_id,user_id,emoji,created_at")
-      .in("message_id", messages.map((m) => m.id));
+      .in("message_id", msgIds);
 
     if (error) return;
 
@@ -353,7 +403,7 @@ export default function ThreadPage() {
     }
   }
 
-  // ---------- SEND / RETRY / EDIT / DELETE ----------
+  // ================= SEND / RETRY / EDIT / DELETE =================
   async function sendMessage(payload: { body: string; attachments?: any | null }) {
     if (!isAshland || !userId) return router.push("/me");
     if (mustConfirmBeforeChat) return;
@@ -386,7 +436,6 @@ export default function ThreadPage() {
     setText("");
     scrollToBottom(true);
 
-    // insert
     const { data, error } = await supabase
       .from("messages")
       .insert([
@@ -403,18 +452,12 @@ export default function ThreadPage() {
       .single();
 
     if (error) {
-      // keep it in UI but mark failure using edited_at as hack? better: store local failed set
       setErr(error.message || "Send failed. Tap the message to retry.");
-      // mark locally as failed by prefixing body
-      setMessages((prev) =>
-        prev.map((m) => (m.id === tempId ? { ...m, body: m.body || "[attachment]", edited_at: "FAILED" } : m))
-      );
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, edited_at: "FAILED" } : m)));
       return;
     }
 
     const real = data as MessageRow;
-
-    // replace temp with real
     setMessages((prev) => prev.map((m) => (m.id === tempId ? real : m)));
     await markSeenNow(userId);
   }
@@ -423,7 +466,6 @@ export default function ThreadPage() {
     if (!userId) return;
     if (!String(temp.id).startsWith("temp-")) return;
     await sendMessage({ body: temp.body || "", attachments: temp.attachments ?? null });
-    // remove old temp
     setMessages((prev) => prev.filter((m) => m.id !== temp.id));
   }
 
@@ -431,6 +473,7 @@ export default function ThreadPage() {
     if (!userId) return;
     if (m.sender_id !== userId) return;
     if (m.deleted_at) return;
+    if (String(m.id).startsWith("temp-")) return;
     setEditingId(m.id);
     setEditingText(m.body || "");
   }
@@ -444,39 +487,46 @@ export default function ThreadPage() {
     setEditingId(null);
     setErr(null);
 
-    // optimistic
-    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, body, edited_at: new Date().toISOString() } : m)));
+    const editedAt = new Date().toISOString();
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, body, edited_at: editedAt } : m)));
 
-    const { error } = await supabase.from("messages").update({ body, edited_at: new Date().toISOString() }).eq("id", id);
-
-    if (error) {
-      setErr(error.message || "Edit failed.");
-      // reload minimal: just refetch initial pages might be heavy; keep as-is
-    }
+    const { error } = await supabase.from("messages").update({ body, edited_at: editedAt }).eq("id", id);
+    if (error) setErr(error.message || "Edit failed.");
   }
 
   async function deleteMessage(id: string) {
     if (!userId) return;
     const m = messages.find((x) => x.id === id);
     if (!m) return;
+    if (m.sender_id !== userId) return;
+    if (String(m.id).startsWith("temp-")) return;
 
-    const mine = m.sender_id === userId;
-    const ok = confirm(mine ? "Delete this message?" : "You can only delete your own messages.");
+    const ok = confirm("Delete this message?");
     if (!ok) return;
-    if (!mine) return;
 
     setErr(null);
+    const deletedAt = new Date().toISOString();
 
-    // optimistic soft delete
-    setMessages((prev) => prev.map((x) => (x.id === id ? { ...x, deleted_at: new Date().toISOString() } : x)));
-
-    const { error } = await supabase.from("messages").update({ deleted_at: new Date().toISOString() }).eq("id", id);
+    setMessages((prev) => prev.map((x) => (x.id === id ? { ...x, deleted_at: deletedAt } : x)));
+    const { error } = await supabase.from("messages").update({ deleted_at: deletedAt }).eq("id", id);
     if (error) setErr(error.message || "Delete failed.");
   }
 
-  // ---------- IMAGE UPLOAD ----------
+  // ================= IMAGE UPLOAD =================
   async function uploadImage(file: File) {
     if (!userId) return null;
+
+    // keep simple: allow any image, but validate common formats
+    if (!file.type?.startsWith("image/")) {
+      setErr("Please upload an image file.");
+      return null;
+    }
+
+    // optional: strict types
+    if (!isAllowedImage(file)) {
+      setErr("Upload JPG, PNG, or WEBP.");
+      return null;
+    }
 
     const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
     const path = `threads/${threadId}/${userId}/${Date.now()}.${ext}`;
@@ -487,6 +537,7 @@ export default function ThreadPage() {
     const { error: upErr } = await supabase.storage.from(MEDIA_BUCKET).upload(path, file, {
       cacheControl: "3600",
       upsert: false,
+      contentType: file.type || undefined,
     });
 
     if (upErr) {
@@ -513,7 +564,7 @@ export default function ThreadPage() {
     });
   }
 
-  // ---------- PICKUP CONFIRM ----------
+  // ================= PICKUP CONFIRM (your existing gate) =================
   async function confirmPickupFromChat() {
     if (!isAshland || !userId) return router.push("/me");
     if (!thread?.item_id || !myInterest?.id) return;
@@ -537,63 +588,270 @@ export default function ThreadPage() {
     }
   }
 
-  // ---------- REALTIME (MESSAGES + REACTIONS) ----------
+  // ================= TRADE (FULFILLMENT LOOP) =================
+  function isParticipant(t: TradeRow, uid: string | null) {
+    if (!uid) return false;
+    return t.seller_id === uid || t.buyer_id === uid;
+  }
+
+  async function loadTrade() {
+    if (!threadId) return;
+    setTradeLoading(true);
+    setTradeErr(null);
+
+    const { data, error } = await supabase
+      .from("trades")
+      .select("*")
+      .eq("thread_id", threadId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (error) {
+      setTradeErr(error.message);
+      setTrade(null);
+      setTradeLoading(false);
+      return;
+    }
+
+    const row = (data?.[0] as TradeRow) ?? null;
+    // if canceled, treat as no active deal
+    if (row?.state === "canceled") setTrade(null);
+    else setTrade(row);
+
+    setTradeLoading(false);
+  }
+
+  async function proposeTrade() {
+    if (!userId || !thread || !thread.item_id || !thread.owner_id || !thread.requester_id) return;
+
+    // don’t allow before pickup confirmation if you’re gating chat
+    if (mustConfirmBeforeChat) return;
+
+    setTradeErr(null);
+
+    const { error } = await supabase.from("trades").insert([
+      {
+        item_id: thread.item_id,
+        thread_id: threadId,
+        seller_id: thread.owner_id,
+        buyer_id: thread.requester_id,
+        state: "proposed",
+        proposed_by: userId,
+      },
+    ]);
+
+    if (error) {
+      // unique index likely hit; just reload
+      await loadTrade();
+      return;
+    }
+
+    await insertSystemMessage({
+      threadId,
+      senderId: userId,
+      body: "📌 Pickup/help proposed. Waiting for the other person to confirm.",
+    });
+
+    await loadTrade();
+  }
+
+  async function confirmTrade() {
+    if (!trade || !userId) return;
+    if (!isParticipant(trade, userId)) return;
+    if (trade.state !== "proposed") return;
+    if (trade.proposed_by === userId) {
+      setTradeErr("Waiting for the other person to confirm.");
+      return;
+    }
+
+    setTradeErr(null);
+
+    const { error: updErr } = await supabase
+      .from("trades")
+      .update({ state: "confirmed", confirmed_by: userId })
+      .eq("id", trade.id);
+
+    if (updErr) {
+      setTradeErr(updErr.message);
+      return;
+    }
+
+    // reserve item
+    await supabase.from("items").update({ status: "reserved" }).eq("id", trade.item_id);
+
+    await insertSystemMessage({
+      threadId,
+      senderId: userId,
+      body: "✅ Confirmed. You can mark it completed after pickup/help is done.",
+    });
+
+    await loadTrade();
+    // refresh item header status
+    if (thread?.item_id) {
+      const { data: it } = await supabase
+        .from("items")
+        .select("id,title,photo_url,status,owner_id")
+        .eq("id", thread.item_id)
+        .single();
+      if (it) setItem(it as any);
+    }
+  }
+
+  async function markFulfilled() {
+    if (!trade || !userId) return;
+    if (!isParticipant(trade, userId)) return;
+    if (trade.state !== "confirmed") return;
+
+    setTradeErr(null);
+
+    const { error: updErr } = await supabase
+      .from("trades")
+      .update({ state: "fulfilled", fulfilled_by: userId })
+      .eq("id", trade.id);
+
+    if (updErr) {
+      setTradeErr(updErr.message);
+      return;
+    }
+
+    await supabase.from("items").update({ status: "completed" }).eq("id", trade.item_id);
+
+    await insertSystemMessage({
+      threadId,
+      senderId: userId,
+      body: "🏁 Marked completed. Thanks for using ScholarSwap.",
+    });
+
+    await loadTrade();
+    if (thread?.item_id) {
+      const { data: it } = await supabase
+        .from("items")
+        .select("id,title,photo_url,status,owner_id")
+        .eq("id", thread.item_id)
+        .single();
+      if (it) setItem(it as any);
+    }
+  }
+
+  async function cancelTrade() {
+    if (!trade || !userId) return;
+    if (!isParticipant(trade, userId)) return;
+    if (trade.state !== "proposed" && trade.state !== "confirmed") return;
+
+    setTradeErr(null);
+
+    const { error: updErr } = await supabase
+      .from("trades")
+      .update({ state: "canceled", canceled_by: userId })
+      .eq("id", trade.id);
+
+    if (updErr) {
+      setTradeErr(updErr.message);
+      return;
+    }
+
+    // set item back to available (only if not already completed)
+    await supabase.from("items").update({ status: "available" }).eq("id", trade.item_id);
+
+    await insertSystemMessage({
+      threadId,
+      senderId: userId,
+      body: "↩️ Deal canceled. Item is available again.",
+    });
+
+    setTrade(null);
+    if (thread?.item_id) {
+      const { data: it } = await supabase
+        .from("items")
+        .select("id,title,photo_url,status,owner_id")
+        .eq("id", thread.item_id)
+        .single();
+      if (it) setItem(it as any);
+    }
+  }
+
+  // ================= REALTIME (MESSAGES + PRESENCE + REACTIONS) =================
+  async function trackTyping(isTyping: boolean) {
+    const ch = channelRef.current as any;
+    if (!ch || !userId) return;
+    try {
+      await ch.track({ user_id: userId, typing: isTyping });
+    } catch {
+      // ignore
+    }
+  }
+
+  function onTextChange(v: string) {
+    setText(v);
+    if (!userId) return;
+    if (mustConfirmBeforeChat) return;
+
+    trackTyping(true);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => trackTyping(false), 900);
+  }
+
+  // scroll detect
+useEffect(() => {
+  const el = listRef.current;
+  if (!el) return;
+
+  const node = el; // ✅ node is HTMLDivElement, not nullable
+
+  function onScroll() {
+    const distanceFromBottom =
+      node.scrollHeight - node.scrollTop - node.clientHeight;
+
+    setStickToBottom(distanceFromBottom < 120);
+  }
+
+  node.addEventListener("scroll", onScroll);
+  return () => node.removeEventListener("scroll", onScroll);
+}, []);
+
+  // realtime subscription
   useEffect(() => {
     if (!threadId || !userId) return;
 
-    // messages realtime
-    const msgChannel = supabase
+    // cleanup old
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current);
+      channelRef.current = null;
+    }
+
+    const ch = supabase
       .channel(`thread:${threadId}`)
-      // Presence for typing/online
       .on("presence", { event: "sync" }, () => {
-        const state = msgChannel.presenceState() as any;
-        const users = Object.keys(state || {});
-        const someoneElse = users.filter((u) => u !== userId);
-        // typing handled by track payload
-        const otherTypingNow =
-          someoneElse.some((u) => (state?.[u] || []).some((x: any) => !!x?.typing)) || false;
-        setOtherTyping(otherTypingNow);
+        const state = (ch.presenceState() as any) || {};
+        const keys = Object.keys(state);
+        const otherKeys = keys.filter((k) => k !== userId);
+
+        const typing =
+          otherKeys.some((k) => (state?.[k] || []).some((x: any) => !!x?.typing)) || false;
+
+        setOtherTyping(typing);
       })
-      // Message inserts/updates (soft delete, edits)
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "messages", filter: `thread_id=eq.${threadId}` },
         (payload) => {
           const ev = payload.eventType;
+
           if (ev === "INSERT") {
             const row = payload.new as MessageRow;
 
-            // dedupe: if our optimistic exists by client_id, replace it
-            if (row.client_id) {
-              setMessages((prev) => {
-                const tempId = `temp-${row.client_id}`;
-                const hasTemp = prev.some((m) => m.id === tempId);
-                const hasReal = prev.some((m) => m.id === row.id);
-                if (hasReal) return prev;
-
-                let next = prev;
-                if (hasTemp) next = prev.map((m) => (m.id === tempId ? row : m));
-                else next = [...prev, row];
-
-                next = next.sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
-                return next;
-              });
-
-              // if message is from other and we’re at bottom, mark seen
-              if (row.sender_id && row.sender_id !== userId) {
-                setTimeout(() => {
-                  if (stickToBottom) markSeenNow(userId);
-                }, 50);
-              }
-
-              setTimeout(() => scrollToBottom(), 30);
-              return;
-            }
-
+            // dedupe via client_id
             setMessages((prev) => {
               if (prev.some((m) => m.id === row.id)) return prev;
-              const next = [...prev, row].sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
-              return next;
+
+              if (row.client_id) {
+                const tempId = `temp-${row.client_id}`;
+                const hasTemp = prev.some((m) => m.id === tempId);
+                const next = hasTemp ? prev.map((m) => (m.id === tempId ? row : m)) : [...prev, row];
+                return next.sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
+              }
+
+              return [...prev, row].sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
             });
 
             if (row.sender_id && row.sender_id !== userId) {
@@ -610,80 +868,36 @@ export default function ThreadPage() {
           }
         }
       )
-      // reactions realtime
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "message_reactions" },
-        (payload) => {
-          // Instead of trying to diff perfectly, reload reactions for current message list
-          // (cheap enough for a campus MVP)
-          loadReactions(userId);
+        () => {
+          // reload counts (cheap enough for MVP)
+          if (userId) loadReactions(userId, messages.map((m) => m.id));
         }
       )
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          // presence track
-          await msgChannel.track({ user_id: userId, typing: false });
+          channelRef.current = ch;
+          await ch.track({ user_id: userId, typing: false });
         }
       });
 
+    channelRef.current = ch;
+
     return () => {
-      supabase.removeChannel(msgChannel);
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current);
+        channelRef.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, userId, otherId, stickToBottom, mustConfirmBeforeChat]);
+  }, [threadId, userId, stickToBottom, mustConfirmBeforeChat]);
 
-  function setTyping(on: boolean) {
-    // update presence payload
-    const ch = supabase.getChannels().find((c) => c.topic === `realtime:thread:${threadId}`);
-    // fallback: if not found, ignore
-    // Instead of hunting, we can just broadcast via presence again by creating a short-lived channel.
-  }
-
-  async function trackTyping(isTyping: boolean) {
-    // safest: use the existing channel by name
-    const channel = supabase.getChannels().find((c: any) => String(c?.topic || "").includes(`thread:${threadId}`)) as any;
-    if (!channel) return;
-    try {
-      await channel.track({ user_id: userId, typing: isTyping });
-    } catch {}
-  }
-
-  // typing debounce
-  function onTextChange(v: string) {
-    setText(v);
-    if (!userId) return;
-    if (mustConfirmBeforeChat) return;
-
-    trackTyping(true);
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => trackTyping(false), 900);
-  }
-
-  // ---------- SCROLL DETECT ----------
- useEffect(() => {
-  const el = listRef.current;
-  if (!el) return;
-
-  function onScroll() {
-    if (!el) return;
-
-    const distanceFromBottom =
-      el.scrollHeight - el.scrollTop - el.clientHeight;
-
-    // if you're within ~120px of bottom, treat as “stuck”
-    setStickToBottom(distanceFromBottom < 120);
-  }
-
-  el.addEventListener("scroll", onScroll);
-
-  return () => {
-    el.removeEventListener("scroll", onScroll);
-  };
-}, []);
-
-  // ---------- INITIAL LOAD ----------
+  // ================= INITIAL LOAD =================
   useEffect(() => {
+    if (!threadId) return;
+
     (async () => {
       setLoading(true);
       setErr(null);
@@ -703,6 +917,7 @@ export default function ThreadPage() {
         await loadInitialMessages();
         await loadReads(uid);
         await markSeenNow(uid);
+        await loadTrade();
         setLoading(false);
       } catch (e: any) {
         setErr(e?.message || "Failed to load conversation.");
@@ -711,7 +926,6 @@ export default function ThreadPage() {
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      // quick reload
       syncAuth().then((s) => {
         if (s.uid && s.email && s.email.toLowerCase().endsWith("@ashland.edu")) {
           loadReads(s.uid);
@@ -723,14 +937,15 @@ export default function ThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
-  // load reactions when messages list changes (after initial load / paging)
+  // reload reactions when messages change
   useEffect(() => {
     if (!userId) return;
     if (messages.length === 0) return;
-    loadReactions(userId);
+    loadReactions(userId, messages.map((m) => m.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length, userId]);
 
+  // ================= UI DERIVED =================
   const unseenCount = useMemo(() => {
     if (!myLastSeenAt) return 0;
     const seenMs = isoToMs(myLastSeenAt);
@@ -754,8 +969,36 @@ export default function ThreadPage() {
     return isoToMs(otherLastSeenAt) >= isoToMs(lastMyMessage.created_at);
   }, [lastMyMessage, otherLastSeenAt]);
 
+  // trade UI
+  const dealLabel =
+    trade?.state === "proposed"
+      ? "Waiting for confirmation"
+      : trade?.state === "confirmed"
+      ? "Confirmed"
+      : trade?.state === "fulfilled"
+      ? "Completed"
+      : "Not started";
+
+  const canProposeDeal = !trade && !!thread?.item_id && !!thread?.owner_id && !!thread?.requester_id && !mustConfirmBeforeChat;
+  const canConfirmDeal = trade?.state === "proposed" && trade?.proposed_by !== userId && isParticipant(trade, userId);
+  const canCompleteDeal = trade?.state === "confirmed" && isParticipant(trade, userId);
+  const canCancelDeal = trade && (trade.state === "proposed" || trade.state === "confirmed") && isParticipant(trade, userId);
+
+  // ================= RENDER =================
+  if (!threadId) {
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+        Invalid thread.
+      </div>
+    );
+  }
+
   if (!isAshland) {
-    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Checking access…</div>;
+    return (
+      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+        Checking access…
+      </div>
+    );
   }
 
   return (
@@ -779,7 +1022,13 @@ export default function ThreadPage() {
 
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           {unseenCount > 0 && (
-            <span style={{ ...pillStyle(), border: "1px solid rgba(239,68,68,0.35)", background: "rgba(239,68,68,0.10)" }}>
+            <span
+              style={{
+                ...pillStyle(),
+                border: "1px solid rgba(239,68,68,0.35)",
+                background: "rgba(239,68,68,0.10)",
+              }}
+            >
               Unseen: {unseenCount}
             </span>
           )}
@@ -820,7 +1069,11 @@ export default function ThreadPage() {
           >
             {item.photo_url ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.photo_url} alt={item.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              <img
+                src={item.photo_url}
+                alt={item.title}
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              />
             ) : null}
           </div>
 
@@ -830,8 +1083,8 @@ export default function ThreadPage() {
             </div>
 
             <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <span style={pillStyle()}>Thread: {threadId.slice(0, 8)}…</span>
-              {myInterest?.status ? <span style={pillStyle()}>Status: {myInterest.status}</span> : null}
+              <span style={pillStyle()}>Status: {item.status || "available"}</span>
+              {myInterest?.status ? <span style={pillStyle()}>Interest: {myInterest.status}</span> : null}
               {otherProfile ? (
                 <span style={pillStyle()}>
                   Talking with: {safeName(otherProfile)}
@@ -856,6 +1109,111 @@ export default function ThreadPage() {
           >
             View item
           </button>
+        </div>
+      )}
+
+      {/* fulfillment / deal status (low friction) */}
+      {!loading && item && (
+        <div
+          style={{
+            marginTop: 12,
+            border: "1px solid rgba(148,163,184,0.15)",
+            background: "rgba(255,255,255,0.03)",
+            borderRadius: 18,
+            padding: 12,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ fontWeight: 950 }}>Deal status</div>
+            <div style={{ fontSize: 12, opacity: 0.8 }}>
+              {tradeLoading ? "Loading…" : dealLabel}
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {canProposeDeal && (
+              <button
+                type="button"
+                onClick={proposeTrade}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "none",
+                  background: "#16a34a",
+                  color: "white",
+                  fontWeight: 950,
+                  cursor: "pointer",
+                }}
+              >
+                Confirm pickup
+              </button>
+            )}
+
+            {canConfirmDeal && (
+              <button
+                type="button"
+                onClick={confirmTrade}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "none",
+                  background: "#16a34a",
+                  color: "white",
+                  fontWeight: 950,
+                  cursor: "pointer",
+                }}
+              >
+                Confirm
+              </button>
+            )}
+
+            {canCompleteDeal && (
+              <button
+                type="button"
+                onClick={markFulfilled}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "none",
+                  background: "#22c55e",
+                  color: "white",
+                  fontWeight: 950,
+                  cursor: "pointer",
+                }}
+              >
+                Mark completed
+              </button>
+            )}
+
+            {canCancelDeal && (
+              <button
+                type="button"
+                onClick={cancelTrade}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(148,163,184,0.25)",
+                  background: "transparent",
+                  color: "white",
+                  fontWeight: 950,
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+
+          {tradeErr && (
+            <div style={{ width: "100%", color: "#f87171", fontSize: 12, marginTop: 6 }}>
+              {tradeErr}
+            </div>
+          )}
         </div>
       )}
 
@@ -901,7 +1259,7 @@ export default function ThreadPage() {
         ref={listRef}
         style={{
           marginTop: 14,
-          height: "calc(100vh - 330px)",
+          height: "calc(100vh - 360px)",
           overflowY: "auto",
           paddingRight: 6,
         }}
@@ -959,7 +1317,6 @@ export default function ThreadPage() {
                     opacity: deleted ? 0.7 : 1,
                   }}
                 >
-                  {/* reply preview */}
                   {replyTarget && !deleted && (
                     <div
                       style={{
@@ -989,19 +1346,33 @@ export default function ThreadPage() {
                         <img
                           src={att.url}
                           alt="attachment"
-                          style={{ width: "100%", maxHeight: 360, objectFit: "cover", borderRadius: 14, marginBottom: m.body ? 10 : 0 }}
+                          style={{
+                            width: "100%",
+                            maxHeight: 360,
+                            objectFit: "cover",
+                            borderRadius: 14,
+                            marginBottom: m.body ? 10 : 0,
+                          }}
                         />
                       ) : null}
 
                       {m.body ? <div style={{ opacity: 0.98 }}>{m.body}</div> : null}
 
-                      {failed ? (
-                        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>Send failed — tap to retry</div>
-                      ) : null}
+                      {failed ? <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>Send failed — tap to retry</div> : null}
                     </>
                   )}
 
-                  <div style={{ opacity: 0.6, fontSize: 12, marginTop: 6, textAlign: "right", display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <div
+                    style={{
+                      opacity: 0.6,
+                      fontSize: 12,
+                      marginTop: 6,
+                      textAlign: "right",
+                      display: "flex",
+                      gap: 10,
+                      justifyContent: "flex-end",
+                    }}
+                  >
                     <span>{time}</span>
                     {m.edited_at && m.edited_at !== "FAILED" && !deleted ? <span>Edited</span> : null}
                     {mine && lastMyMessage?.id === m.id && !deleted ? (
@@ -1010,10 +1381,8 @@ export default function ThreadPage() {
                   </div>
                 </div>
 
-                {/* reactions row */}
                 {!deleted && (
                   <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", justifyContent: mine ? "flex-end" : "flex-start" }}>
-                    {/* existing reactions */}
                     {Object.entries(reactions[m.id] || {}).map(([emoji, count]) => {
                       const active = !!myReactions?.[m.id]?.[emoji];
                       return (
@@ -1036,7 +1405,6 @@ export default function ThreadPage() {
                       );
                     })}
 
-                    {/* quick add */}
                     <button
                       onClick={() => toggleReaction(m.id, "👍")}
                       style={{
@@ -1068,7 +1436,6 @@ export default function ThreadPage() {
                       ❤️
                     </button>
 
-                    {/* actions */}
                     <button
                       onClick={() => setReplyTo(m)}
                       style={{
@@ -1164,7 +1531,7 @@ export default function ThreadPage() {
         </div>
       )}
 
-      {/* edit modal-ish inline */}
+      {/* edit bar */}
       {editingId && (
         <div
           style={{
@@ -1227,7 +1594,6 @@ export default function ThreadPage() {
 
       {/* composer */}
       <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center" }}>
-        {/* image */}
         <label
           style={{
             width: 48,
@@ -1246,7 +1612,7 @@ export default function ThreadPage() {
           📷
           <input
             type="file"
-            accept="image/*"
+            accept="image/jpeg,image/png,image/webp"
             onChange={onPickImage}
             disabled={uploading || mustConfirmBeforeChat}
             style={{ display: "none" }}
@@ -1280,7 +1646,7 @@ export default function ThreadPage() {
 
         <button
           onClick={() => sendMessage({ body: text, attachments: null })}
-          disabled={mustConfirmBeforeChat || uploading || (!text.trim() && !replyTo)}
+          disabled={mustConfirmBeforeChat || uploading || !text.trim()}
           style={{
             height: 48,
             padding: "0 16px",
@@ -1288,9 +1654,9 @@ export default function ThreadPage() {
             border: "1px solid rgba(16,185,129,0.35)",
             background: "rgba(16,185,129,0.18)",
             color: "white",
-            cursor: mustConfirmBeforeChat || uploading || (!text.trim() && !replyTo) ? "not-allowed" : "pointer",
+            cursor: mustConfirmBeforeChat || uploading || !text.trim() ? "not-allowed" : "pointer",
             fontWeight: 950,
-            opacity: mustConfirmBeforeChat || uploading || (!text.trim() && !replyTo) ? 0.65 : 1,
+            opacity: mustConfirmBeforeChat || uploading || !text.trim() ? 0.65 : 1,
           }}
         >
           Send
