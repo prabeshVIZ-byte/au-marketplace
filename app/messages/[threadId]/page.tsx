@@ -7,11 +7,7 @@ import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { insertSystemMessage } from "@/lib/ensureThread";
 
-type ProfileRow = {
-  id: string;
-  full_name: string | null;
-  user_role: string | null;
-};
+type ProfileRow = { id: string; full_name: string | null; user_role: string | null };
 
 type ThreadRow = {
   id: string;
@@ -21,18 +17,9 @@ type ThreadRow = {
   created_at?: string;
 };
 
-type ItemRow = {
-  id: string;
-  title: string;
-  photo_url: string | null;
-  status?: string | null;
-  owner_id: string | null;
-};
+type ItemRow = { id: string; title: string; photo_url: string | null; status?: string | null; owner_id: string | null };
 
-type MyInterestRow = {
-  id: string;
-  status: string | null;
-};
+type MyInterestRow = { id: string; status: string | null };
 
 type MessageRow = {
   id: string;
@@ -41,17 +28,36 @@ type MessageRow = {
   body: string;
   created_at: string;
 
-  // optional (recommended columns)
-  pinned?: boolean | null;
+  client_id?: string | null;
+  edited_at?: string | null;
   deleted_at?: string | null;
-  deleted_by?: string | null;
+  reply_to?: string | null;
+  attachments?: any | null; // jsonb
 };
 
-type ThreadReadRow = {
-  thread_id: string;
+type ReactionRow = {
+  id: string;
+  message_id: string;
   user_id: string;
-  last_seen_at: string;
+  emoji: string;
+  created_at: string;
 };
+
+type ThreadReadRow = { thread_id: string; user_id: string; last_seen_at: string };
+
+// ===== CONFIG =====
+const PAGE_SIZE = 30;
+const MEDIA_BUCKET = "message-media"; // change if your bucket has a different name
+
+function isoToMs(iso: string) {
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function safeName(p: ProfileRow | null) {
+  const n = (p?.full_name ?? "").trim();
+  return n || "Ashland user";
+}
 
 function pillStyle() {
   return {
@@ -69,15 +75,8 @@ function pillStyle() {
   } as const;
 }
 
-function isoToMs(iso: string) {
-  const t = new Date(iso).getTime();
-  return Number.isNaN(t) ? 0 : t;
-}
-
-function safeName(p: ProfileRow | null) {
-  const n = (p?.full_name ?? "").trim();
-  if (n) return n;
-  return "Ashland user";
+function makeClientId() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 export default function ThreadPage() {
@@ -89,35 +88,54 @@ export default function ThreadPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // data
+  // thread/item
   const [thread, setThread] = useState<ThreadRow | null>(null);
   const [item, setItem] = useState<ItemRow | null>(null);
   const [otherProfile, setOtherProfile] = useState<ProfileRow | null>(null);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
-  const [messages, setMessages] = useState<MessageRow[]>([]);
 
-  // seen/unseen
+  // messages + reactions
+  const [messages, setMessages] = useState<MessageRow[]>([]);
+  const [reactions, setReactions] = useState<Record<string, Record<string, number>>>({}); // messageId -> emoji -> count
+  const [myReactions, setMyReactions] = useState<Record<string, Record<string, boolean>>>({}); // messageId -> emoji -> true
+
+  // read receipts
   const [myLastSeenAt, setMyLastSeenAt] = useState<string | null>(null);
   const [otherLastSeenAt, setOtherLastSeenAt] = useState<string | null>(null);
 
+  // typing/presence
+  const [otherTyping, setOtherTyping] = useState(false);
+  const typingTimeoutRef = useRef<any>(null);
+
   // ui
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
-  const [actionBusy, setActionBusy] = useState(false);
-  const [msgActingId, setMsgActingId] = useState<string | null>(null); // pin/delete acting
 
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState<string>("");
+
+  const [replyTo, setReplyTo] = useState<MessageRow | null>(null);
+
+  const [uploading, setUploading] = useState(false);
+
+  // paging
+  const [hasMore, setHasMore] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  // scroll behavior
+  const listRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const [stickToBottom, setStickToBottom] = useState(true);
 
   const isAshland = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
 
   const myStatus = (myInterest?.status ?? "").toLowerCase();
-  const canConfirm = myStatus === "accepted"; // seller accepted buyer's interest
-
+  const canConfirm = myStatus === "accepted";
   const isBuyer = !!userId && !!thread?.requester_id && userId === thread.requester_id;
   const mustConfirmBeforeChat = isBuyer && canConfirm;
 
@@ -129,22 +147,22 @@ export default function ThreadPage() {
     return ownerId === userId ? requesterId : ownerId;
   }, [userId, thread]);
 
-  function scrollToBottom() {
+  function scrollToBottom(force = false) {
+    if (!stickToBottom && !force) return;
     requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
   }
 
+  // ---------- AUTH ----------
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
     const session = data.session;
     setUserId(session?.user?.id ?? null);
     setUserEmail(session?.user?.email ?? null);
+    return { uid: session?.user?.id ?? null, email: session?.user?.email ?? null };
   }
 
+  // ---------- LOAD THREAD/ITEM/PROFILE ----------
   async function loadThreadAndItem(uid: string) {
-    if (!threadId) return null;
-
-    setErr(null);
-
     const { data: th, error: thErr } = await supabase
       .from("threads")
       .select("id,item_id,owner_id,requester_id,created_at")
@@ -152,113 +170,103 @@ export default function ThreadPage() {
       .single();
 
     if (thErr) throw new Error(thErr.message || "Error loading thread.");
-
     const threadRow = th as ThreadRow;
     setThread(threadRow);
 
-    if (threadRow.item_id) {
-      const { data: it, error: itErr } = await supabase
-        .from("items")
-        .select("id,title,photo_url,status,owner_id")
-        .eq("id", threadRow.item_id)
-        .single();
-
-      if (!itErr && it) {
-        const itemRow = it as ItemRow;
-        setItem(itemRow);
-
-        // other profile
-        const ownerId = (threadRow.owner_id ?? itemRow.owner_id ?? null) as string | null;
-        const requesterId = (threadRow.requester_id ?? null) as string | null;
-
-        const other =
-          ownerId && requesterId ? (ownerId === uid ? requesterId : ownerId) : null;
-
-        if (other) {
-          const { data: pData, error: pErr } = await supabase
-            .from("profiles")
-            .select("id,full_name,user_role")
-            .eq("id", other)
-            .single();
-
-          if (!pErr && pData) setOtherProfile(pData as ProfileRow);
-          else setOtherProfile(null);
-        } else {
-          setOtherProfile(null);
-        }
-      } else {
-        setItem(null);
-        setOtherProfile(null);
-      }
-    } else {
+    if (!threadRow.item_id) {
       setItem(null);
       setOtherProfile(null);
+      return threadRow;
     }
+
+    const { data: it, error: itErr } = await supabase
+      .from("items")
+      .select("id,title,photo_url,status,owner_id")
+      .eq("id", threadRow.item_id)
+      .single();
+
+    if (itErr) throw new Error(itErr.message || "Error loading item.");
+    const itemRow = it as ItemRow;
+    setItem(itemRow);
+
+    const ownerId = (threadRow.owner_id ?? itemRow.owner_id ?? null) as string | null;
+    const requesterId = (threadRow.requester_id ?? null) as string | null;
+    const other = ownerId && requesterId ? (ownerId === uid ? requesterId : ownerId) : null;
+
+    if (other) {
+      const { data: pData } = await supabase.from("profiles").select("id,full_name,user_role").eq("id", other).single();
+      setOtherProfile((pData as any) ?? null);
+    } else setOtherProfile(null);
 
     return threadRow;
   }
 
   async function loadMyInterest(uid: string, itemId: string | null) {
-    if (!uid || !itemId) {
-      setMyInterest(null);
-      return;
-    }
-
-    const { data, error } = await supabase
+    if (!uid || !itemId) return setMyInterest(null);
+    const { data } = await supabase
       .from("interests")
       .select("id,status")
       .eq("item_id", itemId)
       .eq("user_id", uid)
       .maybeSingle();
 
-    if (!error && data) {
-      setMyInterest({ id: (data as any).id, status: (data as any).status ?? null });
-    } else {
-      setMyInterest(null);
-    }
+    if (data) setMyInterest({ id: (data as any).id, status: (data as any).status ?? null });
+    else setMyInterest(null);
   }
 
-  async function loadMessages() {
-    if (!threadId) return;
-
-    const { data, error } = await supabase
+  // ---------- LOAD MESSAGES (PAGED) ----------
+  async function fetchMessagesPage(before?: string | null) {
+    // before = ISO timestamp: fetch older than this
+    let q = supabase
       .from("messages")
-      .select("id,thread_id,sender_id,body,created_at,pinned,deleted_at,deleted_by")
+      .select("id,thread_id,sender_id,body,created_at,client_id,edited_at,deleted_at,reply_to,attachments")
       .eq("thread_id", threadId)
-      .order("created_at", { ascending: true });
+      .order("created_at", { ascending: false })
+      .limit(PAGE_SIZE);
 
-    if (error) {
-      setMessages([]);
-      throw new Error(error.message || "Error loading messages.");
-    }
+    if (before) q = q.lt("created_at", before);
 
-    const rows = ((data as MessageRow[]) || []).map((m) => ({
-      ...m,
-      pinned: m.pinned ?? false,
-    }));
+    const { data, error } = await q;
+    if (error) throw new Error(error.message || "Error loading messages.");
 
-    // pinned first, but keep chronological inside each group
-    const pinned = rows.filter((m) => !!m.pinned).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
-    const normal = rows.filter((m) => !m.pinned).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
-
-    setMessages([...pinned, ...normal]);
+    const rows = ((data as MessageRow[]) || []).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
+    return rows;
   }
 
-  async function loadReads() {
-    if (!threadId || !userId) return;
+  async function loadInitialMessages() {
+    const page = await fetchMessagesPage(null);
+    setMessages(page);
+    setHasMore(page.length === PAGE_SIZE);
+    setTimeout(() => scrollToBottom(true), 30);
+  }
 
-    // my read
+  async function loadOlder() {
+    if (!hasMore || loadingMore || messages.length === 0) return;
+    setLoadingMore(true);
+    setErr(null);
+    try {
+      const oldest = messages[0]?.created_at ?? null;
+      const page = await fetchMessagesPage(oldest);
+      setMessages((prev) => [...page, ...prev]);
+      setHasMore(page.length === PAGE_SIZE);
+    } catch (e: any) {
+      setErr(e?.message || "Could not load older.");
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  // ---------- READ RECEIPTS ----------
+  async function loadReads(uid: string) {
     try {
       const { data: mine } = await supabase
         .from("thread_reads")
         .select("thread_id,user_id,last_seen_at")
         .eq("thread_id", threadId)
-        .eq("user_id", userId)
+        .eq("user_id", uid)
         .maybeSingle();
-
       setMyLastSeenAt((mine as ThreadReadRow | null)?.last_seen_at ?? null);
 
-      // other read (if we know who other is)
       if (otherId) {
         const { data: oth } = await supabase
           .from("thread_reads")
@@ -266,141 +274,252 @@ export default function ThreadPage() {
           .eq("thread_id", threadId)
           .eq("user_id", otherId)
           .maybeSingle();
-
         setOtherLastSeenAt((oth as ThreadReadRow | null)?.last_seen_at ?? null);
       } else {
         setOtherLastSeenAt(null);
       }
     } catch {
-      // if table doesn't exist, we silently ignore
       setMyLastSeenAt(null);
       setOtherLastSeenAt(null);
     }
   }
 
-  async function markSeenNow() {
-    if (!threadId || !userId) return;
-
-    // only mark seen if you can actually view the chat (your gate)
+  async function markSeenNow(uid: string) {
     if (mustConfirmBeforeChat) return;
-
     const nowIso = new Date().toISOString();
-
-    // upsert into thread_reads (requires table)
     try {
-      await supabase.from("thread_reads").upsert(
-        [{ thread_id: threadId, user_id: userId, last_seen_at: nowIso }],
-        { onConflict: "thread_id,user_id" }
-      );
+      await supabase.from("thread_reads").upsert([{ thread_id: threadId, user_id: uid, last_seen_at: nowIso }], {
+        onConflict: "thread_id,user_id",
+      });
       setMyLastSeenAt(nowIso);
     } catch {
-      // ignore if table missing
+      // ignore if table missing / policy blocks
     }
   }
 
-  async function loadAll() {
-    setLoading(true);
-    setErr(null);
+  // ---------- REACTIONS ----------
+  async function loadReactions(uid: string) {
+    // loads counts + which ones I reacted to
+    const { data, error } = await supabase
+      .from("message_reactions")
+      .select("id,message_id,user_id,emoji,created_at")
+      .in("message_id", messages.map((m) => m.id));
 
-    const { data: s } = await supabase.auth.getSession();
-    const uid = s.session?.user?.id ?? null;
-    const email = s.session?.user?.email ?? null;
+    if (error) return;
 
-    if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
-      router.push("/me");
-      return;
+    const counts: Record<string, Record<string, number>> = {};
+    const mine: Record<string, Record<string, boolean>> = {};
+
+    for (const r of (data as ReactionRow[]) || []) {
+      counts[r.message_id] ??= {};
+      counts[r.message_id][r.emoji] = (counts[r.message_id][r.emoji] || 0) + 1;
+
+      if (r.user_id === uid) {
+        mine[r.message_id] ??= {};
+        mine[r.message_id][r.emoji] = true;
+      }
     }
 
-    try {
-      const th = await loadThreadAndItem(uid);
-      await loadMyInterest(uid, th?.item_id ?? null);
-      await loadMessages();
-      await loadReads();
-      await markSeenNow();
+    setReactions(counts);
+    setMyReactions(mine);
+  }
 
-      setLoading(false);
-      setTimeout(scrollToBottom, 50);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load conversation.");
-      setThread(null);
-      setItem(null);
-      setMyInterest(null);
-      setOtherProfile(null);
-      setMessages([]);
-      setLoading(false);
+  async function toggleReaction(messageId: string, emoji: string) {
+    if (!userId) return;
+    const already = !!myReactions?.[messageId]?.[emoji];
+
+    // optimistic
+    setMyReactions((prev) => {
+      const next = { ...(prev || {}) };
+      next[messageId] = { ...(next[messageId] || {}) };
+      if (already) delete next[messageId][emoji];
+      else next[messageId][emoji] = true;
+      return next;
+    });
+
+    setReactions((prev) => {
+      const next = { ...(prev || {}) };
+      next[messageId] = { ...(next[messageId] || {}) };
+      const cur = next[messageId][emoji] || 0;
+      next[messageId][emoji] = Math.max(0, cur + (already ? -1 : 1));
+      if (next[messageId][emoji] === 0) delete next[messageId][emoji];
+      return next;
+    });
+
+    if (already) {
+      await supabase.from("message_reactions").delete().eq("message_id", messageId).eq("user_id", userId).eq("emoji", emoji);
+    } else {
+      await supabase.from("message_reactions").insert([{ message_id: messageId, user_id: userId, emoji }]);
     }
   }
 
-  async function refreshNow() {
-    if (!threadId) return;
-    setRefreshing(true);
-    setErr(null);
-    try {
-      await loadMessages();
-      await loadReads();
-      await markSeenNow();
-      setTimeout(scrollToBottom, 30);
-    } catch (e: any) {
-      setErr(e?.message || "Could not refresh.");
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
-  async function sendMessage() {
+  // ---------- SEND / RETRY / EDIT / DELETE ----------
+  async function sendMessage(payload: { body: string; attachments?: any | null }) {
     if (!isAshland || !userId) return router.push("/me");
     if (mustConfirmBeforeChat) return;
 
-    const body = text.trim();
-    if (!body) return;
+    const body = payload.body.trim();
+    const hasAttachment = payload.attachments && Object.keys(payload.attachments).length > 0;
+    if (!body && !hasAttachment) return;
 
-    setSending(true);
     setErr(null);
 
-    const temp: MessageRow = {
-      id: `temp-${Date.now()}`,
+    const client_id = makeClientId();
+    const tempId = `temp-${client_id}`;
+    const now = new Date().toISOString();
+
+    const optimistic: MessageRow = {
+      id: tempId,
       thread_id: threadId,
       sender_id: userId,
       body,
-      created_at: new Date().toISOString(),
-      pinned: false,
+      created_at: now,
+      client_id,
+      edited_at: null,
       deleted_at: null,
-      deleted_by: null,
+      reply_to: replyTo?.id ?? null,
+      attachments: payload.attachments ?? null,
     };
 
-    // optimistic append (at end of non-pinned)
-    setMessages((prev) => [...prev, temp]);
+    setMessages((prev) => [...prev, optimistic]);
+    setReplyTo(null);
     setText("");
-    scrollToBottom();
+    scrollToBottom(true);
 
+    // insert
     const { data, error } = await supabase
       .from("messages")
-      .insert([{ thread_id: threadId, sender_id: userId, body }])
-      .select("id,thread_id,sender_id,body,created_at,pinned,deleted_at,deleted_by")
+      .insert([
+        {
+          thread_id: threadId,
+          sender_id: userId,
+          body,
+          client_id,
+          reply_to: replyTo?.id ?? null,
+          attachments: payload.attachments ?? null,
+        },
+      ])
+      .select("id,thread_id,sender_id,body,created_at,client_id,edited_at,deleted_at,reply_to,attachments")
       .single();
 
-    setSending(false);
-
     if (error) {
-      setMessages((prev) => prev.filter((x) => x.id !== temp.id));
-      setErr(error.message);
+      // keep it in UI but mark failure using edited_at as hack? better: store local failed set
+      setErr(error.message || "Send failed. Tap the message to retry.");
+      // mark locally as failed by prefixing body
+      setMessages((prev) =>
+        prev.map((m) => (m.id === tempId ? { ...m, body: m.body || "[attachment]", edited_at: "FAILED" } : m))
+      );
       return;
     }
 
     const real = data as MessageRow;
-    setMessages((prev) => prev.map((x) => (x.id === temp.id ? { ...real, pinned: real.pinned ?? false } : x)));
-    await markSeenNow();
-    scrollToBottom();
+
+    // replace temp with real
+    setMessages((prev) => prev.map((m) => (m.id === tempId ? real : m)));
+    await markSeenNow(userId);
   }
 
+  async function retrySend(temp: MessageRow) {
+    if (!userId) return;
+    if (!String(temp.id).startsWith("temp-")) return;
+    await sendMessage({ body: temp.body || "", attachments: temp.attachments ?? null });
+    // remove old temp
+    setMessages((prev) => prev.filter((m) => m.id !== temp.id));
+  }
+
+  async function startEdit(m: MessageRow) {
+    if (!userId) return;
+    if (m.sender_id !== userId) return;
+    if (m.deleted_at) return;
+    setEditingId(m.id);
+    setEditingText(m.body || "");
+  }
+
+  async function saveEdit() {
+    if (!userId || !editingId) return;
+    const body = editingText.trim();
+    if (!body) return;
+
+    const id = editingId;
+    setEditingId(null);
+    setErr(null);
+
+    // optimistic
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, body, edited_at: new Date().toISOString() } : m)));
+
+    const { error } = await supabase.from("messages").update({ body, edited_at: new Date().toISOString() }).eq("id", id);
+
+    if (error) {
+      setErr(error.message || "Edit failed.");
+      // reload minimal: just refetch initial pages might be heavy; keep as-is
+    }
+  }
+
+  async function deleteMessage(id: string) {
+    if (!userId) return;
+    const m = messages.find((x) => x.id === id);
+    if (!m) return;
+
+    const mine = m.sender_id === userId;
+    const ok = confirm(mine ? "Delete this message?" : "You can only delete your own messages.");
+    if (!ok) return;
+    if (!mine) return;
+
+    setErr(null);
+
+    // optimistic soft delete
+    setMessages((prev) => prev.map((x) => (x.id === id ? { ...x, deleted_at: new Date().toISOString() } : x)));
+
+    const { error } = await supabase.from("messages").update({ deleted_at: new Date().toISOString() }).eq("id", id);
+    if (error) setErr(error.message || "Delete failed.");
+  }
+
+  // ---------- IMAGE UPLOAD ----------
+  async function uploadImage(file: File) {
+    if (!userId) return null;
+
+    const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+    const path = `threads/${threadId}/${userId}/${Date.now()}.${ext}`;
+
+    setUploading(true);
+    setErr(null);
+
+    const { error: upErr } = await supabase.storage.from(MEDIA_BUCKET).upload(path, file, {
+      cacheControl: "3600",
+      upsert: false,
+    });
+
+    if (upErr) {
+      setUploading(false);
+      setErr(upErr.message || "Upload failed.");
+      return null;
+    }
+
+    const { data } = supabase.storage.from(MEDIA_BUCKET).getPublicUrl(path);
+    setUploading(false);
+    return data.publicUrl;
+  }
+
+  async function onPickImage(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    const url = await uploadImage(f);
+    if (!url) return;
+
+    await sendMessage({
+      body: "",
+      attachments: { type: "image", url },
+    });
+  }
+
+  // ---------- PICKUP CONFIRM ----------
   async function confirmPickupFromChat() {
     if (!isAshland || !userId) return router.push("/me");
     if (!thread?.item_id || !myInterest?.id) return;
     if (!mustConfirmBeforeChat) return;
 
-    setActionBusy(true);
     setErr(null);
-
     try {
       const { error: rpcErr } = await supabase.rpc("confirm_pickup", { p_interest_id: myInterest.id });
       if (rpcErr) throw new Error(rpcErr.message);
@@ -412,122 +531,198 @@ export default function ThreadPage() {
       });
 
       await loadMyInterest(userId, thread.item_id);
-      await loadMessages();
-      await markSeenNow();
-      scrollToBottom();
+      await markSeenNow(userId);
     } catch (e: any) {
       setErr(e?.message || "Could not confirm pickup.");
-    } finally {
-      setActionBusy(false);
     }
   }
 
-  async function togglePin(m: MessageRow) {
-    if (!userId) return;
-    if (!threadId) return;
-
-    const next = !(m.pinned ?? false);
-    setMsgActingId(m.id);
-    setErr(null);
-
-    // optimistic
-    setMessages((prev) => {
-      const updated = prev.map((x) => (x.id === m.id ? { ...x, pinned: next } : x));
-      const pinned = updated.filter((x) => !!x.pinned).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
-      const normal = updated.filter((x) => !x.pinned).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
-      return [...pinned, ...normal];
-    });
-
-    // persist (requires pinned column)
-    const { error } = await supabase.from("messages").update({ pinned: next }).eq("id", m.id);
-
-    setMsgActingId(null);
-    if (error) {
-      // rollback by reloading from server
-      await refreshNow();
-      setErr(error.message);
-    }
-  }
-
-  async function deleteMessage(m: MessageRow) {
-    if (!userId) return;
-    if (!threadId) return;
-
-    const mine = m.sender_id === userId;
-    const ok = confirm(mine ? "Delete this message?" : "Remove this message from your view?");
-    if (!ok) return;
-
-    setMsgActingId(m.id);
-    setErr(null);
-
-    // optimistic: soft-delete view
-    setMessages((prev) => prev.map((x) => (x.id === m.id ? { ...x, deleted_at: new Date().toISOString(), deleted_by: userId, body: "" } : x)));
-
-    // Preferred: soft delete (requires columns)
-    const { error: softErr } = await supabase
-      .from("messages")
-      .update({ deleted_at: new Date().toISOString(), deleted_by: userId })
-      .eq("id", m.id);
-
-    if (!softErr) {
-      setMsgActingId(null);
-      return;
-    }
-
-    // Fallback: hard delete (only allow if sender)
-    if (mine) {
-      const { error: hardErr } = await supabase.from("messages").delete().eq("id", m.id);
-      setMsgActingId(null);
-
-      if (hardErr) {
-        await refreshNow();
-        setErr(hardErr.message);
-      } else {
-        setMessages((prev) => prev.filter((x) => x.id !== m.id));
-      }
-      return;
-    }
-
-    // If not mine and soft-delete not available, revert
-    setMsgActingId(null);
-    await refreshNow();
-    setErr("Soft-delete is not enabled yet. Add deleted_at/deleted_by columns to messages.");
-  }
-
-  // refresh on focus (not live)
+  // ---------- REALTIME (MESSAGES + REACTIONS) ----------
   useEffect(() => {
-    if (!threadId) return;
+    if (!threadId || !userId) return;
 
-    async function onFocus() {
-      try {
-        await loadMessages();
-        await loadReads();
-        await markSeenNow();
-      } catch {
-        // ignore
-      }
+    // messages realtime
+    const msgChannel = supabase
+      .channel(`thread:${threadId}`)
+      // Presence for typing/online
+      .on("presence", { event: "sync" }, () => {
+        const state = msgChannel.presenceState() as any;
+        const users = Object.keys(state || {});
+        const someoneElse = users.filter((u) => u !== userId);
+        // typing handled by track payload
+        const otherTypingNow =
+          someoneElse.some((u) => (state?.[u] || []).some((x: any) => !!x?.typing)) || false;
+        setOtherTyping(otherTypingNow);
+      })
+      // Message inserts/updates (soft delete, edits)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "messages", filter: `thread_id=eq.${threadId}` },
+        (payload) => {
+          const ev = payload.eventType;
+          if (ev === "INSERT") {
+            const row = payload.new as MessageRow;
+
+            // dedupe: if our optimistic exists by client_id, replace it
+            if (row.client_id) {
+              setMessages((prev) => {
+                const tempId = `temp-${row.client_id}`;
+                const hasTemp = prev.some((m) => m.id === tempId);
+                const hasReal = prev.some((m) => m.id === row.id);
+                if (hasReal) return prev;
+
+                let next = prev;
+                if (hasTemp) next = prev.map((m) => (m.id === tempId ? row : m));
+                else next = [...prev, row];
+
+                next = next.sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
+                return next;
+              });
+
+              // if message is from other and we’re at bottom, mark seen
+              if (row.sender_id && row.sender_id !== userId) {
+                setTimeout(() => {
+                  if (stickToBottom) markSeenNow(userId);
+                }, 50);
+              }
+
+              setTimeout(() => scrollToBottom(), 30);
+              return;
+            }
+
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === row.id)) return prev;
+              const next = [...prev, row].sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
+              return next;
+            });
+
+            if (row.sender_id && row.sender_id !== userId) {
+              setTimeout(() => {
+                if (stickToBottom) markSeenNow(userId);
+              }, 50);
+            }
+            setTimeout(() => scrollToBottom(), 30);
+          }
+
+          if (ev === "UPDATE") {
+            const row = payload.new as MessageRow;
+            setMessages((prev) => prev.map((m) => (m.id === row.id ? { ...m, ...row } : m)));
+          }
+        }
+      )
+      // reactions realtime
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "message_reactions" },
+        (payload) => {
+          // Instead of trying to diff perfectly, reload reactions for current message list
+          // (cheap enough for a campus MVP)
+          loadReactions(userId);
+        }
+      )
+      .subscribe(async (status) => {
+        if (status === "SUBSCRIBED") {
+          // presence track
+          await msgChannel.track({ user_id: userId, typing: false });
+        }
+      });
+
+    return () => {
+      supabase.removeChannel(msgChannel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId, userId, otherId, stickToBottom, mustConfirmBeforeChat]);
+
+  function setTyping(on: boolean) {
+    // update presence payload
+    const ch = supabase.getChannels().find((c) => c.topic === `realtime:thread:${threadId}`);
+    // fallback: if not found, ignore
+    // Instead of hunting, we can just broadcast via presence again by creating a short-lived channel.
+  }
+
+  async function trackTyping(isTyping: boolean) {
+    // safest: use the existing channel by name
+    const channel = supabase.getChannels().find((c: any) => String(c?.topic || "").includes(`thread:${threadId}`)) as any;
+    if (!channel) return;
+    try {
+      await channel.track({ user_id: userId, typing: isTyping });
+    } catch {}
+  }
+
+  // typing debounce
+  function onTextChange(v: string) {
+    setText(v);
+    if (!userId) return;
+    if (mustConfirmBeforeChat) return;
+
+    trackTyping(true);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => trackTyping(false), 900);
+  }
+
+  // ---------- SCROLL DETECT ----------
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+
+    function onScroll() {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      // if you’re within ~120px of bottom, treat as “stuck”
+      setStickToBottom(distanceFromBottom < 120);
     }
 
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, userId, otherId, mustConfirmBeforeChat]);
+    el.addEventListener("scroll", onScroll);
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
 
-  // initial load + auth changes
+  // ---------- INITIAL LOAD ----------
   useEffect(() => {
     (async () => {
-      await syncAuth();
-      await loadAll();
+      setLoading(true);
+      setErr(null);
+
+      const s = await syncAuth();
+      const uid = s.uid;
+      const email = s.email;
+
+      if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
+        router.push("/me");
+        return;
+      }
+
+      try {
+        const th = await loadThreadAndItem(uid);
+        await loadMyInterest(uid, th?.item_id ?? null);
+        await loadInitialMessages();
+        await loadReads(uid);
+        await markSeenNow(uid);
+        setLoading(false);
+      } catch (e: any) {
+        setErr(e?.message || "Failed to load conversation.");
+        setLoading(false);
+      }
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      syncAuth();
-      loadAll();
+      // quick reload
+      syncAuth().then((s) => {
+        if (s.uid && s.email && s.email.toLowerCase().endsWith("@ashland.edu")) {
+          loadReads(s.uid);
+        }
+      });
     });
 
     return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
+
+  // load reactions when messages list changes (after initial load / paging)
+  useEffect(() => {
+    if (!userId) return;
+    if (messages.length === 0) return;
+    loadReactions(userId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length, userId]);
 
   const unseenCount = useMemo(() => {
     if (!myLastSeenAt) return 0;
@@ -553,15 +748,12 @@ export default function ThreadPage() {
   }, [lastMyMessage, otherLastSeenAt]);
 
   if (!isAshland) {
-    return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        Checking access…
-      </div>
-    );
+    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Checking access…</div>;
   }
 
   return (
     <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 18, paddingBottom: 120 }}>
+      {/* top bar */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
         <button
           onClick={() => router.push("/messages")}
@@ -585,22 +777,7 @@ export default function ThreadPage() {
             </span>
           )}
 
-          <button
-            onClick={refreshNow}
-            disabled={refreshing}
-            style={{
-              background: "transparent",
-              color: "white",
-              border: "1px solid rgba(148,163,184,0.25)",
-              padding: "8px 12px",
-              borderRadius: 12,
-              cursor: refreshing ? "not-allowed" : "pointer",
-              fontWeight: 900,
-              opacity: refreshing ? 0.7 : 1,
-            }}
-          >
-            {refreshing ? "Refreshing…" : "Refresh"}
-          </button>
+          {otherTyping && <span style={pillStyle()}>Typing…</span>}
         </div>
       </div>
 
@@ -675,7 +852,7 @@ export default function ThreadPage() {
         </div>
       )}
 
-      {/* ✅ Buyer confirm gate */}
+      {/* buyer confirm gate */}
       {!loading && item && mustConfirmBeforeChat && (
         <div
           style={{
@@ -696,36 +873,70 @@ export default function ThreadPage() {
 
           <button
             onClick={confirmPickupFromChat}
-            disabled={actionBusy}
             style={{
               background: "rgba(20,83,45,1)",
               border: "1px solid rgba(22,101,52,1)",
               color: "white",
               padding: "10px 12px",
               borderRadius: 12,
-              cursor: actionBusy ? "not-allowed" : "pointer",
+              cursor: "pointer",
               fontWeight: 950,
-              opacity: actionBusy ? 0.8 : 1,
               whiteSpace: "nowrap",
             }}
           >
-            {actionBusy ? "Confirming…" : "Confirm pickup ✅"}
+            Confirm pickup ✅
           </button>
         </div>
       )}
 
-      {/* messages */}
-      <div style={{ marginTop: 14 }}>
+      {/* messages list */}
+      <div
+        ref={listRef}
+        style={{
+          marginTop: 14,
+          height: "calc(100vh - 330px)",
+          overflowY: "auto",
+          paddingRight: 6,
+        }}
+      >
+        {hasMore && (
+          <button
+            onClick={loadOlder}
+            disabled={loadingMore}
+            style={{
+              width: "100%",
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid rgba(148,163,184,0.22)",
+              background: "rgba(255,255,255,0.03)",
+              color: "white",
+              cursor: loadingMore ? "not-allowed" : "pointer",
+              fontWeight: 900,
+              opacity: loadingMore ? 0.7 : 1,
+            }}
+          >
+            {loadingMore ? "Loading…" : "Load older"}
+          </button>
+        )}
+
         {messages.map((m) => {
           const mine = !!userId && m.sender_id === userId;
           const time = new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
           const deleted = !!m.deleted_at;
 
+          const att = m.attachments || null;
+          const isTemp = String(m.id).startsWith("temp-");
+          const failed = m.edited_at === "FAILED";
+
+          const replyTarget = m.reply_to ? messages.find((x) => x.id === m.reply_to) : null;
+
           return (
             <div key={m.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginTop: 10 }}>
-              <div style={{ maxWidth: "min(640px, 78vw)" }}>
-                {/* bubble */}
+              <div style={{ maxWidth: "min(680px, 82vw)" }}>
                 <div
+                  onClick={() => {
+                    if (failed && isTemp) retrySend(m);
+                  }}
                   style={{
                     padding: "10px 12px",
                     borderRadius: 16,
@@ -737,107 +948,316 @@ export default function ThreadPage() {
                     whiteSpace: "pre-wrap",
                     wordBreak: "break-word",
                     fontWeight: 650,
-                    position: "relative",
+                    cursor: failed ? "pointer" : "default",
+                    opacity: deleted ? 0.7 : 1,
                   }}
                 >
-                  {/* pin badge */}
-                  {!!m.pinned && (
+                  {/* reply preview */}
+                  {replyTarget && !deleted && (
                     <div
                       style={{
-                        position: "absolute",
-                        top: -10,
-                        left: mine ? "auto" : 10,
-                        right: mine ? 10 : "auto",
+                        marginBottom: 8,
+                        padding: "8px 10px",
+                        borderRadius: 12,
+                        border: "1px solid rgba(148,163,184,0.18)",
+                        background: "rgba(0,0,0,0.25)",
                         fontSize: 12,
-                        fontWeight: 950,
-                        padding: "4px 8px",
-                        borderRadius: 999,
-                        border: "1px solid rgba(52,211,153,0.28)",
-                        background: "rgba(16,185,129,0.12)",
-                        opacity: 0.95,
+                        opacity: 0.9,
                       }}
                     >
-                      📌 Pinned
+                      Replying to:{" "}
+                      <span style={{ fontWeight: 950 }}>
+                        {replyTarget.sender_id === userId ? "You" : safeName(otherProfile)}
+                      </span>{" "}
+                      — {replyTarget.deleted_at ? "Message deleted" : (replyTarget.body || "").slice(0, 80)}
                     </div>
                   )}
 
-                  <div style={{ opacity: deleted ? 0.65 : 0.98, fontStyle: deleted ? "italic" : "normal" }}>
-                    {deleted ? "Message deleted" : m.body}
-                  </div>
+                  {deleted ? (
+                    <span style={{ fontStyle: "italic" }}>Message deleted</span>
+                  ) : (
+                    <>
+                      {att?.type === "image" && att?.url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={att.url}
+                          alt="attachment"
+                          style={{ width: "100%", maxHeight: 360, objectFit: "cover", borderRadius: 14, marginBottom: m.body ? 10 : 0 }}
+                        />
+                      ) : null}
+
+                      {m.body ? <div style={{ opacity: 0.98 }}>{m.body}</div> : null}
+
+                      {failed ? (
+                        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>Send failed — tap to retry</div>
+                      ) : null}
+                    </>
+                  )}
 
                   <div style={{ opacity: 0.6, fontSize: 12, marginTop: 6, textAlign: "right", display: "flex", gap: 10, justifyContent: "flex-end" }}>
                     <span>{time}</span>
-
-                    {/* Seen indicator ONLY on your last message */}
-                    {mine && lastMyMessage?.id === m.id && !deleted && (
-                      <span style={{ opacity: 0.75, fontWeight: 900 }}>
-                        {lastMyMessageSeen ? "Seen" : "Sent"}
-                      </span>
-                    )}
+                    {m.edited_at && m.edited_at !== "FAILED" && !deleted ? <span>Edited</span> : null}
+                    {mine && lastMyMessage?.id === m.id && !deleted ? (
+                      <span style={{ opacity: 0.8, fontWeight: 900 }}>{lastMyMessageSeen ? "Seen" : "Sent"}</span>
+                    ) : null}
                   </div>
                 </div>
 
-                {/* actions */}
+                {/* reactions row */}
                 {!deleted && (
-                  <div style={{ marginTop: 6, display: "flex", gap: 8, justifyContent: mine ? "flex-end" : "flex-start" }}>
+                  <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", justifyContent: mine ? "flex-end" : "flex-start" }}>
+                    {/* existing reactions */}
+                    {Object.entries(reactions[m.id] || {}).map(([emoji, count]) => {
+                      const active = !!myReactions?.[m.id]?.[emoji];
+                      return (
+                        <button
+                          key={emoji}
+                          onClick={() => toggleReaction(m.id, emoji)}
+                          style={{
+                            borderRadius: 999,
+                            padding: "6px 10px",
+                            border: active ? "1px solid rgba(52,211,153,0.45)" : "1px solid rgba(148,163,184,0.22)",
+                            background: active ? "rgba(16,185,129,0.14)" : "rgba(255,255,255,0.03)",
+                            color: "white",
+                            cursor: "pointer",
+                            fontWeight: 900,
+                            fontSize: 12,
+                          }}
+                        >
+                          {emoji} {count}
+                        </button>
+                      );
+                    })}
+
+                    {/* quick add */}
                     <button
-                      onClick={() => togglePin(m)}
-                      disabled={msgActingId === m.id}
+                      onClick={() => toggleReaction(m.id, "👍")}
                       style={{
-                        background: "transparent",
-                        border: "1px solid rgba(148,163,184,0.20)",
-                        color: "white",
+                        borderRadius: 999,
                         padding: "6px 10px",
-                        borderRadius: 12,
-                        cursor: msgActingId === m.id ? "not-allowed" : "pointer",
+                        border: "1px solid rgba(148,163,184,0.22)",
+                        background: "rgba(255,255,255,0.03)",
+                        color: "white",
+                        cursor: "pointer",
                         fontWeight: 900,
-                        opacity: msgActingId === m.id ? 0.7 : 0.95,
                         fontSize: 12,
                       }}
                     >
-                      {m.pinned ? "Unpin" : "Pin"}
+                      👍
+                    </button>
+                    <button
+                      onClick={() => toggleReaction(m.id, "❤️")}
+                      style={{
+                        borderRadius: 999,
+                        padding: "6px 10px",
+                        border: "1px solid rgba(148,163,184,0.22)",
+                        background: "rgba(255,255,255,0.03)",
+                        color: "white",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                        fontSize: 12,
+                      }}
+                    >
+                      ❤️
                     </button>
 
+                    {/* actions */}
                     <button
-                      onClick={() => deleteMessage(m)}
-                      disabled={msgActingId === m.id}
+                      onClick={() => setReplyTo(m)}
                       style={{
-                        background: "transparent",
-                        border: "1px solid rgba(127,29,29,0.80)",
-                        color: "white",
-                        padding: "6px 10px",
                         borderRadius: 12,
-                        cursor: msgActingId === m.id ? "not-allowed" : "pointer",
+                        padding: "6px 10px",
+                        border: "1px solid rgba(148,163,184,0.22)",
+                        background: "rgba(255,255,255,0.03)",
+                        color: "white",
+                        cursor: "pointer",
                         fontWeight: 900,
-                        opacity: msgActingId === m.id ? 0.7 : 0.95,
                         fontSize: 12,
                       }}
                     >
-                      Delete
+                      Reply
                     </button>
+
+                    {m.sender_id === userId && !String(m.id).startsWith("temp-") ? (
+                      <>
+                        <button
+                          onClick={() => startEdit(m)}
+                          style={{
+                            borderRadius: 12,
+                            padding: "6px 10px",
+                            border: "1px solid rgba(148,163,184,0.22)",
+                            background: "rgba(255,255,255,0.03)",
+                            color: "white",
+                            cursor: "pointer",
+                            fontWeight: 900,
+                            fontSize: 12,
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => deleteMessage(m.id)}
+                          style={{
+                            borderRadius: 12,
+                            padding: "6px 10px",
+                            border: "1px solid rgba(127,29,29,0.80)",
+                            background: "rgba(255,255,255,0.03)",
+                            color: "white",
+                            cursor: "pointer",
+                            fontWeight: 900,
+                            fontSize: 12,
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </>
+                    ) : null}
                   </div>
                 )}
               </div>
             </div>
           );
         })}
+
         <div ref={bottomRef} />
       </div>
 
+      {/* reply banner */}
+      {replyTo && (
+        <div
+          style={{
+            marginTop: 12,
+            borderRadius: 14,
+            border: "1px solid rgba(148,163,184,0.18)",
+            background: "rgba(255,255,255,0.03)",
+            padding: 10,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 900, opacity: 0.9, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            Replying to: {replyTo.deleted_at ? "Message deleted" : (replyTo.body || "").slice(0, 80)}
+          </div>
+          <button
+            onClick={() => setReplyTo(null)}
+            style={{
+              borderRadius: 12,
+              padding: "6px 10px",
+              border: "1px solid rgba(148,163,184,0.22)",
+              background: "transparent",
+              color: "white",
+              cursor: "pointer",
+              fontWeight: 950,
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* edit modal-ish inline */}
+      {editingId && (
+        <div
+          style={{
+            marginTop: 12,
+            borderRadius: 16,
+            border: "1px solid rgba(52,211,153,0.22)",
+            background: "rgba(16,185,129,0.10)",
+            padding: 12,
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+          }}
+        >
+          <input
+            value={editingText}
+            onChange={(e) => setEditingText(e.target.value)}
+            style={{
+              flex: 1,
+              height: 44,
+              borderRadius: 12,
+              border: "1px solid rgba(148,163,184,0.18)",
+              background: "rgba(255,255,255,0.04)",
+              color: "white",
+              padding: "0 12px",
+              outline: "none",
+            }}
+          />
+          <button
+            onClick={saveEdit}
+            style={{
+              height: 44,
+              padding: "0 14px",
+              borderRadius: 12,
+              border: "1px solid rgba(16,185,129,0.35)",
+              background: "rgba(16,185,129,0.18)",
+              color: "white",
+              cursor: "pointer",
+              fontWeight: 950,
+            }}
+          >
+            Save
+          </button>
+          <button
+            onClick={() => setEditingId(null)}
+            style={{
+              height: 44,
+              padding: "0 14px",
+              borderRadius: 12,
+              border: "1px solid rgba(148,163,184,0.22)",
+              background: "transparent",
+              color: "white",
+              cursor: "pointer",
+              fontWeight: 950,
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
       {/* composer */}
-      <div style={{ marginTop: 16, display: "flex", gap: 10, alignItems: "center" }}>
+      <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center" }}>
+        {/* image */}
+        <label
+          style={{
+            width: 48,
+            height: 48,
+            borderRadius: 12,
+            border: "1px solid rgba(148,163,184,0.18)",
+            background: "rgba(255,255,255,0.04)",
+            display: "grid",
+            placeItems: "center",
+            cursor: uploading || mustConfirmBeforeChat ? "not-allowed" : "pointer",
+            opacity: uploading || mustConfirmBeforeChat ? 0.6 : 1,
+            fontWeight: 950,
+          }}
+          title="Upload image"
+        >
+          📷
+          <input
+            type="file"
+            accept="image/*"
+            onChange={onPickImage}
+            disabled={uploading || mustConfirmBeforeChat}
+            style={{ display: "none" }}
+          />
+        </label>
+
         <input
           value={text}
-          onChange={(e) => setText(e.target.value)}
-          onFocus={() => markSeenNow()}
+          onChange={(e) => onTextChange(e.target.value)}
+          onFocus={() => userId && markSeenNow(userId)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              sendMessage();
+              sendMessage({ body: text, attachments: null });
             }
           }}
-          disabled={sending || mustConfirmBeforeChat}
-          placeholder={mustConfirmBeforeChat ? "Confirm pickup above to start chatting…" : "Type a message..."}
+          disabled={mustConfirmBeforeChat}
+          placeholder={mustConfirmBeforeChat ? "Confirm pickup above to start chatting…" : "Message…"}
           style={{
             flex: 1,
             height: 48,
@@ -852,21 +1272,21 @@ export default function ThreadPage() {
         />
 
         <button
-          onClick={sendMessage}
-          disabled={sending || !text.trim() || mustConfirmBeforeChat}
+          onClick={() => sendMessage({ body: text, attachments: null })}
+          disabled={mustConfirmBeforeChat || uploading || (!text.trim() && !replyTo)}
           style={{
             height: 48,
             padding: "0 16px",
             borderRadius: 12,
             border: "1px solid rgba(16,185,129,0.35)",
-            background: sending ? "rgba(16,185,129,0.10)" : "rgba(16,185,129,0.18)",
+            background: "rgba(16,185,129,0.18)",
             color: "white",
-            cursor: sending || !text.trim() || mustConfirmBeforeChat ? "not-allowed" : "pointer",
+            cursor: mustConfirmBeforeChat || uploading || (!text.trim() && !replyTo) ? "not-allowed" : "pointer",
             fontWeight: 950,
-            opacity: sending || !text.trim() || mustConfirmBeforeChat ? 0.65 : 1,
+            opacity: mustConfirmBeforeChat || uploading || (!text.trim() && !replyTo) ? 0.65 : 1,
           }}
         >
-          {sending ? "Sending…" : "Send"}
+          Send
         </button>
       </div>
     </div>
