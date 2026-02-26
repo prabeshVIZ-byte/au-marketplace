@@ -1,7 +1,7 @@
 "use client";
 export const dynamic = "force-dynamic";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -46,8 +46,23 @@ function addDaysISO(days: number) {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+function computeExpiry(choice: ExpireChoice) {
+  const untilCancel = choice === "never";
+  let expiresAt: string | null = null;
+
+  if (choice === "urgent24") {
+    expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    return { untilCancel: false, expiresAt };
+  }
+  if (untilCancel) return { untilCancel: true, expiresAt: null };
+
+  expiresAt = addDaysISO(Number(choice));
+  return { untilCancel: false, expiresAt };
+}
+
 export default function CreatePage() {
   const router = useRouter();
+  const formRef = useRef<HTMLFormElement | null>(null);
 
   // auth
   const [authLoading, setAuthLoading] = useState(true);
@@ -61,7 +76,7 @@ export default function CreatePage() {
   // post type
   const [postType, setPostType] = useState<PostType>("give");
 
-  // shared fields
+  // shared
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
@@ -76,9 +91,10 @@ export default function CreatePage() {
   const [requestTimeframe, setRequestTimeframe] = useState<RequestTimeframe>("today");
   const [requestLocation, setRequestLocation] = useState("");
 
-  // shared controls
-  const [isAnonymous, setIsAnonymous] = useState(false);
-  const [expireChoice, setExpireChoice] = useState<ExpireChoice>("7"); // for request, can be urgent24 too
+  // lightweight options (collapsed by default)
+  const [showOptions, setShowOptions] = useState(false);
+  const [hideName, setHideName] = useState(false);
+  const [expireChoice, setExpireChoice] = useState<ExpireChoice>("7");
 
   // submit
   const [saving, setSaving] = useState(false);
@@ -94,31 +110,28 @@ export default function CreatePage() {
     return d.length ? d : null;
   }, [description]);
 
-  // If user switches to request, drop photo selection (keeps UX clean)
+  // UX: if switching to request, reset photo state + tighten expiry choice
   useEffect(() => {
     if (postType === "request") {
       setFile(null);
       setPreviewUrl(null);
-      // Make expiry default feel sensible for requests
       if (expireChoice === "never") setExpireChoice("7");
     }
+    setMsg(null);
   }, [postType]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const canSubmit = useMemo(() => {
-    if (!isAllowed || !userId) return false;
-    if (!profileComplete) return false;
-    if (cleanTitle.length < 3) return false;
-
-    // give-only photo validation
-    if (postType === "give" && file) {
-      if (file.size > MAX_PHOTO_MB * 1024 * 1024) return false;
-      if (!isAllowedImage(file)) return false;
+  // preview
+  useEffect(() => {
+    if (!file) {
+      setPreviewUrl(null);
+      return;
     }
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
 
-    return true;
-  }, [isAllowed, userId, profileComplete, cleanTitle, postType, file]);
-
-  // 1) Auth
+  // 1) auth
   useEffect(() => {
     let mounted = true;
 
@@ -143,7 +156,7 @@ export default function CreatePage() {
     };
   }, []);
 
-  // 2) Profile check
+  // 2) profile check
   useEffect(() => {
     let mounted = true;
 
@@ -184,44 +197,36 @@ export default function CreatePage() {
     };
   }, [userId]);
 
-  // 3) preview (give only)
-  useEffect(() => {
-    if (!file) {
-      setPreviewUrl(null);
-      return;
-    }
-    const url = URL.createObjectURL(file);
-    setPreviewUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [file]);
-
   function validate(): string | null {
-    if (!isAllowed || !userId) return "You must log in with your @ashland.edu email to post.";
-    if (!profileComplete) return "Please complete your profile first.";
+    if (!isAllowed || !userId) return "Log in with your @ashland.edu email to post.";
+    if (!profileComplete) return "Complete your profile first (name + student/faculty).";
     if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
 
+    // ✅ MAKE PHOTO COMPULSORY FOR GIVE
+    if (postType === "give" && !file) return "Photo is required for items. Please add a photo.";
     if (postType === "give" && file) {
       if (file.size > MAX_PHOTO_MB * 1024 * 1024) return `Photo too large (max ${MAX_PHOTO_MB}MB).`;
-      if (!isAllowedImage(file)) return "Please upload JPG, PNG, or WEBP (HEIC not supported yet).";
+      if (!isAllowedImage(file)) return "Upload JPG, PNG, or WEBP (HEIC not supported yet).";
     }
+
     return null;
   }
 
-  function computeExpiry(choice: ExpireChoice) {
-    // until_cancel / expires_at logic (kept compatible with your current schema)
-    const untilCancel = choice === "never";
-    let expiresAt: string | null = null;
+  const canSubmit = useMemo(() => {
+    if (!isAllowed || !userId) return false;
+    if (!profileComplete) return false;
+    if (cleanTitle.length < 3) return false;
 
-    if (choice === "urgent24") {
-      expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-      return { untilCancel: false, expiresAt };
+    // ✅ required photo for give
+    if (postType === "give" && !file) return false;
+
+    if (postType === "give" && file) {
+      if (file.size > MAX_PHOTO_MB * 1024 * 1024) return false;
+      if (!isAllowedImage(file)) return false;
     }
 
-    if (untilCancel) return { untilCancel: true, expiresAt: null };
-
-    expiresAt = addDaysISO(Number(choice));
-    return { untilCancel: false, expiresAt };
-  }
+    return true;
+  }, [isAllowed, userId, profileComplete, cleanTitle, postType, file]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -239,33 +244,30 @@ export default function CreatePage() {
     try {
       const { untilCancel, expiresAt } = computeExpiry(expireChoice);
 
-      // ✅ Core insert payload (same items table)
       const baseInsert: any = {
         owner_id: userId,
         title: cleanTitle,
         description: cleanDesc,
         status: "available",
-        is_anonymous: isAnonymous,
+        is_anonymous: hideName,
         until_cancel: untilCancel,
         expires_at: expiresAt,
         photo_url: null,
-        post_type: postType, // NEW COLUMN
+        post_type: postType,
       };
 
       if (postType === "give") {
         baseInsert.category = giveCategory;
         baseInsert.pickup_location = pickupLocation;
-        // request-only columns left null
         baseInsert.request_group = null;
         baseInsert.request_timeframe = null;
         baseInsert.request_location = null;
       } else {
-        // Requests do NOT need pickup_location; location is optional free text
-        baseInsert.category = "others"; // keep schema happy if category is NOT nullable
+        baseInsert.category = "others";
         baseInsert.pickup_location = null;
-        baseInsert.request_group = requestGroup; // NEW COLUMN
-        baseInsert.request_timeframe = requestTimeframe; // NEW COLUMN
-        baseInsert.request_location = requestLocation.trim().length ? requestLocation.trim() : null; // NEW COLUMN
+        baseInsert.request_group = requestGroup;
+        baseInsert.request_timeframe = requestTimeframe;
+        baseInsert.request_location = requestLocation.trim().length ? requestLocation.trim() : null;
       }
 
       const { data: created, error: createErr } = await supabase
@@ -275,30 +277,24 @@ export default function CreatePage() {
         .single();
 
       if (createErr || !created?.id) throw new Error(createErr?.message || "Failed to create post.");
+
       const itemId = created.id as string;
 
-      // If request, no photo step — go straight to detail page (or feed)
+      // Requests: no photo step
       if (postType === "request") {
         router.push(`/item/${itemId}`);
         router.refresh();
         return;
       }
 
-      // give: no photo
-      if (!file) {
-        router.push(`/item/${itemId}`);
-        router.refresh();
-        return;
-      }
-
-      // give: upload photo
-      const ext = getExt(file.name);
+      // Give: photo REQUIRED (validated already)
+      const ext = getExt(file!.name);
       const path = `items/${userId}/${itemId}/${crypto.randomUUID()}.${ext}`;
 
-      const { error: uploadErr } = await supabase.storage.from("item-photos").upload(path, file, {
+      const { error: uploadErr } = await supabase.storage.from("item-photos").upload(path, file!, {
         cacheControl: "3600",
         upsert: false,
-        contentType: file.type || undefined,
+        contentType: file!.type || undefined,
       });
 
       if (uploadErr) {
@@ -312,7 +308,6 @@ export default function CreatePage() {
       const publicUrl = pub.publicUrl;
 
       const { error: updateErr } = await supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId);
-
       if (updateErr) {
         setMsg(`Photo uploaded, but photo_url update failed: ${updateErr.message}`);
         router.push(`/item/${itemId}`);
@@ -334,11 +329,12 @@ export default function CreatePage() {
     }
   }
 
-  // UI loading states
+  // Loading
   if (authLoading || profileLoading) {
     return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Loading…</div>;
   }
 
+  // Not allowed
   if (!isAllowed || !userId) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
@@ -365,12 +361,13 @@ export default function CreatePage() {
     );
   }
 
+  // Profile incomplete
   if (!profileComplete) {
     return (
       <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
         <h1 style={{ fontSize: 34, fontWeight: 900, marginBottom: 10 }}>Complete Profile</h1>
         <p style={{ opacity: 0.85, marginTop: 0 }}>
-          Before posting, please set your <b>full name</b> and choose <b>Student/Faculty</b>.
+          Before posting, add your <b>full name</b> and choose <b>Student/Faculty</b>.
         </p>
         <button
           onClick={() => router.push("/me")}
@@ -391,20 +388,41 @@ export default function CreatePage() {
     );
   }
 
-  const pageTitle = postType === "give" ? "List New Item" : "Post a Request";
+  const pageTitle = postType === "give" ? "List an item" : "Post a request";
   const helperText =
     postType === "give"
-      ? "This is a free exchange. Add a clear title and a photo to get faster replies."
-      : "Ask for what you need. Keep it specific. You’ll connect through Messages.";
+      ? "Add a clear title + photo. People respond faster when they see it."
+      : "Ask for what you need. Keep it specific — you’ll connect in Messages.";
+
+  const primaryButton = postType === "give" ? "Post item" : "Post request";
 
   const stickyHint =
     cleanTitle.length < 3
-      ? "Add a clearer title to post."
+      ? "Write a clearer title to post."
       : postType === "give"
-        ? "Ready to post — you’ll chat in Messages."
-        : "Ready to post — someone can offer help in the feed.";
+        ? file
+          ? "Photo added — ready to post."
+          : "Add a photo to post."
+        : "Ready to post.";
 
-  const primaryButton = postType === "give" ? "Post Item" : "Post Request";
+  // styles: flatter, less boxed
+  const card: React.CSSProperties = {
+    border: "1px solid #1f2937",
+    borderRadius: 14,
+    background: "#0b0b0b",
+    padding: 14,
+  };
+
+  const input: React.CSSProperties = {
+    padding: 12,
+    borderRadius: 12,
+    border: "1px solid #2b2b2b",
+    background: "#111",
+    color: "white",
+    outline: "none",
+  };
+
+  const label: React.CSSProperties = { fontWeight: 900, marginBottom: 8 };
 
   return (
     <div
@@ -431,247 +449,78 @@ export default function CreatePage() {
         ← Back to feed
       </button>
 
-      <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 6 }}>{pageTitle}</h1>
-      <p style={{ marginTop: 0, marginBottom: 14, opacity: 0.82, maxWidth: 520 }}>{helperText}</p>
+      <h1 style={{ fontSize: 30, fontWeight: 950, marginBottom: 6 }}>{pageTitle}</h1>
+      <p style={{ marginTop: 0, marginBottom: 14, opacity: 0.8, maxWidth: 520 }}>{helperText}</p>
 
-      {/* Post type toggle */}
-      <div style={{ maxWidth: 520, marginBottom: 12 }}>
-        <div
+      {/* Toggle */}
+      <div style={{ maxWidth: 520, marginBottom: 12, display: "flex", gap: 10 }}>
+        <button
+          type="button"
+          onClick={() => setPostType("give")}
           style={{
-            border: "1px solid #0f223f",
+            flex: 1,
+            padding: "12px 14px",
             borderRadius: 14,
-            background: "#0b1730",
-            padding: 10,
-            display: "flex",
-            gap: 10,
+            border: "1px solid #1f2937",
+            background: postType === "give" ? "#052e16" : "#0b0b0b",
+            color: "white",
+            fontWeight: 950,
+            cursor: "pointer",
           }}
         >
-          <button
-            type="button"
-            onClick={() => setPostType("give")}
-            style={{
-              flex: 1,
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid #334155",
-              background: postType === "give" ? "#052e16" : "transparent",
-              color: "white",
-              fontWeight: 900,
-              cursor: "pointer",
-            }}
-          >
-            Give
-          </button>
-          <button
-            type="button"
-            onClick={() => setPostType("request")}
-            style={{
-              flex: 1,
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid #334155",
-              background: postType === "request" ? "#052e16" : "transparent",
-              color: "white",
-              fontWeight: 900,
-              cursor: "pointer",
-            }}
-          >
-            Request
-          </button>
-        </div>
-
-        <div style={{ fontSize: 12, opacity: 0.72, marginTop: 8 }}>
-          {postType === "give"
-            ? "Post something you’re giving away."
-            : "Post what you need — ride, help, services, urgent items, or collaboration."}
-        </div>
+          Give
+        </button>
+        <button
+          type="button"
+          onClick={() => setPostType("request")}
+          style={{
+            flex: 1,
+            padding: "12px 14px",
+            borderRadius: 14,
+            border: "1px solid #1f2937",
+            background: postType === "request" ? "#052e16" : "#0b0b0b",
+            color: "white",
+            fontWeight: 950,
+            cursor: "pointer",
+          }}
+        >
+          Request
+        </button>
       </div>
 
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 520 }}>
-        <input
-          type="text"
-          placeholder={
-            postType === "give"
-              ? 'Example: "Bedford Handbook (good condition)"'
-              : 'Example: "Need a ride to the airport Friday 6am"'
-          }
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          style={{ padding: 10, borderRadius: 10, border: "1px solid #333", background: "#111", color: "white" }}
-        />
+      <form
+        ref={formRef}
+        onSubmit={handleSubmit}
+        style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 520 }}
+      >
+        {/* Core fields */}
+        <div style={card}>
+          <div style={label}>Title</div>
+          <input
+            type="text"
+            placeholder={postType === "give" ? 'Example: "Bedford Handbook (good condition)"' : 'Example: "Need a ride Friday 6am"'}
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            style={{ ...input, width: "100%" }}
+          />
 
-        <textarea
-          placeholder={
-            postType === "give"
-              ? "Description (optional) — what’s included, any flaws?"
-              : "Add details (where, when, how urgent). Keep it simple."
-          }
-          rows={4}
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          style={{ padding: 10, borderRadius: 10, border: "1px solid #333", background: "#111", color: "white" }}
-        />
-
-        {/* Give vs Request: category block */}
-        {postType === "give" ? (
-          <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-            <div style={{ fontWeight: 900, marginBottom: 10 }}>Category</div>
-            <select
-              value={giveCategory}
-              onChange={(e) => setGiveCategory(e.target.value as GiveCategory)}
-              style={{
-                width: "100%",
-                padding: 10,
-                borderRadius: 10,
-                border: "1px solid #334155",
-                background: "black",
-                color: "white",
-              }}
-            >
-              <option value="electronics">Electronics</option>
-              <option value="furniture">Furniture</option>
-              <option value="health & beauty">Health & Beauty</option>
-              <option value="home & kitchen">Home & Kitchen</option>
-              <option value="jeweleries">Jeweleries</option>
-              <option value="musical instruments">Musical Instruments</option>
-              <option value="clothing">Clothing</option>
-              <option value="sport equipment">Sport equipment</option>
-              <option value="stationary item">Stationary item</option>
-              <option value="ride">Ride</option>
-              <option value="books">Books</option>
-              <option value="notes">Notes</option>
-              <option value="art pieces">Art pieces</option>
-              <option value="others">Others</option>
-            </select>
-          </div>
-        ) : (
-          <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-            <div style={{ fontWeight: 900, marginBottom: 10 }}>Request type</div>
-            <select
-              value={requestGroup}
-              onChange={(e) => setRequestGroup(e.target.value as RequestGroup)}
-              style={{
-                width: "100%",
-                padding: 10,
-                borderRadius: 10,
-                border: "1px solid #334155",
-                background: "black",
-                color: "white",
-              }}
-            >
-              <option value="logistics">Logistics (rides, moving, borrowing tools)</option>
-              <option value="services">Services (tutoring, baking, haircut, tech help)</option>
-              <option value="urgent">Urgent needs (charger, calculator, medicine)</option>
-              <option value="collaboration">Community / collaboration (hackathon, cofounder, club help)</option>
-            </select>
-
-            <div style={{ marginTop: 12, fontWeight: 900, marginBottom: 8 }}>Timeframe</div>
-            <select
-              value={requestTimeframe}
-              onChange={(e) => setRequestTimeframe(e.target.value as RequestTimeframe)}
-              style={{
-                width: "100%",
-                padding: 10,
-                borderRadius: 10,
-                border: "1px solid #334155",
-                background: "black",
-                color: "white",
-              }}
-            >
-              <option value="today">Today</option>
-              <option value="this_week">This week</option>
-              <option value="flexible">Flexible</option>
-            </select>
-
-            <div style={{ marginTop: 12, fontWeight: 900, marginBottom: 8 }}>Location (optional)</div>
-            <input
-              type="text"
-              placeholder='Example: "Dorm A" or "Near dining hall"'
-              value={requestLocation}
-              onChange={(e) => setRequestLocation(e.target.value)}
-              style={{ padding: 10, borderRadius: 10, border: "1px solid #333", background: "#111", color: "white" }}
-            />
-          </div>
-        )}
-
-        {/* Give-only pickup location */}
-        {postType === "give" && (
-          <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-            <div style={{ fontWeight: 900, marginBottom: 10 }}>Pickup location</div>
-            <select
-              value={pickupLocation}
-              onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
-              style={{
-                width: "100%",
-                padding: 10,
-                borderRadius: 10,
-                border: "1px solid #334155",
-                background: "black",
-                color: "white",
-              }}
-            >
-              <option value="College Quad">College Quad</option>
-              <option value="Safety Service Office">Safety Service Office</option>
-              <option value="Dining Hall">Dining Hall</option>
-            </select>
-          </div>
-        )}
-
-        {/* Shared anonymous */}
-        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>Post anonymously</div>
-          <button
-            type="button"
-            onClick={() => setIsAnonymous((v) => !v)}
-            style={{
-              width: "100%",
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid #334155",
-              background: isAnonymous ? "#052e16" : "transparent",
-              color: "white",
-              fontWeight: 900,
-              cursor: "pointer",
-            }}
-          >
-            {isAnonymous ? "Anonymous: ON" : "Anonymous: OFF"}
-          </button>
+          <div style={{ ...label, marginTop: 12 }}>Details (optional)</div>
+          <textarea
+            placeholder={postType === "give" ? "What’s included? any flaws?" : "Where/when/how urgent? Keep it simple."}
+            rows={4}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            style={{ ...input, width: "100%", resize: "vertical" }}
+          />
         </div>
 
-        {/* Auto-archive */}
-        <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>
-            Auto-archive {postType === "request" ? "(recommended)" : ""}
-          </div>
-          <select
-            value={expireChoice}
-            onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
-            style={{
-              width: "100%",
-              padding: 10,
-              borderRadius: 10,
-              border: "1px solid #334155",
-              background: "black",
-              color: "white",
-            }}
-          >
-            {postType === "request" && <option value="urgent24">Urgent (24 hours)</option>}
-            <option value="7">7 days</option>
-            <option value="14">14 days</option>
-            <option value="30">30 days</option>
-            <option value="never">Until I cancel</option>
-          </select>
-          {postType === "request" && expireChoice === "urgent24" && (
-            <div style={{ fontSize: 12, opacity: 0.75, marginTop: 8 }}>
-              Urgent requests expire in 24 hours unless you repost.
+        {/* Give: photo REQUIRED */}
+        {postType === "give" && (
+          <div style={card}>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+              <div style={label}>Photo <span style={{ color: "#22c55e" }}>(required)</span></div>
+              <div style={{ fontSize: 12, opacity: 0.75 }}>JPG / PNG / WEBP • max {MAX_PHOTO_MB}MB</div>
             </div>
-          )}
-        </div>
-
-        {/* Give-only photo */}
-        {postType === "give" && (
-          <div style={{ border: "1px solid #0f223f", borderRadius: 14, padding: 14, background: "#0b1730" }}>
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>Photo (optional)</div>
 
             {previewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -683,7 +532,7 @@ export default function CreatePage() {
                   height: 240,
                   objectFit: "cover",
                   borderRadius: 12,
-                  border: "1px solid #0f223f",
+                  border: "1px solid #1f2937",
                 }}
               />
             ) : (
@@ -692,14 +541,14 @@ export default function CreatePage() {
                   width: "100%",
                   height: 240,
                   borderRadius: 12,
-                  border: "1px dashed #334155",
+                  border: "1px dashed #374151",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  color: "#94a3b8",
+                  color: "#9ca3af",
                 }}
               >
-                No photo selected
+                Add a photo to post
               </div>
             )}
 
@@ -734,11 +583,11 @@ export default function CreatePage() {
                   marginTop: 10,
                   background: "transparent",
                   color: "white",
-                  border: "1px solid #334155",
+                  border: "1px solid #374151",
                   padding: "8px 12px",
-                  borderRadius: 10,
+                  borderRadius: 12,
                   cursor: "pointer",
-                  fontWeight: 800,
+                  fontWeight: 900,
                 }}
               >
                 Remove photo
@@ -747,10 +596,156 @@ export default function CreatePage() {
           </div>
         )}
 
+        {/* Give: essentials */}
+        {postType === "give" && (
+          <div style={card}>
+            <div style={label}>Category</div>
+            <select
+              value={giveCategory}
+              onChange={(e) => setGiveCategory(e.target.value as GiveCategory)}
+              style={{ ...input, width: "100%", background: "#0b0b0b" }}
+            >
+              <option value="books">Books</option>
+              <option value="notes">Notes</option>
+              <option value="electronics">Electronics</option>
+              <option value="furniture">Furniture</option>
+              <option value="clothing">Clothing</option>
+              <option value="sport equipment">Sport equipment</option>
+              <option value="stationary item">Stationary item</option>
+              <option value="health & beauty">Health & Beauty</option>
+              <option value="home & kitchen">Home & Kitchen</option>
+              <option value="musical instruments">Musical Instruments</option>
+              <option value="jeweleries">Jeweleries</option>
+              <option value="art pieces">Art pieces</option>
+              <option value="ride">Ride</option>
+              <option value="others">Others</option>
+            </select>
+
+            <div style={{ ...label, marginTop: 12 }}>Pickup spot</div>
+            <select
+              value={pickupLocation}
+              onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
+              style={{ ...input, width: "100%", background: "#0b0b0b" }}
+            >
+              <option value="College Quad">College Quad</option>
+              <option value="Safety Service Office">Safety Service Office</option>
+              <option value="Dining Hall">Dining Hall</option>
+            </select>
+          </div>
+        )}
+
+        {/* Request: essentials */}
+        {postType === "request" && (
+          <div style={card}>
+            <div style={label}>Request type</div>
+            <select
+              value={requestGroup}
+              onChange={(e) => setRequestGroup(e.target.value as RequestGroup)}
+              style={{ ...input, width: "100%", background: "#0b0b0b" }}
+            >
+              <option value="logistics">Logistics (ride / moving / borrow)</option>
+              <option value="services">Services (tutoring / tech help / haircut)</option>
+              <option value="urgent">Urgent (charger / calculator / meds)</option>
+              <option value="collaboration">Collaboration (club / hackathon / project)</option>
+            </select>
+
+            <div style={{ ...label, marginTop: 12 }}>Timeframe</div>
+            <select
+              value={requestTimeframe}
+              onChange={(e) => setRequestTimeframe(e.target.value as RequestTimeframe)}
+              style={{ ...input, width: "100%", background: "#0b0b0b" }}
+            >
+              <option value="today">Today</option>
+              <option value="this_week">This week</option>
+              <option value="flexible">Flexible</option>
+            </select>
+
+            <div style={{ ...label, marginTop: 12 }}>Location (optional)</div>
+            <input
+              type="text"
+              placeholder='Example: "Dorm A" or "Near dining hall"'
+              value={requestLocation}
+              onChange={(e) => setRequestLocation(e.target.value)}
+              style={{ ...input, width: "100%" }}
+            />
+          </div>
+        )}
+
+        {/* Collapsible options: reduces perceived work */}
+        <div style={card}>
+          <button
+            type="button"
+            onClick={() => setShowOptions((v) => !v)}
+            style={{
+              width: "100%",
+              textAlign: "left",
+              background: "transparent",
+              border: "none",
+              color: "white",
+              cursor: "pointer",
+              fontWeight: 950,
+              padding: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <span>More options</span>
+            <span style={{ opacity: 0.7 }}>{showOptions ? "−" : "+"}</span>
+          </button>
+
+          {showOptions && (
+            <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div>
+                <div style={label}>Hide my name</div>
+                <button
+                  type="button"
+                  onClick={() => setHideName((v) => !v)}
+                  style={{
+                    width: "100%",
+                    padding: "12px 12px",
+                    borderRadius: 12,
+                    border: "1px solid #374151",
+                    background: hideName ? "#052e16" : "transparent",
+                    color: "white",
+                    fontWeight: 950,
+                    cursor: "pointer",
+                  }}
+                >
+                  {hideName ? "Hidden: ON" : "Hidden: OFF"}
+                </button>
+                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+                  When ON, your name won’t show on the feed.
+                </div>
+              </div>
+
+              <div>
+                <div style={label}>Automatically close after</div>
+                <select
+                  value={expireChoice}
+                  onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
+                  style={{ ...input, width: "100%", background: "#0b0b0b" }}
+                >
+                  {postType === "request" && <option value="urgent24">Urgent (24 hours)</option>}
+                  <option value="7">7 days</option>
+                  <option value="14">14 days</option>
+                  <option value="30">30 days</option>
+                  <option value="never">Until I cancel</option>
+                </select>
+                {postType === "request" && expireChoice === "urgent24" && (
+                  <div style={{ fontSize: 12, opacity: 0.75, marginTop: 8 }}>
+                    Urgent requests expire in 24 hours unless you repost.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
         {msg && <p style={{ color: "#f87171", margin: 0 }}>{msg}</p>}
       </form>
 
-      {/* Sticky submit bar above bottom nav */}
+      {/* Sticky submit */}
       <div
         style={{
           position: "fixed",
@@ -759,7 +754,7 @@ export default function CreatePage() {
           bottom: NAV_APPROX_HEIGHT,
           height: STICKY_BAR_HEIGHT,
           background: "rgba(0,0,0,0.92)",
-          borderTop: "1px solid #0f223f",
+          borderTop: "1px solid #1f2937",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -772,21 +767,18 @@ export default function CreatePage() {
           <div style={{ flex: 1, fontSize: 12, opacity: 0.75 }}>{stickyHint}</div>
 
           <button
-            onClick={() => {
-              const form = document.querySelector("form");
-              if (form) form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
-            }}
+            onClick={() => formRef.current?.requestSubmit()}
             disabled={saving || !canSubmit}
             style={{
               background: saving || !canSubmit ? "#14532d" : "#16a34a",
               padding: "12px 16px",
-              borderRadius: 12,
+              borderRadius: 14,
               border: "none",
               color: "white",
               cursor: saving || !canSubmit ? "not-allowed" : "pointer",
               opacity: saving || !canSubmit ? 0.6 : 1,
-              fontWeight: 900,
-              minWidth: 140,
+              fontWeight: 950,
+              minWidth: 150,
             }}
           >
             {saving ? "Posting…" : primaryButton}

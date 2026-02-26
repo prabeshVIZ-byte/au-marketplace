@@ -26,7 +26,7 @@ type FeedRowFromView = {
   interest_count: number;
   owner_role?: OwnerRole;
 
-  // NEW (add to view)
+  // optional if present in your view
   post_type?: PostType;
   request_group?: string | null;
   request_timeframe?: string | null;
@@ -48,73 +48,20 @@ type FeedRow = FeedRowFromView & {
   is_claimed?: boolean | null;
 };
 
-function formatExpiry(expiresAt: string | null) {
-  if (!expiresAt) return "Until I cancel";
-  const end = new Date(expiresAt);
-  if (Number.isNaN(end.getTime())) return "Until I cancel";
-
-  const now = new Date();
-  const ms = end.getTime() - now.getTime();
-  if (ms <= 0) return "Expired";
-
-  const oneDay = 24 * 60 * 60 * 1000;
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
-  const dayDiff = Math.round((startOfEnd - startOfToday) / oneDay);
-
-  if (dayDiff === 0) return "Today";
-  if (dayDiff === 1) return "Tomorrow";
-  if (dayDiff < 7) return `in ${dayDiff} days`;
-  return end.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+function formatShortDate(d: string) {
+  const dt = new Date(d);
+  if (Number.isNaN(dt.getTime())) return "";
+  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function statusBadge(status: string | null, postType: PostType) {
+function statusLabel(status: string | null, postType: PostType) {
+  if ((postType ?? "give") === "request") return "REQUEST";
   const st = (status ?? "available").toLowerCase();
-  const base = {
-    padding: "6px 10px",
-    borderRadius: 999,
-    fontSize: 12,
-    fontWeight: 900,
-    border: "1px solid rgba(148,163,184,0.25)",
-    background: "rgba(0,0,0,0.35)",
-    color: "rgba(255,255,255,0.82)",
-  } as const;
-
-  // subtle request label if no meaningful status
-  if ((postType ?? "give") === "request") {
-    return {
-      ...base,
-      border: "1px solid rgba(34,197,94,0.22)",
-      background: "rgba(34,197,94,0.10)",
-      color: "rgba(209,250,229,0.92)",
-    };
-  }
-
-  if (st === "reserved") {
-    return {
-      ...base,
-      border: "1px solid rgba(96,165,250,0.35)",
-      background: "rgba(59,130,246,0.16)",
-      color: "rgba(191,219,254,0.95)",
-    };
-  }
-  if (st === "available") {
-    return {
-      ...base,
-      border: "1px solid rgba(52,211,153,0.35)",
-      background: "rgba(16,185,129,0.14)",
-      color: "rgba(209,250,229,0.95)",
-    };
-  }
-  if (st === "claimed" || st === "expired") {
-    return {
-      ...base,
-      border: "1px solid rgba(248,113,113,0.35)",
-      background: "rgba(239,68,68,0.12)",
-      color: "rgba(254,202,202,0.95)",
-    };
-  }
-  return base;
+  if (st === "reserved") return "RESERVED";
+  if (st === "available") return "AVAILABLE";
+  if (st === "claimed") return "CLAIMED";
+  if (st === "expired") return "EXPIRED";
+  return st.toUpperCase();
 }
 
 function requestGroupLabel(g: string | null | undefined) {
@@ -147,11 +94,12 @@ export default function FeedPage() {
   const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
 
-  // photo modal
+  // image modal
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState<string>("");
 
-  // filters
+  // UI filters
+  const [tab, setTab] = useState<"items" | "requests">("items");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
 
@@ -162,11 +110,17 @@ export default function FeedPage() {
     setUserEmail(session?.user?.email ?? null);
   }
 
-  const isLoggedIn = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  const isAshland = !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  const isLoggedIn = !!userId && !!userEmail && isAshland;
 
   async function loadMyInterestMap(uid: string, itemIds: string[]) {
     if (itemIds.length === 0) return;
-    const { data, error } = await supabase.from("interests").select("item_id").eq("user_id", uid).in("item_id", itemIds);
+    const { data, error } = await supabase
+      .from("interests")
+      .select("item_id")
+      .eq("user_id", uid)
+      .in("item_id", itemIds);
+
     if (error) return;
 
     const map: Record<string, boolean> = {};
@@ -177,7 +131,6 @@ export default function FeedPage() {
   async function loadOwnerMeta(itemIds: string[]) {
     if (itemIds.length === 0) return new Map<string, ItemMeta>();
 
-    // We fetch post_type + request fields from items table (reliable even if view not updated yet)
     const { data, error } = await supabase
       .from("items")
       .select("id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location")
@@ -194,8 +147,6 @@ export default function FeedPage() {
     setLoading(true);
     setErr(null);
 
-    // If your view doesn't include post_type/request fields, this still works,
-    // because we merge those fields from items table meta.
     const { data, error } = await supabase
       .from("v_feed_items")
       .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
@@ -213,6 +164,7 @@ export default function FeedPage() {
     const ids = rows.map((x) => x.id);
 
     const meta = await loadOwnerMeta(ids);
+
     const merged = rows.map((x) => {
       const m = meta.get(x.id);
       return {
@@ -226,7 +178,7 @@ export default function FeedPage() {
       };
     });
 
-    // Hide claimed items (either status or is_claimed)
+    // Hide claimed
     const visible = merged.filter((x) => {
       const st = (x.status ?? "available").toLowerCase();
       const claimed = !!x.is_claimed || st === "claimed";
@@ -235,19 +187,14 @@ export default function FeedPage() {
 
     setItems(visible);
 
-    // Interests only apply to GIVE posts (requests use "offer help" later)
     const giveIds = visible.filter((x) => (x.post_type ?? "give") === "give").map((x) => x.id);
-
-    if (isLoggedIn && userId) {
-      await loadMyInterestMap(userId, giveIds);
-    } else {
-      setMyInterested({});
-    }
+    if (isLoggedIn && userId) await loadMyInterestMap(userId, giveIds);
+    else setMyInterested({});
 
     setLoading(false);
   }
 
-  async function toggleRequest(item: FeedRow) {
+  async function onPrimaryAction(item: FeedRow) {
     if (!isLoggedIn || !userId) {
       router.push("/me");
       return;
@@ -255,16 +202,15 @@ export default function FeedPage() {
 
     const postType = (item.post_type ?? "give") as PostType;
 
-    // Requests: "Offer help" should route to item detail for now
-    // (Later: offer -> requester accepts -> thread opens)
+    // Requests = Offer help (for now route to detail)
     if (postType === "request") {
       router.push(`/item/${item.id}`);
       return;
     }
 
-    // GIVE logic stays the same
-    const isMineListing = !!item.owner_id && item.owner_id === userId;
-    if (isMineListing) return;
+    // Give = toggle interest
+    const isMine = !!item.owner_id && item.owner_id === userId;
+    if (isMine) return;
 
     const already = myInterested[item.id] === true;
     setSavingId(item.id);
@@ -320,7 +266,6 @@ export default function FeedPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Keep category pills ONLY for GIVE posts, so requests don't pollute the UI
   const categories = useMemo(() => {
     const set = new Set<string>();
     for (const x of items) {
@@ -331,13 +276,19 @@ export default function FeedPage() {
     return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
   }, [items]);
 
-  const filteredItems = useMemo(() => {
+  const tabbed = useMemo(() => {
     return items.filter((x) => {
-      const postType = (x.post_type ?? "give") as PostType;
+      const pt = (x.post_type ?? "give") as PostType;
+      return tab === "items" ? pt !== "request" : pt === "request";
+    });
+  }, [items, tab]);
 
-      // Category filter applies ONLY to give posts.
-      // Requests always pass through (mixed subtly, as you asked).
-      if (postType === "give") {
+  const filtered = useMemo(() => {
+    return tabbed.filter((x) => {
+      const pt = (x.post_type ?? "give") as PostType;
+
+      // category only for items
+      if (pt !== "request") {
         if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
       }
 
@@ -349,499 +300,655 @@ export default function FeedPage() {
 
       return true;
     });
-  }, [items, categoryFilter, roleFilter]);
-
-  const pill: React.CSSProperties = {
-    flex: "0 0 auto",
-    borderRadius: 999,
-    border: "1px solid rgba(148,163,184,0.22)",
-    background: "rgba(255,255,255,0.04)",
-    color: "rgba(255,255,255,0.86)",
-    padding: "10px 14px",
-    cursor: "pointer",
-    fontWeight: 900,
-    whiteSpace: "nowrap",
-  };
+  }, [tabbed, categoryFilter, roleFilter]);
 
   return (
-    <div className={brandFont.className} style={{ minHeight: "100vh", background: "black", color: "white" }}>
-      {/* TOP BAR */}
-      <div
-        style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 30,
-          background: "rgba(0,0,0,0.92)",
-          backdropFilter: "blur(14px)",
-          borderBottom: "1px solid rgba(148,163,184,0.10)",
-        }}
-      >
-        <div style={{ padding: "18px 16px 12px" }}>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "52px 1fr 52px",
-              alignItems: "center",
-            }}
-          >
-            {/* Left: logo badge */}
-            <button
-              onClick={() => router.push("/feed")}
-              style={{
-                width: 52,
-                height: 52,
-                borderRadius: 16,
-                overflow: "hidden",
-                background: "white",
-                border: "1px solid rgba(0,0,0,0.1)",
-                display: "grid",
-                placeItems: "center",
-                padding: 0,
-                cursor: "pointer",
-              }}
-              aria-label="Home"
-              title="Home"
-            >
-              <Image
-                src="/scholarswap-logo.png"
-                alt="ScholarSwap"
-                width={52}
-                height={52}
-                priority
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "contain",
-                  padding: 6,
-                  display: "block",
-                }}
-              />
-            </button>
+    <div className={`${brandFont.className} page`}>
+      {/* Top bar */}
+      <header className="topbar">
+        <div className="topbarInner">
+          <button className="logoBtn" onClick={() => router.push("/feed")} aria-label="Home">
+            <Image src="/scholarswap-logo.png" alt="ScholarSwap" width={52} height={52} priority className="logoImg" />
+          </button>
 
-            {/* Center: big brand + AU logo */}
-<div
-  style={{
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    minWidth: 0,
-  }}
->
-  <div
-    style={{
-      textAlign: "center",
-      fontSize: 30,
-      fontWeight: 700,
-      letterSpacing: "-0.5px",
-      color: "white",
-      lineHeight: 1,
-      whiteSpace: "nowrap",
-    }}
-  >
-    ScholarSwap
-  </div>
-
-  <Image
-    src="/Ashland_Eagles_logo.svg.png"
-    alt="Ashland University"
-    width={28}
-    height={28}
-    priority
-    style={{
-      width: 28,
-      height: 28,
-      objectFit: "contain",
-      opacity: 0.85,
-      flexShrink: 0,
-    }}
-  />
-</div>
-
-            {/* Right: create */}
-            <button
-              onClick={() => router.push("/create")}
-              style={{
-                width: 52,
-                height: 52,
-                borderRadius: 16,
-                border: "1px solid rgba(52,211,153,0.30)",
-                background: "rgba(16,185,129,0.18)",
-                color: "white",
-                fontSize: 26,
-                fontWeight: 700,
-                display: "grid",
-                placeItems: "center",
-                cursor: "pointer",
-              }}
-              aria-label="Create post"
-              title="Create post"
-            >
-              +
-            </button>
+          <div className="brand">
+            <div className="brandName">ScholarSwap</div>
+            <Image
+              src="/Ashland_Eagles_logo.svg.png"
+              alt="Ashland University"
+              width={26}
+              height={26}
+              priority
+              className="brandMark"
+            />
           </div>
 
-          {/* FILTER ROW */}
-          <div style={{ marginTop: 12 }}>
-            <div
-              style={{
-                display: "flex",
-                gap: 10,
-                overflowX: "auto",
-                paddingBottom: 6,
-                WebkitOverflowScrolling: "touch",
-                alignItems: "center",
-              }}
-            >
-              {/* Lister pill */}
-              <div
-                style={{
-                  ...pill,
-                  padding: "0px 12px",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                }}
-              >
-                <span style={{ fontSize: 14, opacity: 0.9 }}>👤</span>
-                <select
-                  value={roleFilter}
-                  onChange={(e) => setRoleFilter(e.target.value as any)}
-                  style={{
-                    background: "transparent",
-                    border: "none",
-                    color: "white",
-                    fontWeight: 900,
-                    cursor: "pointer",
-                    outline: "none",
-                    padding: "10px 0",
-                  }}
-                  aria-label="Filter by lister"
-                >
-                  <option value="all">All</option>
-                  <option value="student">Student</option>
-                  <option value="faculty">Faculty</option>
-                </select>
-              </div>
-
-              {/* Category pills (give-only set) */}
-              {categories.map((c) => {
-                const active = categoryFilter === c;
-                const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
-
-                return (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setCategoryFilter(c)}
-                    style={{
-                      ...pill,
-                      border: active ? "1px solid rgba(52,211,153,0.45)" : "1px solid rgba(148,163,184,0.22)",
-                      background: active ? "rgba(16,185,129,0.14)" : "rgba(255,255,255,0.04)",
-                      color: active ? "rgba(209,250,229,0.95)" : "rgba(255,255,255,0.82)",
-                    }}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div style={{ marginTop: 8, display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-              <div style={{ fontSize: 14, fontWeight: 900, opacity: 0.9 }}>Public Feed</div>
-              <div style={{ fontSize: 13, opacity: 0.65, fontWeight: 900 }}>
-                Showing <b style={{ opacity: 0.95 }}>{filteredItems.length}</b>
-              </div>
-            </div>
-
-            {err && <p style={{ color: "#f87171", marginTop: 10 }}>{err}</p>}
-            {loading && <p style={{ marginTop: 10, opacity: 0.7 }}>Loading…</p>}
-          </div>
+          <button className="createBtn" onClick={() => router.push("/create")} aria-label="Create">
+            +
+          </button>
         </div>
-      </div>
 
-      {/* CARDS */}
-      <div style={{ padding: "14px 16px 90px" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(270px, 1fr))", gap: 18 }}>
-          {filteredItems.map((item) => {
+        {/* Tabs + filters */}
+        <div className="controls">
+          <div className="tabs">
+            <button className={`tab ${tab === "items" ? "active" : ""}`} onClick={() => setTab("items")}>
+              Items
+            </button>
+            <button className={`tab ${tab === "requests" ? "active" : ""}`} onClick={() => setTab("requests")}>
+              Requests
+            </button>
+          </div>
+
+          <div className="filters">
+            <div className="pill selectPill" aria-label="Filter by lister">
+              <span className="pillIcon">👤</span>
+              <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as any)}>
+                <option value="all">All</option>
+                <option value="student">Student</option>
+                <option value="faculty">Faculty</option>
+              </select>
+            </div>
+
+            {tab === "items" && (
+              <div className="chipRow">
+                {categories.map((c) => {
+                  const active = categoryFilter === c;
+                  const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
+                  return (
+                    <button
+                      key={c}
+                      className={`pill chip ${active ? "chipActive" : ""}`}
+                      onClick={() => setCategoryFilter(c)}
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="subline">
+            <div className="subTitle">{tab === "items" ? "Public Items" : "Public Requests"}</div>
+            <div className="count">
+              Showing <b>{filtered.length}</b>
+            </div>
+          </div>
+
+          {err && <div className="err">{err}</div>}
+          {loading && <div className="loading">Loading…</div>}
+        </div>
+      </header>
+
+      {/* Grid */}
+      <main className="main">
+        <div className="grid">
+          {filtered.map((item) => {
             const postType = (item.post_type ?? "give") as PostType;
-            const mineRequested = myInterested[item.id] === true; // only for give
-            const expiryText = formatExpiry(item.expires_at);
-            const isMineListing = !!userId && !!item.owner_id && item.owner_id === userId;
+            const isMine = !!userId && !!item.owner_id && item.owner_id === userId;
+            const interested = myInterested[item.id] === true;
 
-            const requestLabel = requestGroupLabel(item.request_group);
-            const tfLabel = requestTimeframeLabel(item.request_timeframe);
-            const requestLoc = (item.request_location ?? "").trim();
+            const group = requestGroupLabel(item.request_group);
+            const tf = requestTimeframeLabel(item.request_timeframe);
+            const loc = (item.request_location ?? "").trim();
 
             return (
-              <div
-                key={item.id}
-                style={{
-                  background: "rgba(255,255,255,0.04)",
-                  borderRadius: 18,
-                  border:
-                    postType === "request"
-                      ? "1px solid rgba(34,197,94,0.22)"
-                      : "1px solid rgba(148,163,184,0.15)",
-                  overflow: "hidden",
-                  boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-                }}
-              >
-                {/* media */}
-                <div
-                  style={{
-                    position: "relative",
-                    height: 220,
-                    background:
-                      postType === "request"
-                        ? "linear-gradient(180deg, rgba(34,197,94,0.10), rgba(0,0,0,0.25))"
-                        : "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.25))",
-                  }}
-                >
-                  {postType === "give" && item.photo_url ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenImg(item.photo_url!);
-                        setOpenTitle(item.title);
-                      }}
-                      style={{
-                        padding: 0,
-                        border: "none",
-                        background: "transparent",
-                        cursor: "pointer",
-                        width: "100%",
-                        height: "100%",
-                      }}
-                      aria-label="Open photo"
-                      title="Open photo"
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={item.photo_url}
-                        alt={item.title}
-                        loading="lazy"
-                        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                      />
-                    </button>
-                  ) : postType === "give" ? (
-                    <div
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        color: "rgba(255,255,255,0.45)",
-                      }}
-                    >
-                      No photo
+              <article key={item.id} className={`card ${postType === "request" ? "cardRequest" : ""}`}>
+                {/* Media / Header */}
+                {postType === "request" ? (
+                  <div className="reqHero">
+                    <div className="badge badgeRequest">{statusLabel(item.status, postType)}</div>
+                    <div className="reqMeta">
+                      {group}
+                      {tf ? ` • ${tf}` : ""}
+                      {loc ? ` • ${loc}` : ""}
                     </div>
-                  ) : (
-                    // Request "hero" area (subtle, clean)
-                    <div style={{ padding: 16, height: "100%", display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
-                      <div style={{ fontSize: 12, opacity: 0.78, fontWeight: 900 }}>
-                        {requestLabel}
-                        {tfLabel ? ` • ${tfLabel}` : ""}
-                        {requestLoc ? ` • ${requestLoc}` : ""}
-                      </div>
-                      <div
-                        style={{
-                          marginTop: 10,
-                          fontSize: 18,
-                          fontWeight: 950,
-                          letterSpacing: -0.2,
-                          display: "-webkit-box",
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: "vertical",
-                          overflow: "hidden",
+                    <div className="title clamp2">{item.title}</div>
+                  </div>
+                ) : (
+                  <div className="media">
+                    <div className="badge badgeItem">{statusLabel(item.status, postType)}</div>
+
+                    {item.photo_url ? (
+                      <button
+                        className="mediaBtn"
+                        onClick={() => {
+                          setOpenImg(item.photo_url!);
+                          setOpenTitle(item.title);
                         }}
+                        aria-label="Open photo"
+                        type="button"
                       >
-                        {item.title}
-                      </div>
-                    </div>
-                  )}
-
-                  <div style={{ position: "absolute", top: 12, left: 12 }}>
-                    <span style={statusBadge(item.status, postType)}>
-                      {postType === "request" ? "request" : (item.status ?? "available").toLowerCase()}
-                    </span>
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={item.photo_url} alt={item.title} loading="lazy" className="mediaImg" />
+                      </button>
+                    ) : (
+                      <div className="noPhoto">No photo</div>
+                    )}
                   </div>
-                </div>
+                )}
 
-                {/* body */}
-                <div style={{ padding: 14 }}>
-                  <div style={{ fontSize: 12, opacity: 0.72 }}>
-                    {postType === "give"
-                      ? item.category
+                {/* Body */}
+                <div className="body">
+                  <div className="metaRow">
+                    <span className="meta">
+                      {postType === "request"
+                        ? `Type: ${group}`
+                        : item.category
                         ? `Category: ${item.category}`
-                        : "Category: —"
-                      : `Type: ${requestLabel}`}
-                    {item.owner_role ? ` • ${postType === "give" ? "Lister" : "Poster"}: ${item.owner_role}` : ""}
+                        : "Category: —"}
+                    </span>
+                    {item.owner_role ? <span className="meta">• {item.owner_role}</span> : null}
+                    {isMine ? <span className="mine">Yours</span> : null}
                   </div>
 
-                  {/* Title for give only (requests already show title in hero) */}
-                  {postType === "give" && (
-                    <div style={{ marginTop: 8, fontSize: 20, fontWeight: 950, letterSpacing: -0.2 }}>{item.title}</div>
-                  )}
+                  {postType !== "request" ? <div className="title">{item.title}</div> : null}
 
-                  <div style={{ marginTop: 8, opacity: 0.7, fontSize: 13 }}>
-                    {item.expires_at ? `Auto-archives: ${new Date(item.expires_at).toLocaleDateString()}` : "Contributor will de-list themselves"}{" "}
-                    <span style={{ opacity: 0.75 }}>({expiryText})</span>
+                  <div className="desc clamp2">{item.description || "—"}</div>
+
+                  <div className="footerRow">
+                    {postType === "request" ? (
+                      <span className="small">Tap to offer help</span>
+                    ) : (
+                      <span className="small">{item.interest_count || 0} requests</span>
+                    )}
+
+                    {/* only show end date if it exists */}
+                    {item.expires_at ? <span className="small">Ends: {formatShortDate(item.expires_at)}</span> : null}
                   </div>
 
-                  <div
-                    style={{
-                      marginTop: 10,
-                      opacity: 0.75,
-                      fontSize: 14,
-                      display: "-webkit-box",
-                      WebkitLineClamp: 2,
-                      WebkitBoxOrient: "vertical",
-                      overflow: "hidden",
-                      minHeight: 40,
-                    }}
-                  >
-                    {item.description || "—"}
-                  </div>
-
-                  <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13 }}>
-                    {postType === "give" ? `${item.interest_count || 0} requests` : "Tap to offer help"}
-                  </div>
-
-                  <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                    <button
-                      onClick={() => router.push(`/item/${item.id}`)}
-                      style={{
-                        width: "100%",
-                        border: "1px solid rgba(148,163,184,0.25)",
-                        background: "rgba(255,255,255,0.03)",
-                        color: "rgba(255,255,255,0.85)",
-                        padding: "10px 12px",
-                        borderRadius: 14,
-                        cursor: "pointer",
-                        fontWeight: 900,
-                      }}
-                    >
-                      View {postType === "give" ? "item" : "request"}
+                  <div className="actions">
+                    <button className="btn btnGhost" onClick={() => router.push(`/item/${item.id}`)}>
+                      View
                     </button>
 
                     <button
-                      onClick={() => toggleRequest(item)}
-                      disabled={savingId === item.id || isMineListing}
-                      style={{
-                        width: "100%",
-                        border: postType === "request" ? "1px solid rgba(34,197,94,0.22)" : "1px solid rgba(52,211,153,0.25)",
-                        background: isMineListing
-                          ? "rgba(255,255,255,0.03)"
-                          : postType === "request"
-                            ? "rgba(34,197,94,0.14)"
-                            : isLoggedIn
-                              ? mineRequested
-                                ? "rgba(16,185,129,0.16)"
-                                : "rgba(16,185,129,0.24)"
-                              : "rgba(255,255,255,0.03)",
-                        color: "rgba(255,255,255,0.9)",
-                        padding: "10px 12px",
-                        borderRadius: 14,
-                        cursor: savingId === item.id || isMineListing ? "not-allowed" : "pointer",
-                        fontWeight: 950,
-                        opacity: savingId === item.id || isMineListing ? 0.75 : 1,
-                      }}
+                      className={`btn btnPrimary ${isMine ? "btnDisabled" : ""}`}
+                      onClick={() => onPrimaryAction(item)}
+                      disabled={savingId === item.id || isMine}
                     >
-                      {isMineListing
-                        ? "Your post"
+                      {isMine
+                        ? "Yours"
                         : savingId === item.id
-                          ? "Saving…"
-                          : postType === "request"
-                            ? isLoggedIn
-                              ? "Offer help"
-                              : "Offer (login)"
-                            : isLoggedIn
-                              ? mineRequested
-                                ? "Requested"
-                                : "Request item"
-                              : "Request (login)"}
+                        ? "Saving…"
+                        : postType === "request"
+                        ? isLoggedIn
+                          ? "Offer help"
+                          : "Offer (login)"
+                        : isLoggedIn
+                        ? interested
+                          ? "Requested"
+                          : "Request"
+                        : "Request (login)"}
                     </button>
                   </div>
                 </div>
-              </div>
+              </article>
             );
           })}
         </div>
-      </div>
+      </main>
 
-      {/* fullscreen image modal */}
+      {/* Image Modal */}
       {openImg && (
-        <div
-          onClick={() => setOpenImg(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.75)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 20,
-            zIndex: 9999,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(1000px, 95vw)",
-              maxHeight: "90vh",
-              background: "rgba(255,255,255,0.04)",
-              border: "1px solid rgba(148,163,184,0.18)",
-              borderRadius: 16,
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "10px 12px",
-                borderBottom: "1px solid rgba(148,163,184,0.15)",
-              }}
-            >
-              <div style={{ fontWeight: 950, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {openTitle || "Photo"}
-              </div>
-              <button
-                type="button"
-                onClick={() => setOpenImg(null)}
-                style={{
-                  background: "transparent",
-                  color: "white",
-                  border: "1px solid rgba(148,163,184,0.25)",
-                  padding: "6px 10px",
-                  borderRadius: 12,
-                  cursor: "pointer",
-                  fontWeight: 950,
-                }}
-              >
+        <div className="modal" onClick={() => setOpenImg(null)} role="dialog" aria-modal="true">
+          <div className="modalInner" onClick={(e) => e.stopPropagation()}>
+            <div className="modalTop">
+              <div className="modalTitle">{openTitle || "Photo"}</div>
+              <button className="modalClose" onClick={() => setOpenImg(null)} type="button">
                 ✕
               </button>
             </div>
-
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={openImg}
-              alt={openTitle || "Full photo"}
-              style={{
-                width: "100%",
-                height: "auto",
-                maxHeight: "80vh",
-                objectFit: "contain",
-                display: "block",
-                background: "black",
-              }}
-            />
+            <img src={openImg} alt={openTitle || "Full photo"} className="modalImg" />
           </div>
         </div>
       )}
+
+      <style jsx>{`
+        .page {
+          min-height: 100vh;
+          background: #000;
+          color: #fff;
+        }
+
+        /* Topbar */
+        .topbar {
+          position: sticky;
+          top: 0;
+          z-index: 30;
+          background: rgba(0, 0, 0, 0.92);
+          backdrop-filter: blur(14px);
+          border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+        }
+
+        .topbarInner {
+          padding: 16px 16px 10px;
+          display: grid;
+          grid-template-columns: 52px 1fr 52px;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .logoBtn {
+          width: 52px;
+          height: 52px;
+          border-radius: 16px;
+          overflow: hidden;
+          background: #fff;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          display: grid;
+          place-items: center;
+          padding: 0;
+          cursor: pointer;
+        }
+
+        .logoImg {
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+          padding: 6px;
+        }
+
+        .brand {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 10px;
+          min-width: 0;
+        }
+
+        .brandName {
+          font-size: 28px;
+          font-weight: 700;
+          letter-spacing: -0.6px;
+          white-space: nowrap;
+        }
+
+        .brandMark {
+          opacity: 0.85;
+        }
+
+        .createBtn {
+          width: 52px;
+          height: 52px;
+          border-radius: 16px;
+          border: 1px solid rgba(52, 211, 153, 0.35);
+          background: rgba(16, 185, 129, 0.18);
+          color: #fff;
+          font-size: 26px;
+          font-weight: 700;
+          display: grid;
+          place-items: center;
+          cursor: pointer;
+        }
+
+        .controls {
+          padding: 0 16px 14px;
+        }
+
+        .tabs {
+          display: flex;
+          gap: 10px;
+          margin-top: 6px;
+        }
+
+        .tab {
+          flex: 0 0 auto;
+          padding: 10px 14px;
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          background: rgba(255, 255, 255, 0.04);
+          color: rgba(255, 255, 255, 0.86);
+          font-weight: 800;
+          cursor: pointer;
+        }
+
+        .tab.active {
+          border: 1px solid rgba(52, 211, 153, 0.45);
+          background: rgba(16, 185, 129, 0.14);
+          color: rgba(209, 250, 229, 0.95);
+        }
+
+        .filters {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          margin-top: 10px;
+          overflow: hidden;
+        }
+
+        .pill {
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          background: rgba(255, 255, 255, 0.04);
+          color: rgba(255, 255, 255, 0.86);
+          padding: 10px 14px;
+          font-weight: 900;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .selectPill {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 0 12px;
+        }
+
+        .pillIcon {
+          font-size: 14px;
+          opacity: 0.9;
+        }
+
+        .selectPill select {
+          background: transparent;
+          border: none;
+          outline: none;
+          color: #fff;
+          font-weight: 900;
+          cursor: pointer;
+          padding: 10px 0;
+        }
+
+        .chipRow {
+          display: flex;
+          gap: 10px;
+          overflow-x: auto;
+          padding-bottom: 6px;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        .chipActive {
+          border: 1px solid rgba(52, 211, 153, 0.45);
+          background: rgba(16, 185, 129, 0.14);
+          color: rgba(209, 250, 229, 0.95);
+        }
+
+        .subline {
+          margin-top: 10px;
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          gap: 12px;
+        }
+
+        .subTitle {
+          font-size: 14px;
+          font-weight: 900;
+          opacity: 0.9;
+        }
+
+        .count {
+          font-size: 13px;
+          opacity: 0.65;
+          font-weight: 900;
+        }
+
+        .err {
+          margin-top: 10px;
+          color: #f87171;
+          font-weight: 700;
+        }
+
+        .loading {
+          margin-top: 10px;
+          opacity: 0.7;
+          font-weight: 700;
+        }
+
+        /* Main grid */
+        .main {
+          padding: 14px 16px 96px;
+        }
+
+        .grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+          gap: 16px;
+        }
+
+        .card {
+          background: rgba(255, 255, 255, 0.04);
+          border-radius: 18px;
+          border: 1px solid rgba(148, 163, 184, 0.15);
+          overflow: hidden;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+        }
+
+        .cardRequest {
+          border: 1px solid rgba(34, 197, 94, 0.22);
+        }
+
+        .media {
+          position: relative;
+          height: 210px;
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.25));
+        }
+
+        .mediaBtn {
+          width: 100%;
+          height: 100%;
+          padding: 0;
+          border: none;
+          background: transparent;
+          cursor: pointer;
+        }
+
+        .mediaImg {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
+        }
+
+        .noPhoto {
+          width: 100%;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: rgba(255, 255, 255, 0.45);
+          font-weight: 800;
+        }
+
+        .reqHero {
+          position: relative;
+          height: 210px;
+          padding: 16px;
+          display: flex;
+          flex-direction: column;
+          justify-content: flex-end;
+          background: linear-gradient(180deg, rgba(34, 197, 94, 0.12), rgba(0, 0, 0, 0.25));
+        }
+
+        .badge {
+          position: absolute;
+          top: 12px;
+          left: 12px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          font-size: 12px;
+          font-weight: 900;
+          border: 1px solid rgba(148, 163, 184, 0.25);
+          background: rgba(0, 0, 0, 0.35);
+          color: rgba(255, 255, 255, 0.85);
+        }
+
+        .badgeRequest {
+          border: 1px solid rgba(34, 197, 94, 0.28);
+          background: rgba(34, 197, 94, 0.12);
+          color: rgba(209, 250, 229, 0.92);
+        }
+
+        .badgeItem {
+          border: 1px solid rgba(52, 211, 153, 0.28);
+          background: rgba(16, 185, 129, 0.14);
+          color: rgba(209, 250, 229, 0.92);
+        }
+
+        .body {
+          padding: 14px;
+        }
+
+        .metaRow {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          align-items: center;
+        }
+
+        .meta {
+          font-size: 12px;
+          opacity: 0.72;
+          font-weight: 800;
+        }
+
+        .mine {
+          font-size: 12px;
+          padding: 4px 8px;
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          background: rgba(255, 255, 255, 0.04);
+          opacity: 0.9;
+          font-weight: 900;
+        }
+
+        .title {
+          margin-top: 8px;
+          font-size: 18px;
+          font-weight: 950;
+          letter-spacing: -0.2px;
+        }
+
+        .desc {
+          margin-top: 10px;
+          opacity: 0.78;
+          font-size: 14px;
+          min-height: 40px;
+        }
+
+        .footerRow {
+          margin-top: 10px;
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          opacity: 0.72;
+          font-weight: 900;
+          font-size: 12px;
+        }
+
+        .small {
+          opacity: 0.72;
+        }
+
+        .actions {
+          margin-top: 12px;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+
+        .btn {
+          width: 100%;
+          padding: 10px 12px;
+          border-radius: 14px;
+          cursor: pointer;
+          font-weight: 950;
+          border: 1px solid rgba(148, 163, 184, 0.25);
+        }
+
+        .btnGhost {
+          background: rgba(255, 255, 255, 0.03);
+          color: rgba(255, 255, 255, 0.86);
+        }
+
+        .btnPrimary {
+          border: 1px solid rgba(52, 211, 153, 0.25);
+          background: rgba(16, 185, 129, 0.22);
+          color: #fff;
+        }
+
+        .btnDisabled {
+          opacity: 0.7;
+          cursor: not-allowed;
+          background: rgba(255, 255, 255, 0.03);
+          border: 1px solid rgba(148, 163, 184, 0.2);
+        }
+
+        .clamp2 {
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+
+        /* Modal */
+        .modal {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.75);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 20px;
+          z-index: 9999;
+        }
+
+        .modalInner {
+          width: min(1000px, 95vw);
+          max-height: 90vh;
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid rgba(148, 163, 184, 0.18);
+          border-radius: 16px;
+          overflow: hidden;
+        }
+
+        .modalTop {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 10px 12px;
+          border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+        }
+
+        .modalTitle {
+          font-weight: 950;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .modalClose {
+          background: transparent;
+          color: #fff;
+          border: 1px solid rgba(148, 163, 184, 0.25);
+          padding: 6px 10px;
+          border-radius: 12px;
+          cursor: pointer;
+          font-weight: 950;
+        }
+
+        .modalImg {
+          width: 100%;
+          height: auto;
+          max-height: 80vh;
+          object-fit: contain;
+          display: block;
+          background: #000;
+        }
+
+        /* Mobile tweaks */
+        @media (max-width: 520px) {
+          .brandName {
+            font-size: 22px;
+          }
+          .grid {
+            grid-template-columns: 1fr;
+          }
+        }
+      `}</style>
     </div>
   );
 }

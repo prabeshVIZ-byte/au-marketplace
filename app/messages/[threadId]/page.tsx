@@ -661,19 +661,26 @@ export default function ThreadPage() {
   }
 
   // ---------- SCROLL DETECT ----------
-  useEffect(() => {
-    const el = listRef.current;
+ useEffect(() => {
+  const el = listRef.current;
+  if (!el) return;
+
+  function onScroll() {
     if (!el) return;
 
-    function onScroll() {
-      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      // if you’re within ~120px of bottom, treat as “stuck”
-      setStickToBottom(distanceFromBottom < 120);
-    }
+    const distanceFromBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight;
 
-    el.addEventListener("scroll", onScroll);
-    return () => el.removeEventListener("scroll", onScroll);
-  }, []);
+    // if you're within ~120px of bottom, treat as “stuck”
+    setStickToBottom(distanceFromBottom < 120);
+  }
+
+  el.addEventListener("scroll", onScroll);
+
+  return () => {
+    el.removeEventListener("scroll", onScroll);
+  };
+}, []);
 
   // ---------- INITIAL LOAD ----------
   useEffect(() => {
