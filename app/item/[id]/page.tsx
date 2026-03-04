@@ -13,11 +13,11 @@ type ItemRow = {
   title: string;
   description: string | null;
 
-  // give fields
+  // give
   category: string | null;
   pickup_location: string | null;
 
-  // request fields
+  // request
   post_type: PostType;
   request_group: string | null;
   request_timeframe: string | null;
@@ -31,10 +31,7 @@ type ItemRow = {
   owner_id: string | null;
 };
 
-type OwnerProfile = {
-  full_name: string | null;
-  user_role: string | null;
-};
+type OwnerProfile = { full_name: string | null; user_role: string | null };
 
 type MyInterestRow = { id: string; status: string | null };
 
@@ -51,6 +48,13 @@ type OfferRow = {
   updated_at: string | null;
   helper?: { full_name: string | null; user_role: string | null } | null;
 };
+
+const APP_NAV_HEIGHT_PX = 86; // 👈 set this to match your global bottom nav height
+const ACTION_BAR_HEIGHT_PX = 78; // our sticky CTA bar height (approx)
+
+function isAshlandEmail(email: string | null) {
+  return !!email && email.toLowerCase().endsWith("@ashland.edu");
+}
 
 function formatExpiry(expiresAt: string | null) {
   if (!expiresAt) return "Until delisted";
@@ -88,7 +92,6 @@ function requestTimeframeLabel(t: string | null) {
   if (k === "flexible") return "Flexible";
   return "";
 }
-
 function offerStatusLabel(s: string | null) {
   const k = (s ?? "pending").toLowerCase();
   if (k === "pending") return "Pending";
@@ -99,7 +102,6 @@ function offerStatusLabel(s: string | null) {
   if (k === "withdrawn") return "Withdrawn";
   return k;
 }
-
 function statusTone(status: string | null) {
   const k = (status ?? "pending").toLowerCase();
   if (k === "accepted") return "toneGreen";
@@ -107,10 +109,6 @@ function statusTone(status: string | null) {
   if (k === "completed") return "toneAmber";
   if (k === "declined" || k === "withdrawn") return "toneRed";
   return "toneGray";
-}
-
-function isAshlandEmail(email: string | null) {
-  return !!email && email.toLowerCase().endsWith("@ashland.edu");
 }
 
 function Chip({ children }: { children: React.ReactNode }) {
@@ -125,31 +123,29 @@ export default function ItemDetailPage() {
   // auth (single source of truth)
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
-
   const isLoggedIn = useMemo(() => !!userId && isAshlandEmail(userEmail), [userId, userEmail]);
 
   // loading/error
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // data
+  // item
   const [item, setItem] = useState<ItemRow | null>(null);
   const [owner, setOwner] = useState<OwnerProfile | null>(null);
 
-  // GIVE
+  // give
   const [interestCount, setInterestCount] = useState(0);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
 
-  // REQUEST
+  // request
   const [offers, setOffers] = useState<OfferRow[]>([]);
   const [myOffer, setMyOffer] = useState<OfferRow | null>(null);
 
-  // UI
+  // ui
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
   const toastTimer = useRef<any>(null);
 
-  // Confirm modal (replaces alert/confirm)
   const [confirm, setConfirm] = useState<null | {
     title: string;
     body: string;
@@ -158,13 +154,13 @@ export default function ItemDetailPage() {
     onYes: () => Promise<void>;
   }>(null);
 
-  // GIVE modal
+  // give modal
   const [showInterestModal, setShowInterestModal] = useState(false);
   const [earliestPickup, setEarliestPickup] = useState<"today" | "tomorrow" | "weekend">("today");
   const [timeWindow, setTimeWindow] = useState<"morning" | "afternoon" | "evening">("afternoon");
   const [interestNote, setInterestNote] = useState("");
 
-  // REQUEST modal
+  // request modal
   const [showOfferModal, setShowOfferModal] = useState(false);
   const [offerAvailability, setOfferAvailability] = useState<"today" | "tomorrow" | "this_week" | "flexible">("today");
   const [offerNote, setOfferNote] = useState("");
@@ -173,20 +169,15 @@ export default function ItemDetailPage() {
   const [openImg, setOpenImg] = useState<string | null>(null);
 
   const postType: PostType = (item?.post_type ?? "give") as PostType;
-
-  const isMinePost = useMemo(() => {
-    return !!userId && !!item?.owner_id && item.owner_id === userId;
-  }, [userId, item?.owner_id]);
-
+  const isMinePost = useMemo(() => !!userId && !!item?.owner_id && item.owner_id === userId, [userId, item?.owner_id]);
   const expiryText = formatExpiry(item?.expires_at ?? null);
 
-  // derived give
+  // derived
   const myInterestStatus = (myInterest?.status ?? "").toLowerCase();
   const mineInterested = !!myInterest?.id;
   const interestAccepted = myInterestStatus === "accepted";
   const interestReserved = myInterestStatus === "reserved";
 
-  // derived request
   const myOfferStatus = (myOffer?.status ?? "").toLowerCase();
   const myOfferAccepted = myOfferStatus === "accepted" || myOfferStatus === "completed";
 
@@ -206,7 +197,6 @@ export default function ItemDetailPage() {
     setErr(null);
 
     try {
-      // 1) Item (single)
       const { data: it, error: itErr } = await supabase
         .from("items")
         .select(
@@ -222,27 +212,24 @@ export default function ItemDetailPage() {
       loaded.post_type = (loaded.post_type ?? "give") as PostType;
       setItem(loaded);
 
-      // 2) Owner profile (only if not anonymous)
+      // owner profile only if not anonymous
       if (!loaded.is_anonymous && loaded.owner_id) {
-        const { data: prof, error: pErr } = await supabase
+        const { data: prof } = await supabase
           .from("profiles")
           .select("full_name,user_role")
           .eq("id", loaded.owner_id)
           .maybeSingle();
-
         if (seq !== loadSeq.current) return;
-        if (!pErr) setOwner((prof as OwnerProfile) ?? null);
-        else setOwner(null);
+        setOwner((prof as OwnerProfile) ?? null);
       } else {
         setOwner(null);
       }
 
-      // 3) Branch on post type
+      // branch
       if (loaded.post_type === "give") {
         setOffers([]);
         setMyOffer(null);
 
-        // count interests
         const { count } = await supabase
           .from("interests")
           .select("*", { count: "exact", head: true })
@@ -251,9 +238,8 @@ export default function ItemDetailPage() {
         if (seq !== loadSeq.current) return;
         setInterestCount(count ?? 0);
 
-        // my interest
         if (uid && isAshlandEmail(email)) {
-          const { data: mine, error: mineErr } = await supabase
+          const { data: mine } = await supabase
             .from("interests")
             .select("id,status")
             .eq("item_id", itemId)
@@ -261,8 +247,7 @@ export default function ItemDetailPage() {
             .maybeSingle();
 
           if (seq !== loadSeq.current) return;
-          if (!mineErr && mine) setMyInterest({ id: (mine as any).id, status: (mine as any).status ?? null });
-          else setMyInterest(null);
+          setMyInterest(mine ? { id: (mine as any).id, status: (mine as any).status ?? null } : null);
         } else {
           setMyInterest(null);
         }
@@ -270,7 +255,6 @@ export default function ItemDetailPage() {
         setInterestCount(0);
         setMyInterest(null);
 
-        // my offer
         if (uid && isAshlandEmail(email)) {
           const { data: mine } = await supabase
             .from("request_offers")
@@ -285,8 +269,8 @@ export default function ItemDetailPage() {
           setMyOffer(null);
         }
 
-        // requester sees all offers (JOIN helper profile in same query)
         if (uid && loaded.owner_id === uid) {
+          // If this FK name breaks, see note below.
           const { data: all, error } = await supabase
             .from("request_offers")
             .select(
@@ -299,11 +283,7 @@ export default function ItemDetailPage() {
             .order("created_at", { ascending: false });
 
           if (seq !== loadSeq.current) return;
-          if (error) {
-            setOffers([]);
-          } else {
-            setOffers(((all as any[]) ?? []) as OfferRow[]);
-          }
+          setOffers(error ? [] : (((all as any[]) ?? []) as OfferRow[]));
         } else {
           setOffers([]);
         }
@@ -323,9 +303,7 @@ export default function ItemDetailPage() {
     }
   }
 
-  // -------------------
-  // GIVE FLOW
-  // -------------------
+  // ---------- Actions ----------
   async function submitInterest() {
     if (!item || postType !== "give") return;
     if (!isLoggedIn || !userId) return router.push("/me");
@@ -440,9 +418,6 @@ export default function ItemDetailPage() {
     }
   }
 
-  // -------------------
-  // REQUEST FLOW
-  // -------------------
   async function submitOffer() {
     if (!item || postType !== "request") return;
     if (!isLoggedIn || !userId) return router.push("/me");
@@ -479,8 +454,6 @@ export default function ItemDetailPage() {
       setShowOfferModal(false);
       setOfferNote("");
       showToast("Offer sent ✅", "ok");
-
-      // refresh offers if requester is viewing their own post in another session (optional)
       await loadEverything(userId, userEmail);
     } catch (e: any) {
       showToast(e?.message || "Could not send offer.", "err");
@@ -532,7 +505,6 @@ export default function ItemDetailPage() {
     try {
       const { error: rpcErr } = await supabase.rpc("accept_request_offer_keep_others", { p_offer_id: offer.id });
       if (rpcErr) throw new Error(rpcErr.message);
-
       await loadEverything(userId, userEmail);
       showToast("Accepted ✅ Chat unlocked.", "ok");
     } catch (e: any) {
@@ -551,7 +523,6 @@ export default function ItemDetailPage() {
     try {
       const { error } = await supabase.from("request_offers").update({ status }).eq("id", offer.id);
       if (error) throw new Error(error.message);
-
       await loadEverything(userId, userEmail);
       showToast("Updated ✅", "ok");
     } catch (e: any) {
@@ -570,7 +541,6 @@ export default function ItemDetailPage() {
     try {
       const { error: rpcErr } = await supabase.rpc("complete_request_offer", { p_offer_id: offer.id });
       if (rpcErr) throw new Error(rpcErr.message);
-
       await loadEverything(userId, userEmail);
       showToast("Marked completed ✅", "ok");
     } catch (e: any) {
@@ -595,8 +565,8 @@ export default function ItemDetailPage() {
     try {
       const threadId = await ensureThread({
         itemId: item.id,
-        ownerId: item.owner_id, // request poster
-        requesterId: offer.helper_id, // helper
+        ownerId: item.owner_id,
+        requesterId: offer.helper_id,
       });
 
       await insertSystemMessage({
@@ -613,8 +583,7 @@ export default function ItemDetailPage() {
     }
   }
 
-  /* ---------------- Boot: single session fetch + auth listener ---------------- */
-
+  // -------- Boot: single session + auth listener --------
   useEffect(() => {
     if (!itemId) return;
 
@@ -640,32 +609,7 @@ export default function ItemDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId]);
 
-  /* ---------------- Realtime: lightweight refresh ---------------- */
-
-  useEffect(() => {
-    if (!itemId) return;
-
-    const channel = supabase
-      .channel(`item-detail-${itemId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "items", filter: `id=eq.${itemId}` }, () => {
-        void loadEverything(userId, userEmail);
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "interests", filter: `item_id=eq.${itemId}` }, () => {
-        // only relevant for give pages, but safe to refresh
-        void loadEverything(userId, userEmail);
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "request_offers", filter: `request_id=eq.${itemId}` }, () => {
-        void loadEverything(userId, userEmail);
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [itemId, userId, userEmail]);
-
-  // esc closes image + modals
+  // esc closes modals
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
@@ -697,8 +641,7 @@ export default function ItemDetailPage() {
     if (!item) return "Ashland user";
     if (item.is_anonymous) return "Anonymous";
     const nm = (owner?.full_name ?? "").trim();
-    if (nm) return nm;
-    return "Ashland user";
+    return nm ? nm : "Ashland user";
   }, [item, owner]);
 
   const ownerRole = useMemo(() => {
@@ -708,7 +651,6 @@ export default function ItemDetailPage() {
 
   const primaryCTA = useMemo(() => {
     if (!item) return { label: "Loading…", disabled: true, onClick: () => {} };
-
     const itemStatus = (item.status ?? "available").toLowerCase();
 
     if (postType === "give") {
@@ -724,14 +666,30 @@ export default function ItemDetailPage() {
     }
 
     // request
-    if (isMinePost) return { label: "View messages", disabled: false, onClick: () => router.push("/messages") };
+    if (isMinePost) return { label: "View offers below", disabled: true, onClick: () => {} };
     if (!isLoggedIn) return { label: "Offer help (login)", disabled: false, onClick: () => router.push("/me") };
     if (myOffer?.id) return { label: `Offer sent • ${offerStatusLabel(myOffer.status ?? "pending")}`, disabled: true, onClick: () => {} };
     return { label: "Offer help", disabled: false, onClick: () => setShowOfferModal(true) };
-  }, [item, postType, isMinePost, isLoggedIn, mineInterested, interestReserved, interestAccepted, router, myOffer]);
+  }, [
+    item,
+    postType,
+    isMinePost,
+    isLoggedIn,
+    mineInterested,
+    interestReserved,
+    interestAccepted,
+    router,
+    myOffer,
+  ]);
+
+  // ✅ This is the key: action bar sits ABOVE your global nav
+  const bottomOffset = `calc(${APP_NAV_HEIGHT_PX}px + env(safe-area-inset-bottom) + 10px)`;
+
+  // ✅ This is the key: page gets enough bottom padding for BOTH bars
+  const pageBottomPad = `calc(${APP_NAV_HEIGHT_PX}px + ${ACTION_BAR_HEIGHT_PX}px + env(safe-area-inset-bottom) + 20px)`;
 
   return (
-    <div className="page">
+    <div className="page" style={{ paddingBottom: pageBottomPad as any }}>
       <header className="top">
         <button className="navBtn" onClick={() => router.back()} aria-label="Back">
           ←
@@ -742,6 +700,7 @@ export default function ItemDetailPage() {
           <div className="brandSub">Exchange • Help • Reuse</div>
         </div>
 
+        {/* Desktop-only quick buttons (mobile already has bottom nav) */}
         <div className="navRight">
           <button className="navChip" onClick={() => router.push("/feed")}>
             Feed
@@ -757,32 +716,38 @@ export default function ItemDetailPage() {
 
       {!loading && item && (
         <main className="wrap">
-          {/* Title / type */}
           <div className="titleRow">
             <div className="titleLeft">
               <h1 className="h1">{item.title}</h1>
               {headerSubtitle ? <div className="sub">{headerSubtitle}</div> : null}
+
+              <div className="metaLine">
+                <span className="metaKey">{postType === "give" ? "Lister" : "Poster"}:</span>{" "}
+                <span className="metaVal">
+                  {ownerLabel}
+                  {ownerRole ? <span className="muted"> ({ownerRole})</span> : null}
+                </span>
+
+                {postType === "give" ? (
+                  <>
+                    <span className="dot">•</span>
+                    <span className="metaVal">{interestCount} requests</span>
+                  </>
+                ) : null}
+
+                <span className="dot">•</span>
+                <span className="metaVal">
+                  Auto-archives: {item.expires_at ? new Date(item.expires_at).toLocaleDateString() : "—"}{" "}
+                  <span className="muted">({expiryText})</span>
+                </span>
+              </div>
             </div>
 
-            <span className={`typePill ${postType === "request" ? "req" : "give"}`}>{postType === "request" ? "REQUEST" : "ITEM"}</span>
+            <span className={`typePill ${postType === "request" ? "req" : "give"}`}>
+              {postType === "request" ? "REQUEST" : "ITEM"}
+            </span>
           </div>
 
-          {/* Chips */}
-          <div className="chips">
-            <Chip>
-              {postType === "give" ? "Lister" : "Poster"}: {ownerLabel}
-              {ownerRole ? <span className="muted"> ({ownerRole})</span> : null}
-            </Chip>
-
-            {postType === "give" ? <Chip>{interestCount} requests</Chip> : null}
-
-            <Chip>
-              {item.expires_at ? `Auto-archives • ${new Date(item.expires_at).toLocaleDateString()}` : "Active • until delisted"}{" "}
-              <span className="muted">({expiryText})</span>
-            </Chip>
-          </div>
-
-          {/* Hero */}
           <section className="hero">
             {postType === "give" ? (
               item.photo_url ? (
@@ -801,7 +766,6 @@ export default function ItemDetailPage() {
             )}
           </section>
 
-          {/* Description (give only) */}
           {postType === "give" ? (
             <section className="panel">
               <div className="panelTitle">Description</div>
@@ -809,7 +773,7 @@ export default function ItemDetailPage() {
             </section>
           ) : null}
 
-          {/* REQUEST: offers panel for requester */}
+          {/* REQUEST: offers list */}
           {postType === "request" && isMinePost ? (
             <section className="panel">
               <div className="panelTop">
@@ -838,7 +802,6 @@ export default function ItemDetailPage() {
                         </div>
 
                         <div className="offerMeta">{o.availability ? `Availability: ${o.availability}` : "Availability: —"}</div>
-
                         <div className="offerNote">{o.note ? o.note : <span className="muted">No note.</span>}</div>
 
                         <div className="offerActions">
@@ -847,31 +810,26 @@ export default function ItemDetailPage() {
                               Accept
                             </button>
                           )}
-
                           {st === "pending" && (
                             <button className="btn softBlue" onClick={() => setOfferStatusAsRequester(o, "hold")} disabled={busy}>
                               Hold
                             </button>
                           )}
-
                           {st === "hold" && (
                             <button className="btn ghost" onClick={() => setOfferStatusAsRequester(o, "pending")} disabled={busy}>
                               Move to pending
                             </button>
                           )}
-
                           {(st === "accepted" || st === "completed") && (
                             <button className="btn softGreen" onClick={() => openChatForOffer(o)} disabled={busy}>
                               Open chat
                             </button>
                           )}
-
                           {st === "accepted" && (
                             <button className="btn softAmber" onClick={() => completeOfferAsRequester(o)} disabled={busy}>
                               Mark completed
                             </button>
                           )}
-
                           {(st === "pending" || st === "hold") && (
                             <button className="btn danger" onClick={() => setOfferStatusAsRequester(o, "declined")} disabled={busy}>
                               Decline
@@ -885,32 +843,40 @@ export default function ItemDetailPage() {
               )}
             </section>
           ) : null}
-
-          {/* Spacer for bottom bar */}
-          <div style={{ height: 84 }} />
         </main>
       )}
 
-      {/* Bottom action bar */}
+      {/* ✅ ACTION BAR ABOVE GLOBAL NAV */}
       {!loading && item && (
-        <div className="bottomBar">
+        <div className="actionBar" style={{ bottom: bottomOffset as any }}>
           <div className="barInner">
             <button className={`cta ${primaryCTA.disabled ? "disabled" : ""}`} onClick={primaryCTA.onClick} disabled={primaryCTA.disabled || busy}>
               {busy ? "Working…" : primaryCTA.label}
             </button>
 
             {postType === "give" ? (
-              <button
-                className={`cta ghost ${(!mineInterested || interestAccepted || interestReserved || isMinePost) ? "disabled" : ""}`}
-                onClick={withdrawInterest}
-                disabled={busy || !mineInterested || interestAccepted || interestReserved || isMinePost}
-                title={interestAccepted || interestReserved ? "Cannot withdraw after acceptance/reserved" : "Withdraw request"}
-              >
-                Withdraw
-              </button>
+              <>
+                {interestAccepted && !isMinePost ? (
+                  <button className="cta ghost" onClick={confirmPickupAndChat} disabled={busy}>
+                    Confirm pickup & chat
+                  </button>
+                ) : (
+                  <button
+                    className={`cta ghost ${(!mineInterested || interestAccepted || interestReserved || isMinePost) ? "disabled" : ""}`}
+                    onClick={withdrawInterest}
+                    disabled={busy || !mineInterested || interestAccepted || interestReserved || isMinePost}
+                  >
+                    Withdraw
+                  </button>
+                )}
+              </>
             ) : (
               <>
-                {myOffer?.id ? (
+                {isMinePost ? (
+                  <button className="cta ghost" onClick={() => router.push("/messages")} disabled={busy}>
+                    Messages
+                  </button>
+                ) : myOffer?.id ? (
                   myOfferAccepted ? (
                     <button className="cta ghost" onClick={() => openChatForOffer(myOffer)} disabled={busy}>
                       Start chat
@@ -931,7 +897,7 @@ export default function ItemDetailPage() {
         </div>
       )}
 
-      {/* GIVE: Interest modal */}
+      {/* GIVE modal */}
       {postType === "give" && showInterestModal && (
         <div className="modal" onClick={() => setShowInterestModal(false)}>
           <div className="modalInner" onClick={(e) => e.stopPropagation()}>
@@ -964,11 +930,7 @@ export default function ItemDetailPage() {
 
             <div className="field">
               <label>Optional note</label>
-              <textarea
-                value={interestNote}
-                onChange={(e) => setInterestNote(e.target.value)}
-                placeholder="Example: I can meet at the library after 3pm."
-              />
+              <textarea value={interestNote} onChange={(e) => setInterestNote(e.target.value)} placeholder="Example: I can meet at the library after 3pm." />
             </div>
 
             <div className="modalActions">
@@ -983,7 +945,7 @@ export default function ItemDetailPage() {
         </div>
       )}
 
-      {/* REQUEST: Offer modal */}
+      {/* REQUEST modal */}
       {postType === "request" && showOfferModal && (
         <div className="modal" onClick={() => setShowOfferModal(false)}>
           <div className="modalInner" onClick={(e) => e.stopPropagation()}>
@@ -1008,11 +970,7 @@ export default function ItemDetailPage() {
 
             <div className="field">
               <label>Optional note</label>
-              <textarea
-                value={offerNote}
-                onChange={(e) => setOfferNote(e.target.value)}
-                placeholder="Example: I can drive after 5pm. I have room for 2 bags."
-              />
+              <textarea value={offerNote} onChange={(e) => setOfferNote(e.target.value)} placeholder="Example: I can drive after 5pm. I have room for 2 bags." />
             </div>
 
             <div className="modalActions">
@@ -1042,12 +1000,7 @@ export default function ItemDetailPage() {
               <button className="btn ghost" onClick={() => setConfirm(null)}>
                 Cancel
               </button>
-              <button
-                className={`btn ${confirm.danger ? "danger" : "softGreen"}`}
-                onClick={async () => {
-                  await confirm.onYes();
-                }}
-              >
+              <button className={`btn ${confirm.danger ? "danger" : "softGreen"}`} onClick={confirm.onYes}>
                 {confirm.actionLabel}
               </button>
             </div>
@@ -1072,14 +1025,19 @@ export default function ItemDetailPage() {
       )}
 
       {/* Toast */}
-      {toast && <div className={`toast ${toast.kind === "err" ? "toastErr" : "toastOk"}`}>{toast.kind === "err" ? "⚠ " : "✓ "}{toast.msg}</div>}
+      {toast && (
+        <div className={`toast ${toast.kind === "err" ? "toastErr" : "toastOk"}`}>
+          {toast.kind === "err" ? "⚠ " : "✓ "}
+          {toast.msg}
+        </div>
+      )}
 
       <style jsx>{`
         .page {
           min-height: 100vh;
           background: #f7f7f8;
           color: #111827;
-          padding: 14px 14px 110px;
+          padding: 14px 14px 0;
         }
 
         .top {
@@ -1128,7 +1086,6 @@ export default function ItemDetailPage() {
           align-items: center;
           gap: 8px;
         }
-
         .navChip {
           border-radius: 999px;
           border: 1px solid #e5e7eb;
@@ -1167,10 +1124,6 @@ export default function ItemDetailPage() {
           margin-top: 8px;
         }
 
-        .titleLeft {
-          min-width: 0;
-        }
-
         .h1 {
           margin: 0;
           font-size: 32px;
@@ -1185,6 +1138,26 @@ export default function ItemDetailPage() {
           font-weight: 900;
           color: #374151;
           overflow-wrap: anywhere;
+        }
+
+        .metaLine {
+          margin-top: 10px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          align-items: center;
+          color: #374151;
+          font-weight: 800;
+        }
+        .metaKey {
+          opacity: 0.7;
+          font-weight: 900;
+        }
+        .metaVal {
+          font-weight: 900;
+        }
+        .dot {
+          opacity: 0.35;
         }
 
         .typePill {
@@ -1205,28 +1178,6 @@ export default function ItemDetailPage() {
           border-color: rgba(34, 197, 94, 0.3);
           background: rgba(34, 197, 94, 0.10);
           color: #166534;
-        }
-
-        .chips {
-          margin-top: 12px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 10px;
-        }
-
-        .chip {
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          padding: 8px 10px;
-          border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #111827;
-          font-size: 13px;
-          font-weight: 900;
-          white-space: nowrap;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
         }
 
         .muted {
@@ -1454,17 +1405,19 @@ export default function ItemDetailPage() {
           background: #fff;
         }
 
-        /* Bottom bar */
-        .bottomBar {
+        /* ✅ Action bar ABOVE global nav */
+        .actionBar {
           position: fixed;
           left: 0;
           right: 0;
-          bottom: 0;
-          z-index: 60;
-          padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
-          background: rgba(247, 247, 248, 0.88);
+          z-index: 70;
+          padding: 10px 14px;
+          background: rgba(247, 247, 248, 0.92);
           backdrop-filter: blur(14px);
-          border-top: 1px solid rgba(17, 24, 39, 0.08);
+          border: 1px solid rgba(17, 24, 39, 0.08);
+          border-left: none;
+          border-right: none;
+          box-shadow: 0 -18px 50px rgba(0, 0, 0, 0.10);
         }
 
         .barInner {
@@ -1476,7 +1429,7 @@ export default function ItemDetailPage() {
         }
 
         .cta {
-          height: 46px;
+          height: 48px;
           border-radius: 16px;
           border: 1px solid rgba(16, 185, 129, 0.35);
           background: rgba(16, 185, 129, 0.14);
@@ -1506,7 +1459,7 @@ export default function ItemDetailPage() {
           align-items: center;
           justify-content: center;
           padding: 16px;
-          z-index: 80;
+          z-index: 90;
         }
 
         .modalInner {
@@ -1638,7 +1591,6 @@ export default function ItemDetailPage() {
           position: fixed;
           left: 50%;
           transform: translateX(-50%);
-          bottom: 88px;
           z-index: 10000;
           border-radius: 14px;
           padding: 10px 12px;
@@ -1655,6 +1607,13 @@ export default function ItemDetailPage() {
         }
         .toastErr {
           border-color: rgba(185, 28, 28, 0.28);
+        }
+
+        @media (max-width: 820px) {
+          /* hide top-right quick buttons on smaller screens; bottom nav already exists */
+          .navRight {
+            display: none;
+          }
         }
 
         @media (max-width: 520px) {
