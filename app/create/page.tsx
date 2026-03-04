@@ -64,6 +64,8 @@ export default function CreatePage() {
   const router = useRouter();
   const formRef = useRef<HTMLFormElement | null>(null);
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   // auth
   const [authLoading, setAuthLoading] = useState(true);
   const [email, setEmail] = useState<string | null>(null);
@@ -329,34 +331,332 @@ export default function CreatePage() {
     }
   }
 
+  // ---------- UI helpers ----------
+  const ui = {
+    page: {
+      minHeight: "100vh",
+      background: "#f7f7f8", // ChatGPT-ish
+      color: "#0f172a",
+      padding: 20,
+      paddingBottom: NAV_APPROX_HEIGHT + STICKY_BAR_HEIGHT + 24,
+    } as React.CSSProperties,
+    shell: {
+      maxWidth: 740,
+      margin: "0 auto",
+    } as React.CSSProperties,
+    topRow: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 12,
+      marginBottom: 14,
+    } as React.CSSProperties,
+    backBtn: {
+      background: "white",
+      border: "1px solid #e5e7eb",
+      color: "#111827",
+      padding: "10px 12px",
+      borderRadius: 999,
+      cursor: "pointer",
+      fontWeight: 700,
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 8,
+      boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
+    } as React.CSSProperties,
+    pill: {
+      background: "white",
+      border: "1px solid #e5e7eb",
+      padding: "8px 10px",
+      borderRadius: 999,
+      fontSize: 12,
+      color: "#374151",
+      boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
+      whiteSpace: "nowrap",
+    } as React.CSSProperties,
+    hero: {
+      background: "white",
+      border: "1px solid #e5e7eb",
+      borderRadius: 20,
+      padding: 16,
+      boxShadow: "0 10px 30px rgba(0,0,0,0.05)",
+      overflow: "hidden",
+      position: "relative",
+    } as React.CSSProperties,
+    subtleGlow: {
+      position: "absolute",
+      inset: -80,
+      background:
+        "radial-gradient(closest-side at 30% 30%, rgba(16,185,129,0.18), transparent 55%), radial-gradient(closest-side at 80% 40%, rgba(59,130,246,0.12), transparent 55%)",
+      pointerEvents: "none",
+    } as React.CSSProperties,
+    h1: { fontSize: 22, fontWeight: 900, margin: 0 } as React.CSSProperties,
+    sub: { margin: "6px 0 0", color: "#4b5563", lineHeight: 1.35 } as React.CSSProperties,
+
+    segmentWrap: {
+      display: "flex",
+      gap: 8,
+      marginTop: 12,
+      background: "#f3f4f6",
+      border: "1px solid #e5e7eb",
+      borderRadius: 999,
+      padding: 6,
+      width: "fit-content",
+    } as React.CSSProperties,
+    segBtn: (active: boolean) =>
+      ({
+        padding: "10px 12px",
+        borderRadius: 999,
+        border: "none",
+        cursor: "pointer",
+        fontWeight: 850,
+        background: active ? "white" : "transparent",
+        color: "#111827",
+        boxShadow: active ? "0 6px 16px rgba(0,0,0,0.08)" : "none",
+      }) as React.CSSProperties,
+
+    convo: {
+      marginTop: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 12,
+    } as React.CSSProperties,
+
+    bubbleRow: (side: "left" | "right") =>
+      ({
+        display: "flex",
+        justifyContent: side === "left" ? "flex-start" : "flex-end",
+      }) as React.CSSProperties,
+
+    bubble: (side: "left" | "right") =>
+      ({
+        maxWidth: 640,
+        width: "100%",
+        background: side === "left" ? "white" : "#111827",
+        color: side === "left" ? "#111827" : "white",
+        border: side === "left" ? "1px solid #e5e7eb" : "1px solid #111827",
+        borderRadius: 18,
+        padding: 14,
+        boxShadow: side === "left" ? "0 10px 24px rgba(0,0,0,0.06)" : "0 10px 24px rgba(0,0,0,0.12)",
+      }) as React.CSSProperties,
+
+    miniTitle: { fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 8 } as React.CSSProperties,
+
+    input: {
+      width: "100%",
+      padding: "12px 12px",
+      borderRadius: 14,
+      border: "1px solid #e5e7eb",
+      background: "#fbfbfc",
+      outline: "none",
+      fontSize: 14,
+      color: "#111827",
+    } as React.CSSProperties,
+
+    textarea: {
+      width: "100%",
+      padding: "12px 12px",
+      borderRadius: 14,
+      border: "1px solid #e5e7eb",
+      background: "#fbfbfc",
+      outline: "none",
+      fontSize: 14,
+      color: "#111827",
+      resize: "vertical",
+      lineHeight: 1.35,
+    } as React.CSSProperties,
+
+    row2: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10,
+    } as React.CSSProperties,
+
+    select: {
+      width: "100%",
+      padding: "12px 12px",
+      borderRadius: 14,
+      border: "1px solid #e5e7eb",
+      background: "white",
+      outline: "none",
+      fontSize: 14,
+      color: "#111827",
+      cursor: "pointer",
+    } as React.CSSProperties,
+
+    drop: (active: boolean, has: boolean) =>
+      ({
+        borderRadius: 18,
+        border: `1.5px dashed ${active ? "#10b981" : "#d1d5db"}`,
+        background: has ? "white" : active ? "rgba(16,185,129,0.07)" : "#fbfbfc",
+        padding: 14,
+        display: "flex",
+        gap: 12,
+        alignItems: "center",
+        justifyContent: "space-between",
+        transition: "all 150ms ease",
+      }) as React.CSSProperties,
+
+    ghostBtn: {
+      background: "white",
+      border: "1px solid #e5e7eb",
+      color: "#111827",
+      padding: "10px 12px",
+      borderRadius: 14,
+      cursor: "pointer",
+      fontWeight: 850,
+      boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
+    } as React.CSSProperties,
+
+    dangerBtn: {
+      background: "white",
+      border: "1px solid #fecaca",
+      color: "#b91c1c",
+      padding: "10px 12px",
+      borderRadius: 14,
+      cursor: "pointer",
+      fontWeight: 900,
+    } as React.CSSProperties,
+
+    optionsBtn: {
+      width: "100%",
+      background: "white",
+      border: "1px solid #e5e7eb",
+      borderRadius: 18,
+      padding: 14,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      cursor: "pointer",
+      fontWeight: 900,
+      color: "#111827",
+      boxShadow: "0 10px 24px rgba(0,0,0,0.05)",
+    } as React.CSSProperties,
+
+    optionsPanel: {
+      marginTop: 10,
+      background: "white",
+      border: "1px solid #e5e7eb",
+      borderRadius: 18,
+      padding: 14,
+      boxShadow: "0 10px 24px rgba(0,0,0,0.05)",
+      display: "flex",
+      flexDirection: "column",
+      gap: 12,
+    } as React.CSSProperties,
+
+    msg: {
+      marginTop: 8,
+      background: "#fff1f2",
+      border: "1px solid #fecdd3",
+      color: "#9f1239",
+      padding: "10px 12px",
+      borderRadius: 14,
+      fontWeight: 800,
+    } as React.CSSProperties,
+
+    sticky: {
+      position: "fixed",
+      left: 0,
+      right: 0,
+      bottom: NAV_APPROX_HEIGHT,
+      height: STICKY_BAR_HEIGHT,
+      background: "rgba(247,247,248,0.85)",
+      borderTop: "1px solid #e5e7eb",
+      backdropFilter: "blur(10px)",
+      zIndex: 50,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: "10px 16px",
+    } as React.CSSProperties,
+
+    stickyInner: {
+      width: "100%",
+      maxWidth: 740,
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+    } as React.CSSProperties,
+
+    hint: { flex: 1, fontSize: 12, color: "#6b7280" } as React.CSSProperties,
+
+    primary: (disabled: boolean) =>
+      ({
+        border: "none",
+        borderRadius: 16,
+        padding: "12px 16px",
+        minWidth: 160,
+        fontWeight: 950,
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.55 : 1,
+        color: "white",
+        background: disabled ? "#94a3b8" : "#10b981",
+        boxShadow: disabled ? "none" : "0 14px 30px rgba(16,185,129,0.25)",
+        transform: disabled ? "none" : "translateY(0px)",
+        transition: "transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease",
+      }) as React.CSSProperties,
+  };
+
+  function handleFilePicked(f: File | null) {
+    setMsg(null);
+    if (!f) {
+      setFile(null);
+      return;
+    }
+    if (f.size > MAX_PHOTO_MB * 1024 * 1024) {
+      setFile(null);
+      setMsg(`Photo too large (max ${MAX_PHOTO_MB}MB).`);
+      return;
+    }
+    if (!isAllowedImage(f)) {
+      setFile(null);
+      setMsg("Upload JPG, PNG, or WEBP (HEIC not supported yet).");
+      return;
+    }
+    setFile(f);
+  }
+
   // Loading
   if (authLoading || profileLoading) {
-    return <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>Loading…</div>;
+    return (
+      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#111827", padding: 24 }}>
+        <div style={{ maxWidth: 740, margin: "0 auto" }}>
+          <div
+            style={{
+              background: "white",
+              border: "1px solid #e5e7eb",
+              borderRadius: 18,
+              padding: 16,
+              boxShadow: "0 10px 24px rgba(0,0,0,0.05)",
+              fontWeight: 900,
+            }}
+          >
+            Loading…
+          </div>
+        </div>
+      </div>
+    );
   }
 
   // Not allowed
   if (!isAllowed || !userId) {
     return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>Post on ScholarSwap</h1>
-        <p style={{ opacity: 0.85, marginTop: 0 }}>
-          You must log in with your <b>@ashland.edu</b> email to post.
-        </p>
-        <button
-          onClick={() => router.push("/me")}
-          style={{
-            marginTop: 16,
-            background: "#0b0b0b",
-            color: "white",
-            border: "1px solid #333",
-            padding: "10px 14px",
-            borderRadius: 10,
-            cursor: "pointer",
-            fontWeight: 900,
-          }}
-        >
-          Go to Account
-        </button>
+      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#111827", padding: 24 }}>
+        <div style={{ maxWidth: 740, margin: "0 auto" }}>
+          <div style={{ ...ui.hero }}>
+            <div style={ui.subtleGlow} />
+            <div style={{ position: "relative" }}>
+              <h1 style={{ fontSize: 24, fontWeight: 950, margin: 0 }}>Post on ScholarSwap</h1>
+              <p style={{ color: "#4b5563", marginTop: 8, marginBottom: 0 }}>
+                You must log in with your <b>@ashland.edu</b> email to post.
+              </p>
+              <button onClick={() => router.push("/me")} style={{ ...ui.ghostBtn, marginTop: 14 }}>
+                Go to Account
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -364,421 +664,422 @@ export default function CreatePage() {
   // Profile incomplete
   if (!profileComplete) {
     return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-        <h1 style={{ fontSize: 34, fontWeight: 900, marginBottom: 10 }}>Complete Profile</h1>
-        <p style={{ opacity: 0.85, marginTop: 0 }}>
-          Before posting, add your <b>full name</b> and choose <b>Student/Faculty</b>.
-        </p>
-        <button
-          onClick={() => router.push("/me")}
-          style={{
-            marginTop: 16,
-            background: "#16a34a",
-            color: "white",
-            border: "none",
-            padding: "12px 16px",
-            borderRadius: 12,
-            cursor: "pointer",
-            fontWeight: 900,
-          }}
-        >
-          Go to Profile Setup
-        </button>
+      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#111827", padding: 24 }}>
+        <div style={{ maxWidth: 740, margin: "0 auto" }}>
+          <div style={{ ...ui.hero }}>
+            <div style={ui.subtleGlow} />
+            <div style={{ position: "relative" }}>
+              <h1 style={{ fontSize: 26, fontWeight: 950, margin: 0 }}>Complete Profile</h1>
+              <p style={{ color: "#4b5563", marginTop: 8, marginBottom: 0 }}>
+                Before posting, add your <b>full name</b> and choose <b>Student/Faculty</b>.
+              </p>
+              <button
+                onClick={() => router.push("/me")}
+                style={{
+                  marginTop: 14,
+                  border: "none",
+                  background: "#10b981",
+                  color: "white",
+                  padding: "12px 14px",
+                  borderRadius: 14,
+                  cursor: "pointer",
+                  fontWeight: 950,
+                  boxShadow: "0 14px 30px rgba(16,185,129,0.25)",
+                }}
+              >
+                Go to Profile Setup
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
 
-  const pageTitle = postType === "give" ? "List an item" : "Post a request";
+  const pageTitle = postType === "give" ? "Create a post" : "Create a post";
   const helperText =
     postType === "give"
-      ? "Add a clear title + photo. People respond faster when they see it."
-      : "Ask for what you need. Keep it specific — you’ll connect in Messages.";
-
+      ? "Make it feel effortless: title + photo first. Everything else is optional."
+      : "Be specific. The right person will find you in the feed and message you.";
   const primaryButton = postType === "give" ? "Post item" : "Post request";
 
   const stickyHint =
     cleanTitle.length < 3
-      ? "Write a clearer title to post."
+      ? "Add a clear title (3+ characters)."
       : postType === "give"
         ? file
-          ? "Photo added — ready to post."
-          : "Add a photo to post."
+          ? "Looks good — you’re ready to post."
+          : "Photo required for Give posts."
         : "Ready to post.";
 
-  // styles: flatter, less boxed
-  const card: React.CSSProperties = {
-    border: "1px solid #1f2937",
-    borderRadius: 14,
-    background: "#0b0b0b",
-    padding: 14,
-  };
+  // “creative” part: feels like a guided conversation, not a rigid form.
+  const leftPrompt1 = postType === "give" ? "What are you giving away?" : "What do you need?";
+  const leftPrompt2 = postType === "give" ? "Any details someone should know?" : "Add context so people can help fast.";
+  const leftPrompt3 = postType === "give" ? "Add a photo (required for Give)." : "Pick the type + timeframe (helps matching).";
 
-  const input: React.CSSProperties = {
-    padding: 12,
-    borderRadius: 12,
-    border: "1px solid #2b2b2b",
-    background: "#111",
-    color: "white",
-    outline: "none",
-  };
-
-  const label: React.CSSProperties = { fontWeight: 900, marginBottom: 8 };
+  // photo drag state (UI only)
+  const [dragOver, setDragOver] = useState(false);
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "black",
-        color: "white",
-        padding: 24,
-        paddingBottom: NAV_APPROX_HEIGHT + STICKY_BAR_HEIGHT + 24,
-      }}
-    >
-      <button
-        onClick={() => router.push("/feed")}
-        style={{
-          marginBottom: 16,
-          background: "transparent",
-          color: "white",
-          border: "1px solid #333",
-          padding: "8px 12px",
-          borderRadius: 10,
-          cursor: "pointer",
-        }}
-      >
-        ← Back to feed
-      </button>
-
-      <h1 style={{ fontSize: 30, fontWeight: 950, marginBottom: 6 }}>{pageTitle}</h1>
-      <p style={{ marginTop: 0, marginBottom: 14, opacity: 0.8, maxWidth: 520 }}>{helperText}</p>
-
-      {/* Toggle */}
-      <div style={{ maxWidth: 520, marginBottom: 12, display: "flex", gap: 10 }}>
-        <button
-          type="button"
-          onClick={() => setPostType("give")}
-          style={{
-            flex: 1,
-            padding: "12px 14px",
-            borderRadius: 14,
-            border: "1px solid #1f2937",
-            background: postType === "give" ? "#052e16" : "#0b0b0b",
-            color: "white",
-            fontWeight: 950,
-            cursor: "pointer",
-          }}
-        >
-          Give
-        </button>
-        <button
-          type="button"
-          onClick={() => setPostType("request")}
-          style={{
-            flex: 1,
-            padding: "12px 14px",
-            borderRadius: 14,
-            border: "1px solid #1f2937",
-            background: postType === "request" ? "#052e16" : "#0b0b0b",
-            color: "white",
-            fontWeight: 950,
-            cursor: "pointer",
-          }}
-        >
-          Request
-        </button>
-      </div>
-
-      <form
-        ref={formRef}
-        onSubmit={handleSubmit}
-        style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 520 }}
-      >
-        {/* Core fields */}
-        <div style={card}>
-          <div style={label}>Title</div>
-          <input
-            type="text"
-            placeholder={postType === "give" ? 'Example: "Bedford Handbook (good condition)"' : 'Example: "Need a ride Friday 6am"'}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            style={{ ...input, width: "100%" }}
-          />
-
-          <div style={{ ...label, marginTop: 12 }}>Details (optional)</div>
-          <textarea
-            placeholder={postType === "give" ? "What’s included? any flaws?" : "Where/when/how urgent? Keep it simple."}
-            rows={4}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            style={{ ...input, width: "100%", resize: "vertical" }}
-          />
+    <div style={ui.page}>
+      <div style={ui.shell}>
+        <div style={ui.topRow}>
+          <button onClick={() => router.push("/feed")} style={ui.backBtn}>
+            <span aria-hidden>←</span> Back
+          </button>
+          <div style={ui.pill}>
+            Posting as <b>{email}</b>
+          </div>
         </div>
 
-        {/* Give: photo REQUIRED */}
-        {postType === "give" && (
-          <div style={card}>
-            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-              <div style={label}>Photo <span style={{ color: "#22c55e" }}>(required)</span></div>
-              <div style={{ fontSize: 12, opacity: 0.75 }}>JPG / PNG / WEBP • max {MAX_PHOTO_MB}MB</div>
-            </div>
+        <div style={ui.hero}>
+          <div style={ui.subtleGlow} />
+          <div style={{ position: "relative" }}>
+            <h1 style={ui.h1}>{pageTitle}</h1>
+            <p style={ui.sub}>{helperText}</p>
 
-            {previewUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={previewUrl}
-                alt="Preview"
-                style={{
-                  width: "100%",
-                  height: 240,
-                  objectFit: "cover",
-                  borderRadius: 12,
-                  border: "1px solid #1f2937",
-                }}
-              />
-            ) : (
-              <div
-                style={{
-                  width: "100%",
-                  height: 240,
-                  borderRadius: 12,
-                  border: "1px dashed #374151",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "#9ca3af",
-                }}
-              >
-                Add a photo to post
-              </div>
-            )}
-
-            <input
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              onChange={(e) => {
-                setMsg(null);
-                const f = e.target.files?.[0] ?? null;
-                if (!f) return setFile(null);
-
-                if (f.size > MAX_PHOTO_MB * 1024 * 1024) {
-                  setFile(null);
-                  setMsg(`Photo too large (max ${MAX_PHOTO_MB}MB).`);
-                  return;
-                }
-                if (!isAllowedImage(f)) {
-                  setFile(null);
-                  setMsg("Upload JPG, PNG, or WEBP (HEIC not supported yet).");
-                  return;
-                }
-                setFile(f);
-              }}
-              style={{ marginTop: 12 }}
-            />
-
-            {file && (
-              <button
-                type="button"
-                onClick={() => setFile(null)}
-                style={{
-                  marginTop: 10,
-                  background: "transparent",
-                  color: "white",
-                  border: "1px solid #374151",
-                  padding: "8px 12px",
-                  borderRadius: 12,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
-              >
-                Remove photo
+            <div style={ui.segmentWrap}>
+              <button type="button" onClick={() => setPostType("give")} style={ui.segBtn(postType === "give")}>
+                Give
               </button>
-            )}
+              <button type="button" onClick={() => setPostType("request")} style={ui.segBtn(postType === "request")}>
+                Request
+              </button>
+            </div>
           </div>
-        )}
+        </div>
 
-        {/* Give: essentials */}
-        {postType === "give" && (
-          <div style={card}>
-            <div style={label}>Category</div>
-            <select
-              value={giveCategory}
-              onChange={(e) => setGiveCategory(e.target.value as GiveCategory)}
-              style={{ ...input, width: "100%", background: "#0b0b0b" }}
-            >
-              <option value="books">Books</option>
-              <option value="notes">Notes</option>
-              <option value="electronics">Electronics</option>
-              <option value="furniture">Furniture</option>
-              <option value="clothing">Clothing</option>
-              <option value="sport equipment">Sport equipment</option>
-              <option value="stationary item">Stationary item</option>
-              <option value="health & beauty">Health & Beauty</option>
-              <option value="home & kitchen">Home & Kitchen</option>
-              <option value="musical instruments">Musical Instruments</option>
-              <option value="jeweleries">Jeweleries</option>
-              <option value="art pieces">Art pieces</option>
-              <option value="ride">Ride</option>
-              <option value="others">Others</option>
-            </select>
-
-            <div style={{ ...label, marginTop: 12 }}>Pickup spot</div>
-            <select
-              value={pickupLocation}
-              onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
-              style={{ ...input, width: "100%", background: "#0b0b0b" }}
-            >
-              <option value="College Quad">College Quad</option>
-              <option value="Safety Service Office">Safety Service Office</option>
-              <option value="Dining Hall">Dining Hall</option>
-            </select>
+        <form ref={formRef} onSubmit={handleSubmit} style={ui.convo}>
+          {/* “assistant” prompt: Title */}
+          <div style={ui.bubbleRow("left")}>
+            <div style={ui.bubble("left")}>
+              <div style={ui.miniTitle}>ScholarSwap</div>
+              <div style={{ fontWeight: 900 }}>{leftPrompt1}</div>
+              <div style={{ marginTop: 10 }}>
+                <input
+                  type="text"
+                  placeholder={
+                    postType === "give"
+                      ? 'Example: "Bedford Handbook (good condition)"'
+                      : 'Example: "Need a ride Friday 6am to CLE"'
+                  }
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  style={ui.input}
+                />
+              </div>
+              <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
+                Tip: lead with the noun + condition + key detail (size/edition/compatibility).
+              </div>
+            </div>
           </div>
-        )}
 
-        {/* Request: essentials */}
-        {postType === "request" && (
-          <div style={card}>
-            <div style={label}>Request type</div>
-            <select
-              value={requestGroup}
-              onChange={(e) => setRequestGroup(e.target.value as RequestGroup)}
-              style={{ ...input, width: "100%", background: "#0b0b0b" }}
-            >
-              <option value="logistics">Logistics (ride / moving / borrow)</option>
-              <option value="services">Services (tutoring / tech help / haircut)</option>
-              <option value="urgent">Urgent (charger / calculator / meds)</option>
-              <option value="collaboration">Collaboration (club / hackathon / project)</option>
-            </select>
-
-            <div style={{ ...label, marginTop: 12 }}>Timeframe</div>
-            <select
-              value={requestTimeframe}
-              onChange={(e) => setRequestTimeframe(e.target.value as RequestTimeframe)}
-              style={{ ...input, width: "100%", background: "#0b0b0b" }}
-            >
-              <option value="today">Today</option>
-              <option value="this_week">This week</option>
-              <option value="flexible">Flexible</option>
-            </select>
-
-            <div style={{ ...label, marginTop: 12 }}>Location (optional)</div>
-            <input
-              type="text"
-              placeholder='Example: "Dorm A" or "Near dining hall"'
-              value={requestLocation}
-              onChange={(e) => setRequestLocation(e.target.value)}
-              style={{ ...input, width: "100%" }}
-            />
+          {/* “assistant” prompt: Details */}
+          <div style={ui.bubbleRow("left")}>
+            <div style={ui.bubble("left")}>
+              <div style={ui.miniTitle}>ScholarSwap</div>
+              <div style={{ fontWeight: 900 }}>{leftPrompt2}</div>
+              <div style={{ marginTop: 10 }}>
+                <textarea
+                  placeholder={postType === "give" ? "What’s included? any flaws?" : "Where/when/how urgent? Keep it simple."}
+                  rows={4}
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  style={ui.textarea}
+                />
+              </div>
+            </div>
           </div>
-        )}
 
-        {/* Collapsible options: reduces perceived work */}
-        <div style={card}>
-          <button
-            type="button"
-            onClick={() => setShowOptions((v) => !v)}
-            style={{
-              width: "100%",
-              textAlign: "left",
-              background: "transparent",
-              border: "none",
-              color: "white",
-              cursor: "pointer",
-              fontWeight: 950,
-              padding: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <span>More options</span>
-            <span style={{ opacity: 0.7 }}>{showOptions ? "−" : "+"}</span>
-          </button>
+          {/* Give: photo REQUIRED (creative drop zone + preview) */}
+          {postType === "give" && (
+            <div style={ui.bubbleRow("left")}>
+              <div style={ui.bubble("left")}>
+                <div style={ui.miniTitle}>ScholarSwap</div>
+                <div style={{ fontWeight: 900 }}>{leftPrompt3}</div>
 
-          {showOptions && (
-            <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
-              <div>
-                <div style={label}>Hide my name</div>
-                <button
-                  type="button"
-                  onClick={() => setHideName((v) => !v)}
-                  style={{
-                    width: "100%",
-                    padding: "12px 12px",
-                    borderRadius: 12,
-                    border: "1px solid #374151",
-                    background: hideName ? "#052e16" : "transparent",
-                    color: "white",
-                    fontWeight: 950,
-                    cursor: "pointer",
+                <div
+                  style={{ marginTop: 10 }}
+                  onDragEnter={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOver(true);
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOver(true);
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOver(false);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOver(false);
+                    const dropped = e.dataTransfer.files?.[0] ?? null;
+                    if (dropped) handleFilePicked(dropped);
                   }}
                 >
-                  {hideName ? "Hidden: ON" : "Hidden: OFF"}
-                </button>
-                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
-                  When ON, your name won’t show on the feed.
-                </div>
-              </div>
+                  <div style={ui.drop(dragOver, !!previewUrl)}>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <div
+                        style={{
+                          width: 42,
+                          height: 42,
+                          borderRadius: 14,
+                          background: "rgba(16,185,129,0.12)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontWeight: 950,
+                          color: "#065f46",
+                        }}
+                      >
+                        ⬆
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: 950 }}>
+                          {previewUrl ? "Photo attached" : dragOver ? "Drop it here" : "Drag & drop a photo"}
+                        </div>
+                        <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+                          JPG / PNG / WEBP • max {MAX_PHOTO_MB}MB
+                        </div>
+                      </div>
+                    </div>
 
-              <div>
-                <div style={label}>Automatically close after</div>
-                <select
-                  value={expireChoice}
-                  onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
-                  style={{ ...input, width: "100%", background: "#0b0b0b" }}
-                >
-                  {postType === "request" && <option value="urgent24">Urgent (24 hours)</option>}
-                  <option value="7">7 days</option>
-                  <option value="14">14 days</option>
-                  <option value="30">30 days</option>
-                  <option value="never">Until I cancel</option>
-                </select>
-                {postType === "request" && expireChoice === "urgent24" && (
-                  <div style={{ fontSize: 12, opacity: 0.75, marginTop: 8 }}>
-                    Urgent requests expire in 24 hours unless you repost.
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={(e) => handleFilePicked(e.target.files?.[0] ?? null)}
+                        style={{ display: "none" }}
+                      />
+                      <button type="button" style={ui.ghostBtn} onClick={() => fileInputRef.current?.click()}>
+                        {previewUrl ? "Change" : "Choose"}
+                      </button>
+                      {file && (
+                        <button type="button" style={ui.dangerBtn} onClick={() => setFile(null)}>
+                          Remove
+                        </button>
+                      )}
+                    </div>
                   </div>
-                )}
+
+                  {previewUrl && (
+                    <div style={{ marginTop: 12 }}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={previewUrl}
+                        alt="Preview"
+                        style={{
+                          width: "100%",
+                          height: 260,
+                          objectFit: "cover",
+                          borderRadius: 18,
+                          border: "1px solid #e5e7eb",
+                          boxShadow: "0 16px 40px rgba(0,0,0,0.08)",
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
-        </div>
 
-        {msg && <p style={{ color: "#f87171", margin: 0 }}>{msg}</p>}
-      </form>
+          {/* Essentials: presented like “quick choices”, not “form sections” */}
+          {postType === "give" && (
+            <div style={ui.bubbleRow("left")}>
+              <div style={ui.bubble("left")}>
+                <div style={ui.miniTitle}>ScholarSwap</div>
+                <div style={{ fontWeight: 900 }}>Quick choices (helps people find it)</div>
+
+                <div style={{ marginTop: 10, ...ui.row2 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Category</div>
+                    <select
+                      value={giveCategory}
+                      onChange={(e) => setGiveCategory(e.target.value as GiveCategory)}
+                      style={ui.select}
+                    >
+                      <option value="books">Books</option>
+                      <option value="notes">Notes</option>
+                      <option value="electronics">Electronics</option>
+                      <option value="furniture">Furniture</option>
+                      <option value="clothing">Clothing</option>
+                      <option value="sport equipment">Sport equipment</option>
+                      <option value="stationary item">Stationary item</option>
+                      <option value="health & beauty">Health & Beauty</option>
+                      <option value="home & kitchen">Home & Kitchen</option>
+                      <option value="musical instruments">Musical Instruments</option>
+                      <option value="jeweleries">Jeweleries</option>
+                      <option value="art pieces">Art pieces</option>
+                      <option value="ride">Ride</option>
+                      <option value="others">Others</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Pickup spot</div>
+                    <select
+                      value={pickupLocation}
+                      onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
+                      style={ui.select}
+                    >
+                      <option value="College Quad">College Quad</option>
+                      <option value="Safety Service Office">Safety Service Office</option>
+                      <option value="Dining Hall">Dining Hall</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {postType === "request" && (
+            <div style={ui.bubbleRow("left")}>
+              <div style={ui.bubble("left")}>
+                <div style={ui.miniTitle}>ScholarSwap</div>
+                <div style={{ fontWeight: 900 }}>{leftPrompt3}</div>
+
+                <div style={{ marginTop: 10, ...ui.row2 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Request type</div>
+                    <select
+                      value={requestGroup}
+                      onChange={(e) => setRequestGroup(e.target.value as RequestGroup)}
+                      style={ui.select}
+                    >
+                      <option value="logistics">Logistics (ride / moving / borrow)</option>
+                      <option value="services">Services (tutoring / tech help / haircut)</option>
+                      <option value="urgent">Urgent (charger / calculator / meds)</option>
+                      <option value="collaboration">Collaboration (club / hackathon / project)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Timeframe</div>
+                    <select
+                      value={requestTimeframe}
+                      onChange={(e) => setRequestTimeframe(e.target.value as RequestTimeframe)}
+                      style={ui.select}
+                    >
+                      <option value="today">Today</option>
+                      <option value="this_week">This week</option>
+                      <option value="flexible">Flexible</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Location (optional)</div>
+                  <input
+                    type="text"
+                    placeholder='Example: "Dorm A" or "Near dining hall"'
+                    value={requestLocation}
+                    onChange={(e) => setRequestLocation(e.target.value)}
+                    style={ui.input}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* More options as a “drawer-like” card */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowOptions((v) => !v)}
+              style={ui.optionsBtn}
+              aria-expanded={showOptions}
+            >
+              <span>More options</span>
+              <span style={{ color: "#6b7280" }}>{showOptions ? "—" : "+"}</span>
+            </button>
+
+            {showOptions && (
+              <div style={ui.optionsPanel}>
+                <div style={ui.row2}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Hide my name</div>
+                    <button
+                      type="button"
+                      onClick={() => setHideName((v) => !v)}
+                      style={{
+                        width: "100%",
+                        padding: "12px 12px",
+                        borderRadius: 14,
+                        border: "1px solid #e5e7eb",
+                        background: hideName ? "rgba(16,185,129,0.10)" : "#fbfbfc",
+                        color: "#111827",
+                        fontWeight: 950,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {hideName ? "Hidden: ON" : "Hidden: OFF"}
+                    </button>
+                    <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
+                      When ON, your name won’t show on the feed.
+                    </div>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>
+                      Automatically close after
+                    </div>
+                    <select
+                      value={expireChoice}
+                      onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
+                      style={ui.select}
+                    >
+                      {postType === "request" && <option value="urgent24">Urgent (24 hours)</option>}
+                      <option value="7">7 days</option>
+                      <option value="14">14 days</option>
+                      <option value="30">30 days</option>
+                      <option value="never">Until I cancel</option>
+                    </select>
+                    {postType === "request" && expireChoice === "urgent24" && (
+                      <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
+                        Urgent requests expire in 24 hours unless you repost.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {msg && <div style={ui.msg}>{msg}</div>}
+        </form>
+      </div>
 
       {/* Sticky submit */}
-      <div
-        style={{
-          position: "fixed",
-          left: 0,
-          right: 0,
-          bottom: NAV_APPROX_HEIGHT,
-          height: STICKY_BAR_HEIGHT,
-          background: "rgba(0,0,0,0.92)",
-          borderTop: "1px solid #1f2937",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "10px 16px",
-          zIndex: 50,
-          backdropFilter: "blur(8px)",
-        }}
-      >
-        <div style={{ width: "100%", maxWidth: 520, display: "flex", gap: 10, alignItems: "center" }}>
-          <div style={{ flex: 1, fontSize: 12, opacity: 0.75 }}>{stickyHint}</div>
+      <div style={ui.sticky}>
+        <div style={ui.stickyInner}>
+          <div style={ui.hint}>{stickyHint}</div>
 
           <button
             onClick={() => formRef.current?.requestSubmit()}
             disabled={saving || !canSubmit}
-            style={{
-              background: saving || !canSubmit ? "#14532d" : "#16a34a",
-              padding: "12px 16px",
-              borderRadius: 14,
-              border: "none",
-              color: "white",
-              cursor: saving || !canSubmit ? "not-allowed" : "pointer",
-              opacity: saving || !canSubmit ? 0.6 : 1,
-              fontWeight: 950,
-              minWidth: 150,
+            style={ui.primary(saving || !canSubmit)}
+            onMouseDown={(e) => {
+              // tiny “press” feel without changing logic
+              if (saving || !canSubmit) return;
+              (e.currentTarget as HTMLButtonElement).style.transform = "translateY(1px)";
+              (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 10px 22px rgba(16,185,129,0.20)";
+            }}
+            onMouseUp={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0px)";
+              (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 14px 30px rgba(16,185,129,0.25)";
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0px)";
+              (e.currentTarget as HTMLButtonElement).style.boxShadow =
+                saving || !canSubmit ? "none" : "0 14px 30px rgba(16,185,129,0.25)";
             }}
           >
             {saving ? "Posting…" : primaryButton}
