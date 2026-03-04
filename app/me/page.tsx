@@ -2,279 +2,628 @@
 
 export const dynamic = "force-dynamic";
 
-import Image from "next/image";
-import { Outfit } from "next/font/google";
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
 
-const brandFont = Outfit({
-  subsets: ["latin"],
-  weight: ["500", "600", "700"],
-});
+/* ---------------- Types ---------------- */
 
-type OwnerRole = "student" | "faculty" | null;
-type PostType = "give" | "request" | null;
+type ProfileRow = {
+  id: string;
+  email: string | null;
+  full_name: string | null;
+  user_role: string | null;
+  created_at?: string;
+};
 
-type FeedRowFromView = {
+type MyItemRow = {
   id: string;
   title: string;
   description: string | null;
-  category: string | null;
   status: string | null;
   created_at: string;
   photo_url: string | null;
-  expires_at: string | null;
-  interest_count: number;
-  owner_role?: OwnerRole;
-
-  post_type?: PostType;
-  request_group?: string | null;
-  request_timeframe?: string | null;
-  request_location?: string | null;
+  post_type?: "give" | "request" | null;
 };
 
-type ItemMeta = {
-  id: string;
-  owner_id: string | null;
-  is_claimed: boolean | null;
-  post_type: PostType;
-  request_group: string | null;
-  request_timeframe: string | null;
-  request_location: string | null;
-  status?: string | null;
+type MyRequestRow = {
+  item_id: string;
+  created_at?: string | null;
+  items: {
+    id: string;
+    title: string;
+    photo_url: string | null;
+    status: string | null;
+    post_type?: "give" | "request" | null;
+  } | null;
 };
 
-type FeedRow = FeedRowFromView & {
-  owner_id?: string | null;
-  is_claimed?: boolean | null;
-  post_type?: PostType;
+type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
+
+type IncomingInterestRow = {
+  id: string; // interests.id
+  item_id: string;
+  user_id: string;
+  created_at: string | null;
+  owner_seen_at: string | null;
+  owner_dismissed_at: string | null;
+  status: string | null;
+
+  items: {
+    id: string;
+    title: string;
+    photo_url: string | null;
+    status: string | null;
+    owner_id: string;
+    post_type?: "give" | "request" | null;
+  } | null;
+
+  requester: {
+    full_name: string | null;
+    email: string | null;
+    user_role: string | null;
+  } | null;
 };
 
-function formatShortDate(d: string) {
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return "";
-  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+type IncomingOfferRow = {
+  id: string; // request_offers.id
+  request_id: string;
+  helper_id: string;
+  status: OfferStatus | null;
+  availability: string | null;
+  note: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+
+  request_item: {
+    id: string;
+    title: string;
+    status: string | null;
+    owner_id: string;
+    post_type?: "give" | "request" | null;
+  } | null;
+
+  helper: {
+    full_name: string | null;
+    email: string | null;
+    user_role: string | null;
+  } | null;
+};
+
+type MyOfferRow = {
+  id: string; // request_offers.id
+  request_id: string;
+  helper_id: string;
+  status: OfferStatus | null;
+  availability: string | null;
+  note: string | null;
+  created_at: string | null;
+
+  request_item: {
+    id: string;
+    title: string;
+    status: string | null;
+    post_type?: "give" | "request" | null;
+  } | null;
+};
+
+/* ---------------- Helpers ---------------- */
+
+function isAshlandEmail(email: string) {
+  return email.trim().toLowerCase().endsWith("@ashland.edu");
+}
+
+function fmtWhen(ts: string | null | undefined) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString();
 }
 
 function normStatus(s: string | null | undefined) {
-  return (s ?? "available").toLowerCase().trim();
+  return (s ?? "").trim().toLowerCase();
 }
 
-function statusLabel(status: string | null, postType: PostType) {
-  if ((postType ?? "give") === "request") return "REQUEST";
-  const st = normStatus(status);
-  if (st === "claimed") return "CLAIMED";
-  return "AVAILABLE";
+function niceNameFromProfile(
+  p: { full_name: string | null; email: string | null } | null,
+  fallbackLabel: string
+) {
+  const name = (p?.full_name ?? "").trim();
+  if (name) return name;
+  const email = (p?.email ?? "").trim();
+  if (email) return email.split("@")[0];
+  return fallbackLabel;
 }
 
-function statusHint(status: string | null, postType: PostType) {
-  if ((postType ?? "give") === "request") return "";
-  const st = normStatus(status);
-  if (st === "reserved") return "In talks • Waitlist open";
-  return "";
-}
+/* ---------------- Page ---------------- */
 
-function requestGroupLabel(g: string | null | undefined) {
-  const k = (g ?? "").toLowerCase();
-  if (k === "logistics") return "Logistics";
-  if (k === "services") return "Services";
-  if (k === "urgent") return "Urgent";
-  if (k === "collaboration") return "Collaboration";
-  return "Request";
-}
-
-function requestTimeframeLabel(t: string | null | undefined) {
-  const k = (t ?? "").toLowerCase();
-  if (k === "today") return "Today";
-  if (k === "this_week") return "This week";
-  if (k === "flexible") return "Flexible";
-  return "";
-}
-
-export default function FeedPage() {
+export default function AccountPage() {
   const router = useRouter();
 
-  const [items, setItems] = useState<FeedRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-
+  // auth (single source of truth)
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
-  const [savingId, setSavingId] = useState<string | null>(null);
+  // page state
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
-  // image modal
-  const [openImg, setOpenImg] = useState<string | null>(null);
-  const [openTitle, setOpenTitle] = useState<string>("");
+  // logged-out UI
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
 
-  // UI state
-  const [tab, setTab] = useState<"items" | "requests">("items");
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<"newest" | "popular">("newest");
-  const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
-  const [categoryFilter, setCategoryFilter] = useState<string>("all");
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  // data
+  const [profile, setProfile] = useState<ProfileRow | null>(null);
+  const [myItems, setMyItems] = useState<MyItemRow[]>([]);
+  const [myRequests, setMyRequests] = useState<MyRequestRow[]>([]);
+  const [myOffers, setMyOffers] = useState<MyOfferRow[]>([]);
+  const [incomingInterests, setIncomingInterests] = useState<IncomingInterestRow[]>([]);
+  const [incomingOffers, setIncomingOffers] = useState<IncomingOfferRow[]>([]);
+  const [incomingLoading, setIncomingLoading] = useState(false);
 
-  // search delight
-  const [searchFocused, setSearchFocused] = useState(false);
-  const [searchPulse, setSearchPulse] = useState(false);
-  const searchRef = useRef<HTMLInputElement | null>(null);
+  // tabs
+  const [tab, setTab] = useState<"listings" | "my_activity" | "requests" | "history">("listings");
 
-  async function syncAuth() {
-    const { data } = await supabase.auth.getSession();
-    const session = data.session;
-    setUserId(session?.user?.id ?? null);
-    setUserEmail(session?.user?.email ?? null);
+  // lightweight “counts”
+  const [stats, setStats] = useState<{ listed: number; interests: number; offers: number; chats: number }>({
+    listed: 0,
+    interests: 0,
+    offers: 0,
+    chats: 0,
+  });
+
+  // drawer
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // action states
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingNotifId, setDeletingNotifId] = useState<string | null>(null);
+  const [offerActingId, setOfferActingId] = useState<string | null>(null);
+  const [myOfferActingId, setMyOfferActingId] = useState<string | null>(null);
+
+  // non-blocking UI feedback (replaces alert/confirm)
+  const [toast, setToast] = useState<{ msg: string; kind?: "ok" | "err" } | null>(null);
+  const toastTimer = useRef<any>(null);
+
+  const [confirm, setConfirm] = useState<null | { title: string; body: string; actionLabel: string; onYes: () => Promise<void> }>(null);
+
+  function showToast(msg: string, kind: "ok" | "err" = "ok") {
+    setToast({ msg, kind });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2400);
   }
 
-  const isAshland = !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-  const isLoggedIn = !!userId && !!userEmail && isAshland;
+  // “offers seen” local marker so the red dot clears after user opens Requests.
+  const [offersSeenAt, setOffersSeenAt] = useState<string | null>(null);
 
-  async function loadMyInterestMap(uid: string, itemIds: string[]) {
-    if (itemIds.length === 0) return;
-    const { data, error } = await supabase.from("interests").select("item_id").eq("user_id", uid).in("item_id", itemIds);
-    if (error) return;
+  const isLoggedIn = useMemo(() => {
+    return !!userId && !!userEmail && isAshlandEmail(userEmail);
+  }, [userId, userEmail]);
 
-    const map: Record<string, boolean> = {};
-    for (const r of (data as any[]) || []) map[String(r.item_id)] = true;
-    setMyInterested(map);
-  }
+  const unseenIncomingInterestCount = useMemo(() => {
+    return incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at).length;
+  }, [incomingInterests]);
 
-  async function loadOwnerMeta(itemIds: string[]) {
-    if (itemIds.length === 0) return new Map<string, ItemMeta>();
+  const unseenIncomingOfferCount = useMemo(() => {
+    // only treat “pending offers created after last seen” as “new”
+    const pending = incomingOffers.filter((o) => (o.status ?? "pending") === "pending");
+    if (!offersSeenAt) return pending.length;
+    const seenT = new Date(offersSeenAt).getTime();
+    return pending.filter((o) => {
+      const t = o.created_at ? new Date(o.created_at).getTime() : 0;
+      return t > seenT;
+    }).length;
+  }, [incomingOffers, offersSeenAt]);
+
+  const hasNewRequests = unseenIncomingInterestCount + unseenIncomingOfferCount > 0;
+
+  const activeListings = useMemo(() => myItems.filter((x) => normStatus(x.status) !== "claimed"), [myItems]);
+  const completedListings = useMemo(() => myItems.filter((x) => normStatus(x.status) === "claimed"), [myItems]);
+
+  const displayName =
+    (profile?.full_name ?? "").trim() || (userEmail ? userEmail.split("@")[0] : "") || "Account";
+  const roleLabel = (profile?.user_role ?? "").trim() || "member";
+
+  /* ---------------- Loaders (NO auth.getSession inside these) ---------------- */
+
+  async function loadProfile(uid: string) {
     const { data, error } = await supabase
-      .from("items")
-      .select("id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,status")
-      .in("id", itemIds);
-
-    if (error) return new Map<string, ItemMeta>();
-
-    const m = new Map<string, ItemMeta>();
-    for (const r of (data as ItemMeta[]) || []) m.set(r.id, r);
-    return m;
-  }
-
-  async function loadFeed() {
-    setLoading(true);
-    setErr(null);
-
-    const { data, error } = await supabase
-      .from("v_feed_items")
-      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
-      .order("created_at", { ascending: false });
+      .from("profiles")
+      .select("id,email,full_name,user_role,created_at")
+      .eq("id", uid)
+      .maybeSingle()
+      .returns<ProfileRow>();
 
     if (error) {
-      setItems([]);
-      setMyInterested({});
-      setErr(error.message || "Error loading feed.");
-      setLoading(false);
+      console.warn("profile load:", error.message);
+      setProfile(null);
+      return;
+    }
+    setProfile(data ?? null);
+  }
+
+  async function loadMyListings(uid: string) {
+    const { data, error } = await supabase
+      .from("items")
+      .select("id,title,description,status,created_at,photo_url,post_type")
+      .eq("owner_id", uid)
+      .order("created_at", { ascending: false })
+      .returns<MyItemRow[]>();
+
+    if (error) {
+      setMyItems([]);
+      setErr(error.message);
+      return [];
+    }
+
+    setMyItems(data ?? []);
+    return data ?? [];
+  }
+
+  async function loadMyRequests(uid: string) {
+    const { data, error } = await supabase
+      .from("interests")
+      .select("item_id,created_at,items:items(id,title,photo_url,status,post_type)")
+      .eq("user_id", uid)
+      .order("created_at", { ascending: false })
+      .returns<MyRequestRow[]>();
+
+    if (error) {
+      console.warn("my requests load:", error.message);
+      setMyRequests([]);
+      return [];
+    }
+
+    setMyRequests(data ?? []);
+    return data ?? [];
+  }
+
+  async function loadMyOffers(uid: string) {
+    const { data, error } = await supabase
+      .from("request_offers")
+      .select("id,request_id,helper_id,status,availability,note,created_at,request_item:items(id,title,status,post_type)")
+      .eq("helper_id", uid)
+      .order("created_at", { ascending: false })
+      .returns<MyOfferRow[]>();
+
+    if (error) {
+      console.warn("my offers load:", error.message);
+      setMyOffers([]);
+      return [];
+    }
+
+    setMyOffers((data as MyOfferRow[]) ?? []);
+    return (data as MyOfferRow[]) ?? [];
+  }
+
+  // ✅ collapsed into ONE query using joins (no owned-items fetch, no extra item/profile fetch)
+  async function loadIncomingInterests(uid: string) {
+    const { data, error } = await supabase
+      .from("interests")
+      .select(
+        `
+        id,item_id,user_id,created_at,owner_seen_at,owner_dismissed_at,status,
+        items:items(id,title,photo_url,status,owner_id,post_type),
+        requester:profiles!interests_user_id_fkey(full_name,email,user_role)
+      `
+      )
+      .is("owner_dismissed_at", null)
+      .eq("items.owner_id", uid)
+      .order("created_at", { ascending: false })
+      .returns<IncomingInterestRow[]>();
+
+    if (error) {
+      console.warn("incoming interests load:", error.message);
+      setIncomingInterests([]);
       return;
     }
 
-    const rows = ((data as FeedRowFromView[]) || []).map((x) => ({ ...x })) as FeedRow[];
-    const ids = rows.map((x) => x.id);
-    const meta = await loadOwnerMeta(ids);
+    setIncomingInterests(data ?? []);
+  }
 
-    const merged = rows.map((x) => {
-      const m = meta.get(x.id);
-      return {
-        ...x,
-        owner_id: m?.owner_id ?? null,
-        is_claimed: m?.is_claimed ?? null,
-        post_type: (m?.post_type ?? x.post_type ?? "give") as PostType,
-        request_group: m?.request_group ?? x.request_group ?? null,
-        request_timeframe: m?.request_timeframe ?? x.request_timeframe ?? null,
-        request_location: m?.request_location ?? x.request_location ?? null,
-        status: (m?.status ?? x.status ?? "available") as any,
-      };
+  // ✅ collapsed into ONE query using joins
+  async function loadIncomingOffers(uid: string) {
+    const { data, error } = await supabase
+      .from("request_offers")
+      .select(
+        `
+        id,request_id,helper_id,status,availability,note,created_at,updated_at,
+        request_item:items(id,title,status,owner_id,post_type),
+        helper:profiles!request_offers_helper_id_fkey(full_name,email,user_role)
+      `
+      )
+      .eq("request_item.owner_id", uid)
+      .eq("request_item.post_type", "request")
+      .order("created_at", { ascending: false })
+      .returns<IncomingOfferRow[]>();
+
+    if (error) {
+      console.warn("incoming offers load:", error.message);
+      setIncomingOffers([]);
+      return;
+    }
+
+    setIncomingOffers(data ?? []);
+  }
+
+  async function loadIncomingAll(uid: string) {
+    setIncomingLoading(true);
+    try {
+      await Promise.all([loadIncomingInterests(uid), loadIncomingOffers(uid)]);
+    } finally {
+      setIncomingLoading(false);
+    }
+  }
+
+  async function markIncomingSeen() {
+    // only for interests (offers don’t have owner_seen_at in your schema)
+    const unseen = incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at);
+    if (unseen.length === 0) return;
+
+    const nowIso = new Date().toISOString();
+    const ids = unseen.map((r) => r.id).filter(Boolean);
+
+    const { error } = await supabase.from("interests").update({ owner_seen_at: nowIso }).in("id", ids);
+    if (error) return;
+
+    setIncomingInterests((prev) =>
+      prev.map((r) => (r.owner_seen_at || r.owner_dismissed_at ? r : { ...r, owner_seen_at: nowIso }))
+    );
+  }
+
+  /* ---------------- Actions (non-blocking confirm/toast) ---------------- */
+
+  async function deleteListing(id: string) {
+    setConfirm({
+      title: "Delete post?",
+      body: "This cannot be undone.",
+      actionLabel: "Delete",
+      onYes: async () => {
+        setConfirm(null);
+        setDeletingId(id);
+        const { error } = await supabase.from("items").delete().eq("id", id);
+        setDeletingId(null);
+
+        if (error) return showToast(error.message, "err");
+        setMyItems((prev) => prev.filter((x) => x.id !== id));
+        setStats((s) => ({ ...s, listed: Math.max(0, s.listed - 1) }));
+        showToast("Deleted.");
+      },
     });
+  }
 
-    // Hide ONLY completed/claimed
-    const visible = merged.filter((x) => {
-      const st = normStatus(x.status);
-      const claimed = !!x.is_claimed || st === "claimed";
-      return !claimed;
+  async function deleteNotification(r: IncomingInterestRow) {
+    setConfirm({
+      title: "Delete request?",
+      body: "This removes it from your incoming list.",
+      actionLabel: "Delete",
+      onYes: async () => {
+        setConfirm(null);
+        setDeletingNotifId(r.id);
+        const { error } = await supabase.from("interests").delete().eq("id", r.id);
+        setDeletingNotifId(null);
+
+        if (error) return showToast(error.message, "err");
+        setIncomingInterests((prev) => prev.filter((x) => x.id !== r.id));
+        showToast("Removed.");
+      },
     });
+  }
 
-    setItems(visible);
+  async function updateOfferStatus(o: IncomingOfferRow, next: OfferStatus) {
+    setOfferActingId(o.id);
+    const { error } = await supabase.from("request_offers").update({ status: next }).eq("id", o.id);
+    setOfferActingId(null);
+    if (error) return showToast(error.message, "err");
 
-    const giveIds = visible.filter((x) => (x.post_type ?? "give") === "give").map((x) => x.id);
-    if (isLoggedIn && userId) await loadMyInterestMap(userId, giveIds);
-    else setMyInterested({});
+    setIncomingOffers((prev) => prev.map((x) => (x.id === o.id ? { ...x, status: next } : x)));
+    showToast(`Set to ${next}.`);
+  }
+
+  async function startChatWithHelper(o: IncomingOfferRow) {
+    if (!userId) return;
+    if ((o.status ?? "pending") !== "accepted") return showToast("Accept this helper first.", "err");
+    if (!o.request_item?.id) return showToast("Missing request.", "err");
+    if (!o.helper_id) return showToast("Missing helper.", "err");
+
+    try {
+      setOfferActingId(o.id);
+
+      const threadId = await ensureThread({
+        itemId: o.request_item.id,
+        ownerId: userId,
+        requesterId: o.helper_id,
+      });
+
+      await insertSystemMessage({
+        threadId,
+        senderId: userId,
+        body: "✅ Offer accepted. Use this chat to finalize details and confirm completion.",
+      });
+
+      router.push(`/messages/${threadId}`);
+    } catch (e: any) {
+      showToast(e?.message || "Could not open chat.", "err");
+    } finally {
+      setOfferActingId(null);
+    }
+  }
+
+  async function withdrawMyOffer(off: MyOfferRow) {
+    const st = (off.status ?? "pending") as OfferStatus;
+    if (st === "accepted" || st === "completed") return showToast("Cannot withdraw after acceptance/completion.", "err");
+
+    setConfirm({
+      title: "Withdraw offer?",
+      body: "This removes your offer from the request post.",
+      actionLabel: "Withdraw",
+      onYes: async () => {
+        setConfirm(null);
+        setMyOfferActingId(off.id);
+        const { error } = await supabase.from("request_offers").delete().eq("id", off.id);
+        setMyOfferActingId(null);
+
+        if (error) return showToast(error.message, "err");
+        setMyOffers((prev) => prev.filter((x) => x.id !== off.id));
+        setStats((s) => ({ ...s, offers: Math.max(0, s.offers - 1) }));
+        showToast("Offer withdrawn.");
+      },
+    });
+  }
+
+  async function startChatFromMyOffer(off: MyOfferRow) {
+    if (!userId) return;
+    const st = (off.status ?? "pending") as OfferStatus;
+    if (st !== "accepted") return showToast("Chat unlocks after acceptance.", "err");
+
+    const reqId = off.request_item?.id ?? off.request_id;
+    if (!reqId) return showToast("Missing request.", "err");
+
+    try {
+      setMyOfferActingId(off.id);
+
+      const { data, error } = await supabase.from("items").select("owner_id").eq("id", reqId).single();
+      if (error) throw new Error(error.message);
+
+      const ownerId = (data as any)?.owner_id ?? null;
+      if (!ownerId) throw new Error("Missing request owner.");
+
+      const threadId = await ensureThread({
+        itemId: reqId,
+        ownerId,
+        requesterId: userId,
+      });
+
+      await insertSystemMessage({
+        threadId,
+        senderId: userId,
+        body: "✅ Helper here. My offer was accepted — ready to finalize details.",
+      });
+
+      router.push(`/messages/${threadId}`);
+    } catch (e: any) {
+      showToast(e?.message || "Could not open chat.", "err");
+    } finally {
+      setMyOfferActingId(null);
+    }
+  }
+
+  async function signOut() {
+    await supabase.auth.signOut();
+    setDrawerOpen(false);
+    // auth listener will handle clearing state
+  }
+
+  async function handleAuth() {
+    setErr(null);
+
+    const email = authEmail.trim().toLowerCase();
+    if (!email) return setErr("Enter your email.");
+    if (!isAshlandEmail(email)) return setErr("Use your @ashland.edu email.");
+    if (authPassword.length < 6) return setErr("Password must be at least 6 characters.");
+
+    setAuthBusy(true);
+
+    try {
+      if (authMode === "signin") {
+        const { error } = await supabase.auth.signInWithPassword({ email, password: authPassword });
+        if (error) setErr(error.message);
+        return;
+      }
+
+      const { error } = await supabase.auth.signUp({ email, password: authPassword });
+      if (error) setErr(error.message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  /* ---------------- Single load pipeline ---------------- */
+
+  async function loadAllFor(uid: string, email: string) {
+    setLoading(true);
+    setErr(null);
+
+    await loadProfile(uid);
+
+    const [iRows, rRows, oRows] = await Promise.all([
+      loadMyListings(uid),
+      loadMyRequests(uid),
+      loadMyOffers(uid),
+    ]);
+
+    await loadIncomingAll(uid);
+
+    let chats = 0;
+    try {
+      const { count, error: tErr } = await supabase
+        .from("threads")
+        .select("id", { count: "exact", head: true })
+        .or(`owner_id.eq.${uid},requester_id.eq.${uid}`);
+      if (!tErr) chats = count ?? 0;
+    } catch {
+      chats = 0;
+    }
+
+    setStats({
+      listed: iRows.length,
+      interests: rRows.length,
+      offers: oRows.length,
+      chats,
+    });
 
     setLoading(false);
   }
 
-  async function onPrimaryAction(item: FeedRow) {
-    if (!isLoggedIn || !userId) {
-      router.push("/me");
-      return;
-    }
-
-    const postType = (item.post_type ?? "give") as PostType;
-
-    if (postType === "request") {
-      router.push(`/item/${item.id}`);
-      return;
-    }
-
-    const isMine = !!item.owner_id && item.owner_id === userId;
-    if (isMine) return;
-
-    const already = myInterested[item.id] === true;
-    setSavingId(item.id);
-
-    if (already) {
-      const { error } = await supabase.from("interests").delete().eq("item_id", item.id).eq("user_id", userId);
-      setSavingId(null);
-      if (error) return alert(error.message);
-
-      setMyInterested((p) => ({ ...p, [item.id]: false }));
-      setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) } : x)));
-      return;
-    }
-
-    const { error } = await supabase.from("interests").insert([{ item_id: item.id, user_id: userId }]);
-    setSavingId(null);
-
-    if (error) {
-      const msg = error.message.toLowerCase();
-      if (msg.includes("duplicate") || msg.includes("unique")) {
-        setMyInterested((p) => ({ ...p, [item.id]: true }));
-        return;
-      }
-      return alert(error.message);
-    }
-
-    setMyInterested((p) => ({ ...p, [item.id]: true }));
-    setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
+  function clearAll() {
+    setProfile(null);
+    setMyItems([]);
+    setMyRequests([]);
+    setMyOffers([]);
+    setIncomingInterests([]);
+    setIncomingOffers([]);
+    setStats({ listed: 0, interests: 0, offers: 0, chats: 0 });
+    setOffersSeenAt(null);
   }
 
-  // micro pulse while typing
   useEffect(() => {
-    if (!query) return;
-    setSearchPulse(true);
-    const t = setTimeout(() => setSearchPulse(false), 220);
-    return () => clearTimeout(t);
-  }, [query]);
-
-  // when switching tabs, don't nuke query; only hide irrelevant filters
-  useEffect(() => {
-    setFiltersOpen(false);
-    if (tab === "requests") setCategoryFilter("all"); // category only applies to items
-  }, [tab]);
-
-  useEffect(() => {
+    // ✅ ONE initial session fetch
     (async () => {
-      await syncAuth();
-      await loadFeed();
+      const { data } = await supabase.auth.getSession();
+      const s = data.session;
+      const uid = s?.user?.id ?? null;
+      const email = s?.user?.email ?? null;
+
+      setUserId(uid);
+      setUserEmail(email);
+
+      if (!uid || !email || !isAshlandEmail(email)) {
+        clearAll();
+        setLoading(false);
+        return;
+      }
+
+      await loadAllFor(uid, email);
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      syncAuth();
-      loadFeed();
+    // ✅ ONE auth listener that drives reloads
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
+      const uid = session?.user?.id ?? null;
+      const email = session?.user?.email ?? null;
+
+      setUserId(uid);
+      setUserEmail(email);
+
+      if (!uid || !email || !isAshlandEmail(email)) {
+        clearAll();
+        setLoading(false);
+        return;
+      }
+
+      await loadAllFor(uid, email);
     });
 
     return () => sub.subscription.unsubscribe();
@@ -284,1131 +633,1223 @@ export default function FeedPage() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
-        setOpenImg(null);
-        setFiltersOpen(false);
-      }
-      if (e.key === "/" && !openImg) {
-        e.preventDefault();
-        searchRef.current?.focus();
+        setDrawerOpen(false);
+        setConfirm(null);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openImg]);
+  }, []);
 
-  const categories = useMemo(() => {
-    const set = new Set<string>();
-    for (const x of items) {
-      if ((x.post_type ?? "give") !== "give") continue;
-      const c = (x.category ?? "").trim();
-      if (c) set.add(c);
-    }
-    return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
-  }, [items]);
+  /* ---------------- Render ---------------- */
 
-  const tabbed = useMemo(() => {
-    return items.filter((x) => {
-      const pt = (x.post_type ?? "give") as PostType;
-      return tab === "items" ? pt !== "request" : pt === "request";
-    });
-  }, [items, tab]);
+  if (loading) return <div style={pageWrap}>Loading…</div>;
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
+  /* ---------------- Logged Out ---------------- */
+  if (!isLoggedIn) {
+    return (
+      <div style={{ ...pageWrap, paddingBottom: 120 }}>
+        <div style={lightShell}>
+          <h1 style={{ margin: 0, fontSize: 28, fontWeight: 950 }}>Account</h1>
+          <p style={{ opacity: 0.75, marginTop: 10 }}>
+            Sign in or sign up using your <b>@ashland.edu</b> email.
+          </p>
 
-    let list = tabbed.filter((x) => {
-      const pt = (x.post_type ?? "give") as PostType;
-
-      if (roleFilter !== "all") {
-        const r = (x.owner_role ?? null) as OwnerRole;
-        if (!r) return false;
-        if (r !== roleFilter) return false;
-      }
-
-      if (tab === "items" && pt !== "request") {
-        if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
-      }
-
-      if (q) {
-        const blob =
-          [
-            x.title,
-            x.description ?? "",
-            x.category ?? "",
-            x.request_group ?? "",
-            x.request_timeframe ?? "",
-            x.request_location ?? "",
-          ]
-            .join(" ")
-            .toLowerCase() || "";
-        if (!blob.includes(q)) return false;
-      }
-
-      return true;
-    });
-
-    if (sort === "popular") {
-      list = [...list].sort((a, b) => (b.interest_count || 0) - (a.interest_count || 0));
-    } else {
-      list = [...list].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    }
-
-    return list;
-  }, [tabbed, query, sort, roleFilter, categoryFilter, tab]);
-
-  const showEmpty = !loading && !err && filtered.length === 0;
-
-  return (
-    <div className={`${brandFont.className} page`}>
-      {/* DARK STICKY HEADER (matches /me) */}
-      <header className="topbar">
-        {/* Row 1 */}
-        <div className="row brandRow">
-          <button className="iconBtn" onClick={() => router.push("/feed")} aria-label="Home" type="button">
-            <Image src="/scholarswap-logo.png" alt="ScholarSwap" width={34} height={34} priority className="logoImg" />
-          </button>
-
-          <div className="brandCenter" role="heading" aria-level={1}>
-            <span className="brandName">ScholarSwap</span>
-            <Image src="/Ashland_Eagles_logo.svg.png" alt="Ashland University" width={18} height={18} priority className="brandMark" />
+          <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button onClick={() => setAuthMode("signin")} style={pillBtnLight(authMode === "signin")}>
+              Sign in
+            </button>
+            <button onClick={() => setAuthMode("signup")} style={pillBtnLight(authMode === "signup")}>
+              Sign up
+            </button>
           </div>
 
-          <button className="plusBtn" onClick={() => router.push("/create")} aria-label="Create" type="button">
-            +
-          </button>
-        </div>
-
-        {/* Row 2 */}
-        <div className="row tabsRow">
-          <div className="seg" role="tablist" aria-label="Feed tabs">
-            <button className={`segBtn ${tab === "items" ? "active" : ""}`} onClick={() => setTab("items")} type="button">
-              Items
-            </button>
-            <button className={`segBtn ${tab === "requests" ? "active" : ""}`} onClick={() => setTab("requests")} type="button">
-              Requests
-            </button>
-            <span className={`segIndicator ${tab === "items" ? "left" : "right"}`} aria-hidden="true" />
-          </div>
-
-          <button
-            className={`ctrlBtn ${filtersOpen ? "ctrlActive" : ""}`}
-            onClick={() => setFiltersOpen((v) => !v)}
-            type="button"
-            aria-label="Open filters"
-            title="Filters"
-          >
-            <span className="ctrlIcon">≡</span>
-          </button>
-        </div>
-
-        {/* Row 3 */}
-        <div className={`row searchWrap ${searchFocused ? "searchFocused" : ""} ${searchPulse ? "searchPulse" : ""}`}>
-          <div className="searchRow">
-            <button
-              type="button"
-              className="searchIconBtn"
-              aria-label="Focus search"
-              onClick={() => searchRef.current?.focus()}
-              title="Search"
-            >
-              🔎
-            </button>
+          <div style={panelLight}>
+            <div style={{ fontWeight: 950, marginBottom: 10 }}>
+              {authMode === "signin" ? "Welcome back" : "Create an account"}
+            </div>
 
             <input
-              ref={searchRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onFocus={() => setSearchFocused(true)}
-              onBlur={() => setSearchFocused(false)}
-              placeholder={tab === "items" ? "Search items, categories…" : "Search requests, locations…"}
-              autoCorrect="off"
-              autoCapitalize="none"
-              spellCheck={false}
+              value={authEmail}
+              onChange={(e) => setAuthEmail(e.target.value)}
+              placeholder="you@ashland.edu"
+              autoComplete="email"
+              inputMode="email"
+              style={inputStyleLight}
             />
 
-            {query ? (
-              <button className="clearBtn" onClick={() => setQuery("")} type="button" aria-label="Clear search">
-                ✕
-              </button>
-            ) : (
-              <div className="kbdHint" aria-hidden="true">
-                /
-              </div>
-            )}
-          </div>
+            <input
+              value={authPassword}
+              onChange={(e) => setAuthPassword(e.target.value)}
+              placeholder="password"
+              type="password"
+              autoComplete={authMode === "signin" ? "current-password" : "new-password"}
+              style={{ ...inputStyleLight, marginTop: 10 }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleAuth();
+              }}
+            />
 
-          {tab === "items" && (
-            <div className="chipRow" aria-label="Categories">
-              {categories.map((c) => {
-                const active = categoryFilter === c;
-                const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
-                return (
-                  <button key={c} className={`chip ${active ? "chipOn" : ""}`} onClick={() => setCategoryFilter(c)} type="button">
-                    {label}
-                  </button>
-                );
-              })}
+            <button onClick={handleAuth} disabled={authBusy} style={primaryBtnLight(authBusy)}>
+              {authBusy ? "Working…" : authMode === "signin" ? "Sign in" : "Sign up"}
+            </button>
+
+            {err && <div style={{ marginTop: 10, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
+
+            <div style={{ marginTop: 12, opacity: 0.72, fontSize: 13 }}>
+              You can still browse the feed without logging in.
             </div>
-          )}
-        </div>
 
-        <div className="subline">
-          <div className="subTitle">{tab === "items" ? "Public Items" : "Public Requests"}</div>
-          <div className="count">
-            Showing <b>{filtered.length}</b>
+            <button onClick={() => router.push("/feed")} style={{ ...outlineBtnLight, width: "100%", height: 44 }}>
+              Browse feed
+            </button>
           </div>
         </div>
+      </div>
+    );
+  }
 
-        {err && <div className="err">{err}</div>}
-        {loading && <div className="loading">Loading…</div>}
-      </header>
-
-      {/* FILTER SHEET */}
-      {filtersOpen && (
-        <div className="sheetBackdrop" onClick={() => setFiltersOpen(false)} role="dialog" aria-modal="true">
-          <div className="sheet" onClick={(e) => e.stopPropagation()}>
-            <div className="sheetTop">
-              <div className="sheetTitle">Filters</div>
-              <button className="sheetClose" onClick={() => setFiltersOpen(false)} type="button" aria-label="Close">
-                ✕
-              </button>
-            </div>
-
-            <div className="sheetGrid">
-              <div className="sheetBlock">
-                <div className="sheetLabel">Sort</div>
-                <div className="togRow">
-                  <button className={`tog ${sort === "newest" ? "togOn" : ""}`} onClick={() => setSort("newest")} type="button">
-                    ↕️ Newest
-                  </button>
-                  <button className={`tog ${sort === "popular" ? "togOn" : ""}`} onClick={() => setSort("popular")} type="button">
-                    🔥 Popular
-                  </button>
-                </div>
-              </div>
-
-              <div className="sheetBlock">
-                <div className="sheetLabel">Lister</div>
-                <div className="togRow">
-                  <button className={`tog ${roleFilter === "all" ? "togOn" : ""}`} onClick={() => setRoleFilter("all")} type="button">
-                    👤 All
-                  </button>
-                  <button className={`tog ${roleFilter === "student" ? "togOn" : ""}`} onClick={() => setRoleFilter("student")} type="button">
-                    🎓 Student
-                  </button>
-                  <button className={`tog ${roleFilter === "faculty" ? "togOn" : ""}`} onClick={() => setRoleFilter("faculty")} type="button">
-                    🧑‍🏫 Faculty
-                  </button>
-                </div>
-              </div>
-
-              <div className="sheetActions">
-                <button
-                  className="ghost"
-                  type="button"
-                  onClick={() => {
-                    setSort("newest");
-                    setRoleFilter("all");
-                    setCategoryFilter("all");
-                    setQuery("");
-                  }}
-                >
-                  Reset
-                </button>
-                <button className="primary" type="button" onClick={() => setFiltersOpen(false)}>
-                  Done
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* GRID */}
-      <main className="main">
-        {showEmpty ? (
-          <div className="empty">
-            <div className="emptyTitle">No results</div>
-            <div className="emptyBody">Try clearing search, changing category, or resetting filters.</div>
-            <div className="emptyActions">
-              <button
-                className="btn btnGhost"
-                onClick={() => {
-                  setQuery("");
-                  setRoleFilter("all");
-                  setCategoryFilter("all");
-                  setSort("newest");
-                }}
-                type="button"
-              >
-                Reset
-              </button>
-              <button className="btn btnPrimary" onClick={() => router.push("/create")} type="button">
-                Create post
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="grid">
-            {filtered.map((item) => {
-              const postType = (item.post_type ?? "give") as PostType;
-              const isMine = !!userId && !!item.owner_id && item.owner_id === userId;
-              const interested = myInterested[item.id] === true;
-
-              const group = requestGroupLabel(item.request_group);
-              const tf = requestTimeframeLabel(item.request_timeframe);
-              const loc = (item.request_location ?? "").trim();
-
-              return (
-                <article key={item.id} className={`card ${postType === "request" ? "cardRequest" : ""}`}>
-                  {postType === "request" ? (
-                    <div className="reqHero">
-                      <div className="badge badgeRequest">{statusLabel(item.status, postType)}</div>
-                      <div className="reqMeta">
-                        {group}
-                        {tf ? ` • ${tf}` : ""}
-                        {loc ? ` • ${loc}` : ""}
-                      </div>
-                      <div className="title clamp2">{item.title}</div>
-                    </div>
-                  ) : (
-                    <div className="media">
-                      <div className="badge badgeItem">{statusLabel(item.status, postType)}</div>
-
-                      {item.photo_url ? (
-                        <button
-                          className="mediaBtn"
-                          onClick={() => {
-                            setOpenImg(item.photo_url!);
-                            setOpenTitle(item.title);
-                          }}
-                          aria-label="Open photo"
-                          type="button"
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={item.photo_url} alt={item.title} loading="lazy" className="mediaImg" />
-                        </button>
-                      ) : (
-                        <div className="noPhoto">No photo</div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="body">
-                    <div className="metaRow">
-                      <span className="meta">
-                        {postType === "request"
-                          ? `Type: ${group}`
-                          : item.category
-                          ? `Category: ${item.category}`
-                          : "Category: —"}
-                      </span>
-                      {item.owner_role ? <span className="meta">• {item.owner_role}</span> : null}
-                      {isMine ? <span className="mine">Yours</span> : null}
-                    </div>
-
-                    {postType !== "request" ? <div className="title">{item.title}</div> : null}
-
-                    {postType !== "request" && statusHint(item.status, postType) ? <div className="hint">{statusHint(item.status, postType)}</div> : null}
-
-                    <div className="desc clamp2">{item.description || "—"}</div>
-
-                    <div className="footerRow">
-                      {postType === "request" ? <span className="small">Tap to offer help</span> : <span className="small">{item.interest_count || 0} requests</span>}
-                      {item.expires_at ? <span className="small">Ends: {formatShortDate(item.expires_at)}</span> : null}
-                    </div>
-
-                    <div className="actions">
-                      <button className="btn btnGhost" onClick={() => router.push(`/item/${item.id}`)} type="button">
-                        View
-                      </button>
-
-                      <button
-                        className={`btn btnPrimary ${isMine ? "btnDisabled" : ""}`}
-                        onClick={() => onPrimaryAction(item)}
-                        disabled={savingId === item.id || isMine}
-                        type="button"
-                      >
-                        {isMine
-                          ? "Yours"
-                          : savingId === item.id
-                          ? "Saving…"
-                          : postType === "request"
-                          ? isLoggedIn
-                            ? "Offer help"
-                            : "Offer (login)"
-                          : isLoggedIn
-                          ? interested
-                            ? "Requested"
-                            : "Request"
-                          : "Request (login)"}
-                      </button>
-                    </div>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </main>
-
-      {/* IMAGE MODAL */}
-      {openImg && (
-        <div className="modal" onClick={() => setOpenImg(null)} role="dialog" aria-modal="true">
-          <div className="modalInner" onClick={(e) => e.stopPropagation()}>
-            <div className="modalTop">
-              <div className="modalTitle">{openTitle || "Photo"}</div>
-              <button className="modalClose" onClick={() => setOpenImg(null)} type="button">
-                ✕
-              </button>
-            </div>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={openImg} alt={openTitle || "Full photo"} className="modalImg" />
-          </div>
-        </div>
-      )}
-
-      {/* ✅ DARK THEME STYLES (matches /me) */}
+  /* ---------------- Logged In ---------------- */
+  return (
+    <div style={pageWrap}>
       <style jsx>{`
-        .page {
-          min-height: 100vh;
-          background: #000;
-          color: #fff;
+        /* Sticky reliability: never set overflow on ancestors of header */
+        .shell {
+          max-width: 1100px;
+          margin: 0 auto;
+          padding: 14px;
+          padding-bottom: calc(120px + env(safe-area-inset-bottom));
         }
 
-        /* ====== TOPBAR ====== */
-        .topbar {
+        .header {
           position: sticky;
           top: 0;
-          z-index: 30;
-          background: rgba(0, 0, 0, 0.92);
+          z-index: 50;
+          background: rgba(247, 247, 248, 0.86);
           backdrop-filter: blur(12px);
           -webkit-backdrop-filter: blur(12px);
-          border-bottom: 1px solid #0f223f;
+          border: 1px solid #e5e7eb;
+          border-radius: 18px;
+          padding: 12px;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
         }
 
-        .row {
-          padding: 10px 12px;
-        }
-
-        .brandRow {
-          display: grid;
-          grid-template-columns: 44px 1fr 44px;
-          align-items: center;
-          gap: 10px;
-          padding-top: 12px;
-          padding-bottom: 8px;
-        }
-
-        .iconBtn {
-          width: 44px;
-          height: 44px;
-          border-radius: 16px;
-          overflow: hidden;
-          background: #0b1730;
-          border: 1px solid #0f223f;
-          display: grid;
-          place-items: center;
-          padding: 0;
-          cursor: pointer;
-        }
-
-        .logoImg {
-          width: 34px;
-          height: 34px;
-          object-fit: contain;
-        }
-
-        .brandCenter {
+        .topRow {
           display: flex;
           align-items: center;
-          justify-content: center;
-          gap: 8px;
+          justify-content: space-between;
+          gap: 12px;
           min-width: 0;
         }
 
-        .brandName {
-          font-size: 22px;
-          font-weight: 900;
-          letter-spacing: -0.6px;
-          white-space: nowrap;
-          color: #fff;
-        }
-
-        .brandMark {
-          opacity: 0.9;
-          transform: translateY(1px);
-        }
-
-        .plusBtn {
-          width: 44px;
-          height: 44px;
-          border-radius: 16px;
-          border: 1px solid rgba(22, 163, 74, 0.55);
-          background: rgba(22, 163, 74, 0.14);
-          color: #fff;
-          font-size: 24px;
-          font-weight: 900;
-          display: grid;
-          place-items: center;
-          cursor: pointer;
-          transition: transform 0.12s ease, box-shadow 0.12s ease;
-          box-shadow: 0 14px 30px rgba(22, 163, 74, 0.12);
-        }
-
-        .plusBtn:active {
-          transform: translateY(1px);
-          box-shadow: 0 10px 20px rgba(22, 163, 74, 0.1);
-        }
-
-        .tabsRow {
-          display: grid;
-          grid-template-columns: 1fr 46px;
+        .identity {
+          display: flex;
+          align-items: center;
           gap: 10px;
-          align-items: center;
-          padding-top: 6px;
-          padding-bottom: 6px;
-        }
-
-        .seg {
-          position: relative;
-          height: 44px;
-          border-radius: 999px;
-          border: 1px solid #334155;
-          background: rgba(11, 23, 48, 0.6);
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          overflow: hidden;
-        }
-
-        .segBtn {
-          border: none;
-          background: transparent;
-          color: #cbd5e1;
-          font-weight: 950;
-          cursor: pointer;
-          z-index: 2;
-          transition: color 0.18s ease;
-        }
-
-        .segBtn.active {
-          color: #fff;
-        }
-
-        .segIndicator {
-          position: absolute;
-          top: 3px;
-          bottom: 3px;
-          width: calc(50% - 6px);
-          border-radius: 999px;
-          background: rgba(22, 163, 74, 0.14);
-          border: 1px solid rgba(22, 163, 74, 0.55);
-          transition: transform 0.22s ease;
-          z-index: 1;
-        }
-
-        .segIndicator.left {
-          transform: translateX(3px);
-        }
-
-        .segIndicator.right {
-          transform: translateX(calc(100% + 3px));
-        }
-
-        .ctrlBtn {
-          width: 46px;
-          height: 44px;
-          border-radius: 16px;
-          border: 1px solid #334155;
-          background: rgba(11, 23, 48, 0.7);
-          color: #fff;
-          cursor: pointer;
-          display: grid;
-          place-items: center;
-          transition: transform 0.12s ease, border-color 0.18s ease, background 0.18s ease;
-        }
-
-        .ctrlBtn:active {
-          transform: translateY(1px);
-        }
-
-        .ctrlActive {
-          border-color: rgba(22, 163, 74, 0.55);
-          background: rgba(22, 163, 74, 0.12);
-        }
-
-        .ctrlIcon {
-          font-size: 18px;
-          font-weight: 900;
-          opacity: 0.95;
-        }
-
-        .searchWrap {
-          padding-top: 6px;
-          padding-bottom: 10px;
-        }
-
-        .searchRow {
-          height: 46px;
-          border-radius: 999px;
-          border: 1px solid #334155;
-          background: rgba(11, 23, 48, 0.7);
-          display: grid;
-          grid-template-columns: 40px 1fr 40px;
-          align-items: center;
-          gap: 8px;
-          padding: 0 6px;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
-          transition: border-color 0.18s ease, box-shadow 0.18s ease;
-        }
-
-        .searchFocused .searchRow {
-          border-color: rgba(22, 163, 74, 0.55);
-          box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.12), 0 10px 24px rgba(0, 0, 0, 0.28);
-        }
-
-        .searchPulse .searchRow {
-          animation: glow 0.22s ease-out;
-        }
-
-        @keyframes glow {
-          from {
-            box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.18), 0 10px 24px rgba(0, 0, 0, 0.28);
-          }
-          to {
-            box-shadow: 0 0 0 10px rgba(22, 163, 74, 0), 0 10px 24px rgba(0, 0, 0, 0.28);
-          }
-        }
-
-        .searchIconBtn {
-          width: 40px;
-          height: 40px;
-          border-radius: 999px;
-          border: 1px solid #334155;
-          background: rgba(0, 0, 0, 0.25);
-          color: #fff;
-          cursor: pointer;
-          display: grid;
-          place-items: center;
-          transition: transform 0.12s ease;
-        }
-
-        .searchIconBtn:active {
-          transform: translateY(1px);
-        }
-
-        .searchRow input {
-          width: 100%;
           min-width: 0;
-          border: none;
-          outline: none;
-          background: transparent;
-          color: #fff;
-          font-weight: 900;
-          font-size: 14px;
         }
 
-        .searchRow input::placeholder {
-          color: #94a3b8;
-          font-weight: 800;
-        }
-
-        .clearBtn,
-        .kbdHint {
-          width: 40px;
-          height: 40px;
-          border-radius: 999px;
-          border: 1px solid #334155;
-          background: rgba(0, 0, 0, 0.25);
-          color: #fff;
-          display: grid;
-          place-items: center;
-          font-weight: 950;
-        }
-
-        .clearBtn {
-          cursor: pointer;
-          transition: transform 0.12s ease;
-        }
-
-        .clearBtn:active {
-          transform: translateY(1px);
-        }
-
-        .kbdHint {
-          color: #64748b;
-        }
-
-        .chipRow {
-          margin-top: 10px;
-          display: flex;
-          gap: 10px;
-          overflow-x: auto;
-          overflow-y: hidden;
-          padding-bottom: 6px;
-          -webkit-overflow-scrolling: touch;
-          scrollbar-width: none;
-        }
-
-        .chipRow::-webkit-scrollbar {
-          display: none;
-        }
-
-        .chip {
-          flex: 0 0 auto;
-          border-radius: 999px;
-          border: 1px solid #334155;
-          background: rgba(11, 23, 48, 0.7);
-          color: #e5e7eb;
-          padding: 10px 12px;
-          font-weight: 900;
-          cursor: pointer;
-          white-space: nowrap;
-        }
-
-        .chipOn {
-          border-color: rgba(22, 163, 74, 0.55);
-          background: rgba(22, 163, 74, 0.14);
-          color: #fff;
-        }
-
-        .subline {
-          padding: 0 12px 10px;
-          display: flex;
-          justify-content: space-between;
-          align-items: baseline;
-          gap: 12px;
-        }
-
-        .subTitle {
-          font-size: 13px;
-          font-weight: 950;
-          color: #e5e7eb;
-        }
-
-        .count {
-          font-size: 12px;
-          color: #94a3b8;
-          font-weight: 900;
-        }
-
-        .err {
-          padding: 0 12px 10px;
-          color: #f87171;
-          font-weight: 900;
-        }
-
-        .loading {
-          padding: 0 12px 10px;
-          color: #94a3b8;
-          font-weight: 800;
-        }
-
-        /* ====== FILTER SHEET ====== */
-        .sheetBackdrop {
-          position: fixed;
-          inset: 0;
-          background: rgba(0, 0, 0, 0.55);
-          z-index: 9998;
-          display: flex;
-          align-items: flex-end;
-          justify-content: center;
-          padding: 12px;
-        }
-
-        .sheet {
-          width: min(720px, 100%);
-          border-radius: 18px;
-          border: 1px solid #0f223f;
-          background: rgba(11, 23, 48, 0.92);
-          backdrop-filter: blur(14px);
-          box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
-          overflow: hidden;
-          color: #fff;
-        }
-
-        .sheetTop {
-          padding: 12px 12px 8px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          border-bottom: 1px solid #0f223f;
-        }
-
-        .sheetTitle {
-          font-weight: 950;
-          font-size: 14px;
-          color: #fff;
-        }
-
-        .sheetClose {
-          width: 38px;
-          height: 38px;
-          border-radius: 14px;
-          border: 1px solid #334155;
-          background: rgba(0, 0, 0, 0.25);
-          color: #fff;
-          cursor: pointer;
-          font-weight: 950;
-        }
-
-        .sheetGrid {
-          padding: 12px;
-          display: grid;
-          gap: 12px;
-        }
-
-        .sheetBlock {
-          border: 1px solid #0f223f;
-          background: rgba(0, 0, 0, 0.22);
-          border-radius: 16px;
-          padding: 12px;
-        }
-
-        .sheetLabel {
-          font-size: 12px;
-          font-weight: 950;
-          color: #94a3b8;
-          margin-bottom: 10px;
-        }
-
-        .togRow {
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-        }
-
-        .tog {
-          border-radius: 999px;
-          border: 1px solid #334155;
-          background: rgba(0, 0, 0, 0.25);
-          color: #e5e7eb;
-          padding: 10px 12px;
-          font-weight: 900;
-          cursor: pointer;
-        }
-
-        .togOn {
-          border-color: rgba(22, 163, 74, 0.55);
-          background: rgba(22, 163, 74, 0.14);
-          color: #fff;
-        }
-
-        .sheetActions {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 10px;
-        }
-
-        .ghost {
-          height: 44px;
-          border-radius: 14px;
-          border: 1px solid #334155;
-          background: rgba(0, 0, 0, 0.25);
-          color: #fff;
-          font-weight: 950;
-          cursor: pointer;
-        }
-
-        .primary {
-          height: 44px;
-          border-radius: 14px;
-          border: 1px solid rgba(22, 163, 74, 0.55);
-          background: rgba(22, 163, 74, 0.18);
-          color: #fff;
-          font-weight: 950;
-          cursor: pointer;
-          box-shadow: 0 14px 30px rgba(22, 163, 74, 0.12);
-        }
-
-        /* ====== GRID ====== */
-        .main {
-          padding: 14px 12px 96px;
-        }
-
-        .grid {
-          display: grid;
-          grid-template-columns: 1fr;
-          gap: 14px;
-        }
-
-        @media (min-width: 720px) {
-          .main {
-            padding: 16px 16px 96px;
-            max-width: 1100px;
-            margin: 0 auto;
-          }
-          .grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 16px;
-          }
-        }
-
-        .card {
-          background: #0b1730;
-          border-radius: 18px;
-          border: 1px solid #0f223f;
-          overflow: hidden;
-          box-shadow: 0 14px 30px rgba(0, 0, 0, 0.35);
-        }
-
-        .cardRequest {
-          border: 1px solid rgba(22, 163, 74, 0.35);
-        }
-
-        .media {
-          position: relative;
-          height: 210px;
-          background: #020617;
-        }
-
-        .mediaBtn {
-          width: 100%;
-          height: 100%;
-          padding: 0;
-          border: none;
-          background: transparent;
-          cursor: pointer;
-        }
-
-        .mediaImg {
-          width: 100%;
-          height: 100%;
-          object-fit: cover;
-          display: block;
-        }
-
-        .noPhoto {
-          width: 100%;
-          height: 100%;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          color: #94a3b8;
-          font-weight: 800;
-          border: 1px dashed #334155;
-          margin: 10px;
-          border-radius: 14px;
-        }
-
-        .reqHero {
-          position: relative;
-          height: 210px;
-          padding: 16px;
-          display: flex;
-          flex-direction: column;
-          justify-content: flex-end;
-          background: rgba(22, 163, 74, 0.08);
-        }
-
-        .badge {
-          position: absolute;
-          top: 12px;
-          left: 12px;
-          padding: 6px 10px;
-          border-radius: 999px;
-          font-size: 12px;
-          font-weight: 900;
-          border: 1px solid rgba(22, 163, 74, 0.35);
-          background: rgba(22, 163, 74, 0.12);
-          color: #fff;
-        }
-
-        .reqMeta {
-          font-size: 13px;
-          font-weight: 900;
-          color: #cbd5e1;
-          margin-bottom: 8px;
-        }
-
-        .body {
-          padding: 14px;
-        }
-
-        .metaRow {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          align-items: center;
-        }
-
-        .meta {
-          font-size: 12px;
-          color: #94a3b8;
-          font-weight: 800;
-        }
-
-        .mine {
-          font-size: 12px;
-          padding: 4px 8px;
-          border-radius: 999px;
-          border: 1px solid #334155;
-          background: rgba(0, 0, 0, 0.25);
-          color: #fff;
-          font-weight: 900;
-        }
-
-        .title {
-          margin-top: 8px;
+        .nameLine {
           font-size: 18px;
           font-weight: 950;
-          letter-spacing: -0.2px;
-          color: #fff;
-        }
-
-        .hint {
-          margin-top: 8px;
-          font-size: 12px;
-          font-weight: 900;
-          color: rgba(34, 197, 94, 0.95);
-        }
-
-        .desc {
-          margin-top: 10px;
-          color: #cbd5e1;
-          font-size: 14px;
-          min-height: 40px;
-        }
-
-        .footerRow {
-          margin-top: 10px;
-          display: flex;
-          justify-content: space-between;
-          gap: 10px;
-          color: #94a3b8;
-          font-weight: 900;
-          font-size: 12px;
-        }
-
-        .actions {
-          margin-top: 12px;
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 10px;
-        }
-
-        .btn {
-          width: 100%;
-          padding: 10px 12px;
-          border-radius: 14px;
-          cursor: pointer;
-          font-weight: 950;
-          border: 1px solid #334155;
-          transition: transform 0.12s ease, box-shadow 0.12s ease;
-        }
-
-        .btn:active {
-          transform: translateY(1px);
-        }
-
-        .btnGhost {
-          background: rgba(0, 0, 0, 0.25);
-          color: #fff;
-        }
-
-        .btnPrimary {
-          border: 1px solid rgba(22, 163, 74, 0.55);
-          background: rgba(22, 163, 74, 0.18);
-          color: #fff;
-          box-shadow: 0 14px 30px rgba(22, 163, 74, 0.12);
-        }
-
-        .btnDisabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-          background: rgba(0, 0, 0, 0.25);
-          border: 1px solid #334155;
-          color: #94a3b8;
-          box-shadow: none;
-        }
-
-        .clamp2 {
-          display: -webkit-box;
-          -webkit-line-clamp: 2;
-          -webkit-box-orient: vertical;
-          overflow: hidden;
-        }
-
-        /* ====== EMPTY ====== */
-        .empty {
-          border: 1px solid #0f223f;
-          background: #0b1730;
-          border-radius: 18px;
-          padding: 16px;
-        }
-        .emptyTitle {
-          font-weight: 950;
-          font-size: 16px;
-        }
-        .emptyBody {
-          margin-top: 6px;
-          color: #cbd5e1;
-          opacity: 0.9;
-        }
-        .emptyActions {
-          margin-top: 12px;
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 10px;
-        }
-
-        /* ====== MODAL ====== */
-        .modal {
-          position: fixed;
-          inset: 0;
-          background: rgba(0, 0, 0, 0.7);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 20px;
-          z-index: 9999;
-        }
-
-        .modalInner {
-          width: min(1000px, 95vw);
-          max-height: 90vh;
-          background: #0b1730;
-          border: 1px solid #0f223f;
-          border-radius: 16px;
-          overflow: hidden;
-          box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
-        }
-
-        .modalTop {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 10px 12px;
-          border-bottom: 1px solid #0f223f;
-        }
-
-        .modalTitle {
-          font-weight: 950;
+          line-height: 1.1;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
-          color: #fff;
         }
 
-        .modalClose {
-          background: rgba(0, 0, 0, 0.25);
-          color: #fff;
-          border: 1px solid #334155;
-          padding: 6px 10px;
-          border-radius: 12px;
-          cursor: pointer;
+        .subLine {
+          opacity: 0.72;
+          font-size: 12px;
+          margin-top: 2px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .tabs {
+          display: flex;
+          gap: 10px;
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          padding-top: 10px;
+          padding-bottom: 6px;
+        }
+        .tabs::-webkit-scrollbar {
+          display: none;
+        }
+
+        .statsRow {
+          display: flex;
+          gap: 12px;
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          margin-top: 6px;
+          opacity: 0.78;
+          font-size: 12px;
+          font-weight: 900;
+          padding-bottom: 2px;
+        }
+        .statsRow::-webkit-scrollbar {
+          display: none;
+        }
+
+        .content {
+          margin-top: 12px;
+        }
+
+        .reqCard {
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          border-radius: 18px;
+          padding: 14px;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.05);
+        }
+
+        .reqRow {
+          display: flex;
+          align-items: flex-start;
+          gap: 12px;
+          min-width: 0;
+          flex-wrap: wrap;
+        }
+
+        .reqMain {
+          flex: 1;
+          min-width: 0;
+        }
+
+        .reqTitle {
           font-weight: 950;
+          font-size: 16px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: #111827;
         }
 
-        .modalImg {
+        .reqMeta {
+          opacity: 0.85;
+          color: #374151;
+          font-size: 12px;
+          margin-top: 6px;
+          line-height: 1.35;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+        }
+
+        .reqActions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          justify-content: flex-start;
+          align-items: center;
           width: 100%;
-          height: auto;
-          max-height: 80vh;
-          object-fit: contain;
-          display: block;
-          background: #000;
+          margin-top: 10px;
+        }
+
+        @media (min-width: 720px) {
+          .reqActions {
+            width: auto;
+            margin-top: 0;
+            justify-content: flex-end;
+          }
+        }
+
+        .rail {
+          margin-top: 12px;
+          display: flex;
+          gap: 12px;
+          overflow-x: auto;
+          padding-bottom: 10px;
+          -webkit-overflow-scrolling: touch;
+          scroll-snap-type: x mandatory;
+        }
+        .rail::-webkit-scrollbar {
+          display: none;
+        }
+
+        .railItem {
+          scroll-snap-align: start;
+          flex: 0 0 auto;
+          width: min(320px, 86vw);
+        }
+
+        @media (min-width: 900px) {
+          .railItem {
+            width: 340px;
+          }
         }
       `}</style>
+
+      <div className="shell">
+        {/* Header */}
+        <div className="header">
+          <div className="topRow">
+            <div className="identity">
+              <div style={avatarLight} title={displayName}>
+                {displayName.slice(0, 1).toUpperCase()}
+              </div>
+
+              <div style={{ minWidth: 0 }}>
+                <div className="nameLine">{displayName}</div>
+                <div className="subLine">
+                  {roleLabel} • {userEmail}
+                </div>
+              </div>
+            </div>
+
+            <button onClick={() => setDrawerOpen(true)} style={iconBtnLight} aria-label="Open menu" title="Menu">
+              ☰
+            </button>
+          </div>
+
+          {err && <div style={{ marginTop: 10, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
+
+          <div className="tabs">
+            <button onClick={() => setTab("listings")} style={tabPillLight(tab === "listings")}>
+              Listings
+            </button>
+
+            <button onClick={() => setTab("my_activity")} style={tabPillLight(tab === "my_activity")}>
+              My activity
+            </button>
+
+            <button
+              onClick={() => {
+                // ✅ instant UI
+                setTab("requests");
+
+                // ✅ offers “seen” marker so dot clears
+                setOffersSeenAt(new Date().toISOString());
+
+                // ✅ mark seen in background (no await)
+                void markIncomingSeen();
+              }}
+              style={tabPillLight(tab === "requests")}
+            >
+              Requests
+              {hasNewRequests && <span style={dotLight} aria-label="New requests" title="New requests" />}
+            </button>
+
+            <button onClick={() => setTab("history")} style={tabPillLight(tab === "history")}>
+              History
+            </button>
+          </div>
+
+          <div className="statsRow">
+            <span>Listed: {stats.listed}</span>
+            <span>Interests: {stats.interests}</span>
+            <span>Offers: {stats.offers}</span>
+            <span>Chats: {stats.chats}</span>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="content">
+          {tab === "listings" && (
+            <>
+              <div style={sectionHintLight}>Your active posts (give + requests). Completed (claimed) posts live in History.</div>
+
+              {activeListings.length === 0 ? (
+                <EmptyBoxLight title="No active listings." body="List something or post a request to start exchanging.">
+                  <button onClick={() => router.push("/create")} style={outlineBtnLight}>
+                    ＋ Create post
+                  </button>
+                </EmptyBoxLight>
+              ) : (
+                <div className="rail">
+                  {activeListings.map((item) => (
+                    <div className="railItem" key={item.id}>
+                      <ItemCardLight
+                        item={item}
+                        variant="active"
+                        onEdit={() => router.push(`/item/${item.id}/edit`)}
+                        onManage={() => router.push(`/manage/${item.id}`)}
+                        onDelete={() => deleteListing(item.id)}
+                        deleting={deletingId === item.id}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "my_activity" && (
+            <>
+              <div style={sectionHintLight}>Your activity across both flows.</div>
+
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 950, fontSize: 18, color: "#111827" }}>My interests (items I requested)</div>
+                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13, color: "#374151" }}>
+                  These are GIVE posts you requested.
+                </div>
+              </div>
+
+              {myRequests.length === 0 ? (
+                <EmptyBoxLight title="No interests yet." body="Go to the feed and request an item.">
+                  <button onClick={() => router.push("/feed")} style={outlineBtnLight}>
+                    Browse feed
+                  </button>
+                </EmptyBoxLight>
+              ) : (
+                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                  {myRequests.map((r) => {
+                    const it = r.items;
+                    return (
+                      <div key={r.item_id + (r.created_at ?? "")} className="reqCard">
+                        <div className="reqRow">
+                          <ThumbLight photoUrl={it?.photo_url ?? null} label={it?.title ?? "Item"} />
+
+                          <div className="reqMain">
+                            <div className="reqTitle">{it?.title ?? "Unknown item"}</div>
+                            <div className="reqMeta">
+                              Status: <b>{it?.status ?? "—"}</b>
+                              {r.created_at ? ` • Sent: ${fmtWhen(r.created_at)}` : ""}
+                            </div>
+                          </div>
+
+                          <div className="reqActions">
+                            <button onClick={() => router.push(`/item/${r.item_id}`)} style={{ ...outlineBtnLight, marginTop: 0 }}>
+                              View
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{ marginTop: 18 }}>
+                <div style={{ fontWeight: 950, fontSize: 18, color: "#111827" }}>My offers (help I offered)</div>
+                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13, color: "#374151" }}>
+                  REQUEST posts where you offered help. Chat unlocks only after acceptance.
+                </div>
+              </div>
+
+              {myOffers.length === 0 ? (
+                <EmptyBoxLight title="No offers yet." body="Find a request post in the feed and tap “Offer help”.">
+                  <button onClick={() => router.push("/feed")} style={outlineBtnLight}>
+                    Browse feed
+                  </button>
+                </EmptyBoxLight>
+              ) : (
+                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                  {myOffers.map((o) => {
+                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
+                    const st = (o.status ?? "pending") as OfferStatus;
+                    const acting = myOfferActingId === o.id;
+
+                    return (
+                      <div key={o.id} className="reqCard">
+                        <div className="reqRow">
+                          <div style={{ ...thumbWrapLight, width: 54, height: 54 }}>🤝</div>
+
+                          <div className="reqMain">
+                            <div className="reqTitle">
+                              Offered help on <span style={{ opacity: 0.9 }}>{title}</span>
+                            </div>
+                            <div className="reqMeta">
+                              Status: <b>{st}</b>
+                              {o.created_at ? ` • Offered: ${fmtWhen(o.created_at)}` : ""}
+                              {o.availability ? ` • Availability: ${o.availability}` : ""}
+                            </div>
+                            {o.note ? (
+                              <div style={{ marginTop: 8, opacity: 0.9, fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: "#374151" }}>
+                                {o.note}
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div className="reqActions">
+                            <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtnLight, marginTop: 0 }}>
+                              View
+                            </button>
+
+                            <button
+                              onClick={() => startChatFromMyOffer(o)}
+                              disabled={acting || st !== "accepted"}
+                              style={{
+                                ...outlineBtnLight,
+                                marginTop: 0,
+                                border: st === "accepted" ? "1px solid rgba(16,185,129,0.55)" : "1px solid #e5e7eb",
+                                background: st === "accepted" ? "rgba(16,185,129,0.10)" : "transparent",
+                                cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
+                                opacity: acting || st !== "accepted" ? 0.65 : 1,
+                              }}
+                              title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
+                            >
+                              {acting ? "Opening…" : "Start chat"}
+                            </button>
+
+                            <button
+                              onClick={() => withdrawMyOffer(o)}
+                              disabled={acting || st === "accepted" || st === "completed"}
+                              style={{
+                                ...outlineBtnLight,
+                                marginTop: 0,
+                                border: "1px solid rgba(185,28,28,0.55)",
+                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
+                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
+                                color: "#991b1b",
+                              }}
+                              title={st === "accepted" || st === "completed" ? "Cannot withdraw after acceptance/completion" : "Withdraw offer"}
+                            >
+                              {acting ? "Working…" : "Withdraw"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "requests" && (
+            <>
+              <div style={sectionHintLight}>Incoming requests for your GIVE listings + offers for your REQUEST posts.</div>
+
+              <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button
+                  onClick={() => {
+                    if (userId) void loadIncomingAll(userId);
+                  }}
+                  disabled={incomingLoading}
+                  style={{
+                    ...outlineBtnLight,
+                    marginTop: 0,
+                    cursor: incomingLoading ? "not-allowed" : "pointer",
+                    opacity: incomingLoading ? 0.8 : 1,
+                  }}
+                >
+                  {incomingLoading ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
+
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontWeight: 950, fontSize: 18, color: "#111827" }}>Incoming item requests (GIVE)</div>
+                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13, color: "#374151" }}>People who requested your items.</div>
+              </div>
+
+              {incomingInterests.length === 0 ? (
+                <EmptyBoxLight title="No incoming item requests." body="When someone requests your item, it will appear here." />
+              ) : (
+                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                  {incomingInterests.map((r) => {
+                    const itemTitle = r.items?.title?.trim() ? r.items.title : "Unknown item";
+                    const who = niceNameFromProfile(r.requester, "Ashland user");
+                    const when = fmtWhen(r.created_at);
+                    const deleting = deletingNotifId === r.id;
+
+                    return (
+                      <div key={r.id} className="reqCard">
+                        <div className="reqRow">
+                          <ThumbLight photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
+
+                          <div className="reqMain">
+                            <div className="reqTitle">
+                              {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
+                            </div>
+                            <div className="reqMeta">
+                              {when ? `Requested: ${when} • ` : ""}
+                              {r.owner_seen_at ? "Seen" : "New"}
+                              {r.status ? ` • ${r.status}` : ""}
+                            </div>
+                          </div>
+
+                          <div className="reqActions">
+                            <button onClick={() => router.push(`/manage/${r.item_id}`)} style={{ ...outlineBtnLight, marginTop: 0 }}>
+                              Open
+                            </button>
+
+                            <button
+                              onClick={() => deleteNotification(r)}
+                              disabled={deleting}
+                              style={{
+                                ...outlineBtnLight,
+                                marginTop: 0,
+                                border: "1px solid rgba(185,28,28,0.55)",
+                                cursor: deleting ? "not-allowed" : "pointer",
+                                opacity: deleting ? 0.75 : 1,
+                                color: "#991b1b",
+                              }}
+                              title="Delete request"
+                            >
+                              {deleting ? "Deleting…" : "Delete"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{ marginTop: 18 }}>
+                <div style={{ fontWeight: 950, fontSize: 18, color: "#111827" }}>Incoming help offers (REQUEST)</div>
+                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13, color: "#374151" }}>
+                  Accept one helper; hold others; decline if needed. Chat opens only after acceptance.
+                </div>
+              </div>
+
+              {incomingOffers.length === 0 ? (
+                <EmptyBoxLight title="No incoming offers." body="When someone offers help on your request post, it will appear here." />
+              ) : (
+                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                  {incomingOffers.map((o) => {
+                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
+                    const who = niceNameFromProfile(o.helper, "Ashland user");
+                    const when = fmtWhen(o.created_at);
+                    const st = (o.status ?? "pending") as OfferStatus;
+                    const acting = offerActingId === o.id;
+
+                    return (
+                      <div key={o.id} className="reqCard">
+                        <div className="reqRow">
+                          <div style={{ ...thumbWrapLight, width: 54, height: 54 }}>🤝</div>
+
+                          <div className="reqMain">
+                            <div className="reqTitle">
+                              {who} offered help on <span style={{ opacity: 0.9 }}>{title}</span>
+                            </div>
+                            <div className="reqMeta">
+                              {when ? `Offered: ${when} • ` : ""}
+                              Status: <b>{st}</b>
+                              {o.availability ? ` • Availability: ${o.availability}` : ""}
+                            </div>
+                            {o.note ? (
+                              <div style={{ marginTop: 8, opacity: 0.9, fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: "#374151" }}>
+                                {o.note}
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div className="reqActions">
+                            <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtnLight, marginTop: 0 }}>
+                              View
+                            </button>
+
+                            <button
+                              onClick={() => updateOfferStatus(o, "accepted")}
+                              disabled={acting || st === "accepted" || st === "completed"}
+                              style={{
+                                ...outlineBtnLight,
+                                marginTop: 0,
+                                border: "1px solid rgba(16,185,129,0.55)",
+                                background: "rgba(16,185,129,0.10)",
+                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
+                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
+                              }}
+                            >
+                              {acting ? "Working…" : "Accept"}
+                            </button>
+
+                            <button
+                              onClick={() => updateOfferStatus(o, "hold")}
+                              disabled={acting || st === "accepted" || st === "completed"}
+                              style={{
+                                ...outlineBtnLight,
+                                marginTop: 0,
+                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
+                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
+                              }}
+                            >
+                              Hold
+                            </button>
+
+                            <button
+                              onClick={() => updateOfferStatus(o, "declined")}
+                              disabled={acting || st === "declined" || st === "completed"}
+                              style={{
+                                ...outlineBtnLight,
+                                marginTop: 0,
+                                border: "1px solid rgba(185,28,28,0.55)",
+                                color: "#991b1b",
+                                cursor: acting || st === "declined" || st === "completed" ? "not-allowed" : "pointer",
+                                opacity: acting || st === "declined" || st === "completed" ? 0.65 : 1,
+                              }}
+                            >
+                              Decline
+                            </button>
+
+                            <button
+                              onClick={() => startChatWithHelper(o)}
+                              disabled={acting || st !== "accepted"}
+                              style={{
+                                ...outlineBtnLight,
+                                marginTop: 0,
+                                border: st === "accepted" ? "1px solid rgba(16,185,129,0.55)" : "1px solid #e5e7eb",
+                                background: st === "accepted" ? "rgba(16,185,129,0.10)" : "transparent",
+                                cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
+                                opacity: acting || st !== "accepted" ? 0.65 : 1,
+                              }}
+                              title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
+                            >
+                              {acting ? "Opening…" : "Start chat"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "history" && (
+            <>
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 950, fontSize: 20, color: "#111827" }}>Completed listings</div>
+                <div style={{ opacity: 0.75, marginTop: 6, color: "#374151" }}>
+                  These were picked up (claimed). No actions needed.
+                </div>
+              </div>
+
+              {completedListings.length === 0 ? (
+                <EmptyBoxLight title="No completed listings yet." body="When a pickup is marked, it will move here." />
+              ) : (
+                <div className="rail">
+                  {completedListings.map((item) => (
+                    <div className="railItem" key={item.id}>
+                      <ItemCardLight item={item} variant="history" />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Drawer */}
+        {drawerOpen && (
+          <div onClick={() => setDrawerOpen(false)} style={backdrop}>
+            <div onClick={(e) => e.stopPropagation()} style={drawerLight}>
+              <div style={drawerTop}>
+                <div style={{ fontWeight: 950 }}>Menu</div>
+                <button onClick={() => setDrawerOpen(false)} style={smallCloseBtnLight}>
+                  ✕
+                </button>
+              </div>
+
+              <div style={{ padding: 14, display: "grid", gap: 10 }}>
+                <button
+                  onClick={() => {
+                    setDrawerOpen(false);
+                    router.push("/messages");
+                  }}
+                  style={drawerBtnLight}
+                >
+                  Messages
+                </button>
+
+                <button
+                  onClick={() => {
+                    setDrawerOpen(false);
+                    router.push("/pickups");
+                  }}
+                  style={drawerBtnLight}
+                >
+                  My pickups
+                </button>
+
+                <button onClick={signOut} style={{ ...drawerBtnLight, border: "1px solid rgba(185,28,28,0.55)", color: "#991b1b" }}>
+                  Sign out
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Confirm */}
+        {confirm && (
+          <ConfirmModal
+            title={confirm.title}
+            body={confirm.body}
+            actionLabel={confirm.actionLabel}
+            onCancel={() => setConfirm(null)}
+            onConfirm={confirm.onYes}
+          />
+        )}
+
+        {/* Toast */}
+        {toast && <Toast msg={toast.msg} kind={toast.kind} />}
+      </div>
     </div>
   );
 }
+
+/* ---------------- Components ---------------- */
+
+function ItemCardLight({
+  item,
+  variant,
+  onEdit,
+  onManage,
+  onDelete,
+  deleting,
+}: {
+  item: MyItemRow;
+  variant: "active" | "history";
+  onEdit?: () => void;
+  onManage?: () => void;
+  onDelete?: () => void;
+  deleting?: boolean;
+}) {
+  const status = item.status ?? "—";
+  const type = (item.post_type ?? "give") as "give" | "request";
+
+  return (
+    <div style={cardLight}>
+      <div style={cardMediaWrapLight}>
+        {item.photo_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={item.photo_url} alt={item.title} style={cardImg} />
+        ) : (
+          <div style={noPhotoLight}>{type === "request" ? "Request" : "No photo"}</div>
+        )}
+      </div>
+
+      <div style={{ marginTop: 10, minHeight: 44 }}>
+        <div style={cardTitleLight}>{item.title}</div>
+        <div style={cardSubLight}>{item.description ? item.description : "—"}</div>
+      </div>
+
+      <div style={cardMetaLight}>
+        Type: <b>{type}</b> • Status: <b>{status}</b>
+      </div>
+
+      {variant === "active" ? (
+        <div style={cardActions}>
+          <button onClick={onEdit} style={cardBtnPrimaryLight}>
+            Edit
+          </button>
+          <button onClick={onManage} style={cardBtnOutlineLight}>
+            Manage
+          </button>
+          <button onClick={onDelete} disabled={!!deleting} style={cardBtnDangerLight(!!deleting)}>
+            {deleting ? "Deleting…" : "Delete"}
+          </button>
+        </div>
+      ) : (
+        <div style={{ marginTop: 10, opacity: 0.75, fontSize: 12, color: "#374151" }}>Completed ✅</div>
+      )}
+    </div>
+  );
+}
+
+function ThumbLight({ photoUrl, label }: { photoUrl: string | null; label: string }) {
+  return (
+    <div style={thumbWrapLight}>
+      {photoUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={photoUrl} alt={label} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      ) : (
+        "—"
+      )}
+    </div>
+  );
+}
+
+function EmptyBoxLight({ title, body, children }: { title: string; body: string; children?: React.ReactNode }) {
+  return (
+    <div style={{ marginTop: 14, ...panelLight }}>
+      <div style={{ fontWeight: 950, color: "#111827" }}>{title}</div>
+      <div style={{ opacity: 0.85, marginTop: 6, color: "#374151" }}>{body}</div>
+      {children ? <div style={{ marginTop: 10 }}>{children}</div> : null}
+    </div>
+  );
+}
+
+function Toast({ msg, kind = "ok" }: { msg: string; kind?: "ok" | "err" }) {
+  return (
+    <div
+      style={{
+        position: "fixed",
+        left: "50%",
+        transform: "translateX(-50%)",
+        bottom: 18,
+        zIndex: 99999,
+        borderRadius: 14,
+        padding: "10px 12px",
+        border: "1px solid #e5e7eb",
+        background: "#ffffff",
+        color: "#111827",
+        boxShadow: "0 18px 50px rgba(0,0,0,0.14)",
+        fontWeight: 900,
+        maxWidth: "min(560px, calc(100vw - 24px))",
+        width: "fit-content",
+      }}
+    >
+      <span style={{ color: kind === "err" ? "#b91c1c" : "#065f46" }}>{kind === "err" ? "⚠ " : "✓ "}</span>
+      {msg}
+    </div>
+  );
+}
+
+function ConfirmModal({
+  title,
+  body,
+  actionLabel,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  body: string;
+  actionLabel: string;
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <div onClick={onCancel} style={backdrop} role="dialog" aria-modal="true">
+      <div onClick={(e) => e.stopPropagation()} style={modalLight}>
+        <div style={{ fontWeight: 950, fontSize: 16, color: "#111827" }}>{title}</div>
+        <div style={{ marginTop: 6, color: "#374151", opacity: 0.92 }}>{body}</div>
+
+        <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <button onClick={onCancel} disabled={busy} style={outlineBtnLight}>
+            Cancel
+          </button>
+          <button
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await onConfirm();
+              } finally {
+                setBusy(false);
+              }
+            }}
+            disabled={busy}
+            style={{
+              ...primaryBtnLight(busy),
+              marginTop: 0,
+              height: 44,
+            }}
+          >
+            {busy ? "Working…" : actionLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Styles (Light) ---------------- */
+
+const pageWrap: React.CSSProperties = {
+  minHeight: "100vh",
+  background: "#f7f7f8",
+  color: "#111827",
+};
+
+const lightShell: React.CSSProperties = {
+  maxWidth: 720,
+  margin: "0 auto",
+  padding: 16,
+};
+
+const avatarLight: React.CSSProperties = {
+  width: 44,
+  height: 44,
+  borderRadius: 16,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontWeight: 950,
+  fontSize: 16,
+  color: "#111827",
+  flexShrink: 0,
+  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
+};
+
+const iconBtnLight: React.CSSProperties = {
+  width: 42,
+  height: 42,
+  borderRadius: 14,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#111827",
+  cursor: "pointer",
+  fontWeight: 900,
+  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
+};
+
+const panelLight: React.CSSProperties = {
+  borderRadius: 18,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  padding: 14,
+  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
+};
+
+const inputStyleLight: React.CSSProperties = {
+  width: "100%",
+  height: 44,
+  borderRadius: 14,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#111827",
+  padding: "0 12px",
+  outline: "none",
+  fontWeight: 800,
+};
+
+function primaryBtnLight(disabled: boolean): React.CSSProperties {
+  return {
+    marginTop: 12,
+    width: "100%",
+    height: 44,
+    borderRadius: 14,
+    border: "1px solid rgba(16,185,129,0.35)",
+    background: disabled ? "rgba(16,185,129,0.10)" : "rgba(16,185,129,0.14)",
+    color: "#065f46",
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontWeight: 950,
+    boxShadow: "0 14px 30px rgba(16,185,129,0.12)",
+  };
+}
+
+function pillBtnLight(active: boolean): React.CSSProperties {
+  return {
+    borderRadius: 999,
+    border: active ? "1px solid rgba(16,185,129,0.35)" : "1px solid #e5e7eb",
+    background: active ? "rgba(16,185,129,0.12)" : "#ffffff",
+    color: active ? "#065f46" : "#111827",
+    padding: "10px 12px",
+    cursor: "pointer",
+    fontWeight: 900,
+  };
+}
+
+const outlineBtnLight: React.CSSProperties = {
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#111827",
+  padding: "10px 12px",
+  borderRadius: 14,
+  cursor: "pointer",
+  fontWeight: 900,
+  whiteSpace: "nowrap",
+  boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
+};
+
+function tabPillLight(active: boolean): React.CSSProperties {
+  return {
+    flex: "0 0 auto",
+    borderRadius: 999,
+    border: active ? "1px solid rgba(16,185,129,0.35)" : "1px solid #e5e7eb",
+    background: active ? "rgba(16,185,129,0.12)" : "#ffffff",
+    color: active ? "#065f46" : "#111827",
+    padding: "10px 12px",
+    cursor: "pointer",
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+  };
+}
+
+const dotLight: React.CSSProperties = {
+  display: "inline-block",
+  width: 8,
+  height: 8,
+  borderRadius: 999,
+  background: "#ef4444",
+  marginLeft: 8,
+  boxShadow: "0 0 0 3px rgba(239,68,68,0.20)",
+};
+
+const sectionHintLight: React.CSSProperties = {
+  marginTop: 14,
+  opacity: 0.78,
+  fontSize: 13,
+  color: "#374151",
+};
+
+const cardLight: React.CSSProperties = {
+  background: "#ffffff",
+  padding: 14,
+  borderRadius: 18,
+  border: "1px solid #e5e7eb",
+  width: "100%",
+  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
+};
+
+const cardMediaWrapLight: React.CSSProperties = {
+  width: "100%",
+  height: 150,
+  borderRadius: 16,
+  overflow: "hidden",
+  border: "1px solid #e5e7eb",
+  background: "#f3f4f6",
+};
+
+const cardImg: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  objectFit: "cover",
+  display: "block",
+};
+
+const noPhotoLight: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: "#6b7280",
+  border: "1px dashed #e5e7eb",
+  borderRadius: 16,
+};
+
+const cardTitleLight: React.CSSProperties = {
+  fontSize: 18,
+  fontWeight: 950,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "#111827",
+};
+
+const cardSubLight: React.CSSProperties = {
+  opacity: 0.8,
+  marginTop: 6,
+  fontSize: 13,
+  display: "-webkit-box",
+  WebkitLineClamp: 2,
+  WebkitBoxOrient: "vertical" as any,
+  overflow: "hidden",
+  overflowWrap: "anywhere",
+  color: "#374151",
+};
+
+const cardMetaLight: React.CSSProperties = {
+  opacity: 0.8,
+  marginTop: 10,
+  fontSize: 13,
+  color: "#374151",
+};
+
+const cardActions: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: 10,
+  marginTop: 12,
+};
+
+const cardBtnPrimaryLight: React.CSSProperties = {
+  border: "1px solid rgba(16,185,129,0.35)",
+  background: "rgba(16,185,129,0.12)",
+  color: "#065f46",
+  padding: "10px 12px",
+  borderRadius: 14,
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const cardBtnOutlineLight: React.CSSProperties = {
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#111827",
+  padding: "10px 12px",
+  borderRadius: 14,
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+function cardBtnDangerLight(disabled: boolean): React.CSSProperties {
+  return {
+    border: "1px solid rgba(185,28,28,0.55)",
+    background: disabled ? "rgba(185,28,28,0.12)" : "#ffffff",
+    color: "#991b1b",
+    padding: "10px 12px",
+    borderRadius: 14,
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontWeight: 900,
+    opacity: disabled ? 0.8 : 1,
+  };
+}
+
+const thumbWrapLight: React.CSSProperties = {
+  width: 54,
+  height: 54,
+  borderRadius: 16,
+  border: "1px solid #e5e7eb",
+  background: "#f3f4f6",
+  overflow: "hidden",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: "#6b7280",
+  flexShrink: 0,
+};
+
+const smallCloseBtnLight: React.CSSProperties = {
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#111827",
+  borderRadius: 14,
+  padding: "6px 10px",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const backdrop: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(17,24,39,0.35)",
+  zIndex: 9998,
+};
+
+const drawerLight: React.CSSProperties = {
+  position: "absolute",
+  right: 12,
+  top: 12,
+  width: "min(360px, calc(100vw - 24px))",
+  background: "#ffffff",
+  border: "1px solid #e5e7eb",
+  borderRadius: 18,
+  overflow: "hidden",
+  boxShadow: "0 30px 80px rgba(0,0,0,0.12)",
+};
+
+const drawerTop: React.CSSProperties = {
+  padding: 14,
+  borderBottom: "1px solid #e5e7eb",
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+};
+
+const drawerBtnLight: React.CSSProperties = {
+  width: "100%",
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#111827",
+  padding: "10px 12px",
+  borderRadius: 14,
+  cursor: "pointer",
+  fontWeight: 900,
+  textAlign: "left",
+  boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
+};
+
+const modalLight: React.CSSProperties = {
+  position: "absolute",
+  left: "50%",
+  top: "50%",
+  transform: "translate(-50%, -50%)",
+  width: "min(520px, calc(100vw - 24px))",
+  background: "#ffffff",
+  border: "1px solid #e5e7eb",
+  borderRadius: 18,
+  padding: 14,
+  boxShadow: "0 30px 80px rgba(0,0,0,0.12)",
+};
