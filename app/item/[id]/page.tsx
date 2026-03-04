@@ -1,8 +1,8 @@
 "use client";
 export const dynamic = "force-dynamic";
 
-import { useEffect, useMemo, useState } from "react";
-import { useRouter, useParams } from "next/navigation";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
 
@@ -31,15 +31,12 @@ type ItemRow = {
   owner_id: string | null;
 };
 
-type SellerProfile = {
+type OwnerProfile = {
   full_name: string | null;
   user_role: string | null;
 };
 
-type MyInterestRow = {
-  id: string;
-  status: string | null;
-};
+type MyInterestRow = { id: string; status: string | null };
 
 type OfferStatus = "pending" | "hold" | "accepted" | "completed" | "declined" | "withdrawn";
 
@@ -47,12 +44,12 @@ type OfferRow = {
   id: string;
   request_id: string;
   helper_id: string;
-  status: OfferStatus | string;
+  status: OfferStatus | string | null;
   availability: string | null;
   note: string | null;
-  created_at: string;
-  updated_at: string;
-  helper?: { id: string; full_name: string | null; user_role: string | null } | null;
+  created_at: string | null;
+  updated_at: string | null;
+  helper?: { full_name: string | null; user_role: string | null } | null;
 };
 
 function formatExpiry(expiresAt: string | null) {
@@ -103,13 +100,17 @@ function offerStatusLabel(s: string | null) {
   return k;
 }
 
-function statusPillClass(status: string | null) {
+function statusTone(status: string | null) {
   const k = (status ?? "pending").toLowerCase();
-  if (k === "accepted") return "pill pillGreen";
-  if (k === "hold") return "pill pillBlue";
-  if (k === "completed") return "pill pillAmber";
-  if (k === "declined" || k === "withdrawn") return "pill pillRed";
-  return "pill";
+  if (k === "accepted") return "toneGreen";
+  if (k === "hold") return "toneBlue";
+  if (k === "completed") return "toneAmber";
+  if (k === "declined" || k === "withdrawn") return "toneRed";
+  return "toneGray";
+}
+
+function isAshlandEmail(email: string | null) {
+  return !!email && email.toLowerCase().endsWith("@ashland.edu");
 }
 
 function Chip({ children }: { children: React.ReactNode }) {
@@ -121,43 +122,55 @@ export default function ItemDetailPage() {
   const params = useParams();
   const itemId = (params?.id as string) || "";
 
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-
-  const [item, setItem] = useState<ItemRow | null>(null);
-  const [seller, setSeller] = useState<SellerProfile | null>(null);
-
+  // auth (single source of truth)
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // GIVE only
+  const isLoggedIn = useMemo(() => !!userId && isAshlandEmail(userEmail), [userId, userEmail]);
+
+  // loading/error
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  // data
+  const [item, setItem] = useState<ItemRow | null>(null);
+  const [owner, setOwner] = useState<OwnerProfile | null>(null);
+
+  // GIVE
   const [interestCount, setInterestCount] = useState(0);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
 
-  // REQUEST only
+  // REQUEST
   const [offers, setOffers] = useState<OfferRow[]>([]);
   const [myOffer, setMyOffer] = useState<OfferRow | null>(null);
 
-  const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
+  // UI
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
+  const toastTimer = useRef<any>(null);
+
+  // Confirm modal (replaces alert/confirm)
+  const [confirm, setConfirm] = useState<null | {
+    title: string;
+    body: string;
+    actionLabel: string;
+    danger?: boolean;
+    onYes: () => Promise<void>;
+  }>(null);
 
   // GIVE modal
-  const [showInterest, setShowInterest] = useState(false);
+  const [showInterestModal, setShowInterestModal] = useState(false);
   const [earliestPickup, setEarliestPickup] = useState<"today" | "tomorrow" | "weekend">("today");
   const [timeWindow, setTimeWindow] = useState<"morning" | "afternoon" | "evening">("afternoon");
-  const [note, setNote] = useState("");
+  const [interestNote, setInterestNote] = useState("");
 
   // REQUEST modal
   const [showOfferModal, setShowOfferModal] = useState(false);
   const [offerAvailability, setOfferAvailability] = useState<"today" | "tomorrow" | "this_week" | "flexible">("today");
   const [offerNote, setOfferNote] = useState("");
 
-  // photo modal
+  // image modal
   const [openImg, setOpenImg] = useState<string | null>(null);
-
-  const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-  }, [userId, userEmail]);
 
   const postType: PostType = (item?.post_type ?? "give") as PostType;
 
@@ -166,77 +179,34 @@ export default function ItemDetailPage() {
   }, [userId, item?.owner_id]);
 
   const expiryText = formatExpiry(item?.expires_at ?? null);
-  const showName = item && !item.is_anonymous && seller?.full_name;
 
   // derived give
   const myInterestStatus = (myInterest?.status ?? "").toLowerCase();
   const mineInterested = !!myInterest?.id;
-  const isAccepted = myInterestStatus === "accepted";
-  const isReserved = myInterestStatus === "reserved";
+  const interestAccepted = myInterestStatus === "accepted";
+  const interestReserved = myInterestStatus === "reserved";
 
   // derived request
   const myOfferStatus = (myOffer?.status ?? "").toLowerCase();
   const myOfferAccepted = myOfferStatus === "accepted" || myOfferStatus === "completed";
 
-  async function syncAuth() {
-    const { data } = await supabase.auth.getSession();
-    const session = data.session;
-    setUserId(session?.user?.id ?? null);
-    setUserEmail(session?.user?.email ?? null);
+  const loadSeq = useRef(0);
+
+  function showToast(msg: string, kind: "ok" | "err" = "ok") {
+    setToast({ msg, kind });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2400);
   }
 
-  async function loadOffersForRequest(loaded: ItemRow, uid: string | null) {
-    if (loaded.post_type !== "request") return;
-
-    // my offer (if logged in)
-    if (uid) {
-      const { data: mine } = await supabase
-        .from("request_offers")
-        .select("id,request_id,helper_id,status,availability,note,created_at,updated_at")
-        .eq("request_id", loaded.id)
-        .eq("helper_id", uid)
-        .maybeSingle();
-
-      setMyOffer((mine as any) ?? null);
-    } else {
-      setMyOffer(null);
-    }
-
-    // requester sees all offers
-    if (uid && loaded.owner_id === uid) {
-      const { data: all, error } = await supabase
-        .from("request_offers")
-        .select("id,request_id,helper_id,status,availability,note,created_at,updated_at")
-        .eq("request_id", loaded.id)
-        .order("created_at", { ascending: false });
-
-      if (error) {
-        setOffers([]);
-        return;
-      }
-
-      const rows = (all as OfferRow[]) || [];
-      const helperIds = Array.from(new Set(rows.map((r) => r.helper_id).filter(Boolean)));
-
-      let profileMap = new Map<string, any>();
-      if (helperIds.length) {
-        const { data: profs } = await supabase.from("profiles").select("id,full_name,user_role").in("id", helperIds);
-        for (const p of (profs as any[]) || []) profileMap.set(p.id, p);
-      }
-
-      const merged = rows.map((r) => ({ ...r, helper: profileMap.get(r.helper_id) ?? null }));
-      setOffers(merged);
-    } else {
-      setOffers([]);
-    }
-  }
-
-  async function loadItem() {
+  async function loadEverything(uid: string | null, email: string | null) {
     if (!itemId) return;
+
+    const seq = ++loadSeq.current;
     setLoading(true);
     setErr(null);
 
     try {
+      // 1) Item (single)
       const { data: it, error: itErr } = await supabase
         .from("items")
         .select(
@@ -245,32 +215,44 @@ export default function ItemDetailPage() {
         .eq("id", itemId)
         .single();
 
+      if (seq !== loadSeq.current) return;
       if (itErr) throw new Error(itErr.message);
 
       const loaded = it as ItemRow;
       loaded.post_type = (loaded.post_type ?? "give") as PostType;
       setItem(loaded);
 
-      // profile
-      const ownerId = loaded.owner_id ?? null;
-      const anon = !!loaded.is_anonymous;
+      // 2) Owner profile (only if not anonymous)
+      if (!loaded.is_anonymous && loaded.owner_id) {
+        const { data: prof, error: pErr } = await supabase
+          .from("profiles")
+          .select("full_name,user_role")
+          .eq("id", loaded.owner_id)
+          .maybeSingle();
 
-      if (!anon && ownerId) {
-        const { data: prof } = await supabase.from("profiles").select("full_name,user_role").eq("id", ownerId).single();
-        setSeller((prof as SellerProfile) || null);
+        if (seq !== loadSeq.current) return;
+        if (!pErr) setOwner((prof as OwnerProfile) ?? null);
+        else setOwner(null);
       } else {
-        setSeller(null);
+        setOwner(null);
       }
 
-      // auth uid
-      const { data: s } = await supabase.auth.getSession();
-      const uid = s.session?.user?.id ?? null;
-
+      // 3) Branch on post type
       if (loaded.post_type === "give") {
-        const { count } = await supabase.from("interests").select("*", { count: "exact", head: true }).eq("item_id", itemId);
+        setOffers([]);
+        setMyOffer(null);
+
+        // count interests
+        const { count } = await supabase
+          .from("interests")
+          .select("*", { count: "exact", head: true })
+          .eq("item_id", itemId);
+
+        if (seq !== loadSeq.current) return;
         setInterestCount(count ?? 0);
 
-        if (uid) {
+        // my interest
+        if (uid && isAshlandEmail(email)) {
           const { data: mine, error: mineErr } = await supabase
             .from("interests")
             .select("id,status")
@@ -278,27 +260,65 @@ export default function ItemDetailPage() {
             .eq("user_id", uid)
             .maybeSingle();
 
+          if (seq !== loadSeq.current) return;
           if (!mineErr && mine) setMyInterest({ id: (mine as any).id, status: (mine as any).status ?? null });
           else setMyInterest(null);
         } else {
           setMyInterest(null);
         }
-
-        setOffers([]);
-        setMyOffer(null);
       } else {
         setInterestCount(0);
         setMyInterest(null);
-        await loadOffersForRequest(loaded, uid);
+
+        // my offer
+        if (uid && isAshlandEmail(email)) {
+          const { data: mine } = await supabase
+            .from("request_offers")
+            .select("id,request_id,helper_id,status,availability,note,created_at,updated_at")
+            .eq("request_id", loaded.id)
+            .eq("helper_id", uid)
+            .maybeSingle();
+
+          if (seq !== loadSeq.current) return;
+          setMyOffer((mine as any) ?? null);
+        } else {
+          setMyOffer(null);
+        }
+
+        // requester sees all offers (JOIN helper profile in same query)
+        if (uid && loaded.owner_id === uid) {
+          const { data: all, error } = await supabase
+            .from("request_offers")
+            .select(
+              `
+              id,request_id,helper_id,status,availability,note,created_at,updated_at,
+              helper:profiles!request_offers_helper_id_fkey(full_name,user_role)
+            `
+            )
+            .eq("request_id", loaded.id)
+            .order("created_at", { ascending: false });
+
+          if (seq !== loadSeq.current) return;
+          if (error) {
+            setOffers([]);
+          } else {
+            setOffers(((all as any[]) ?? []) as OfferRow[]);
+          }
+        } else {
+          setOffers([]);
+        }
       }
     } catch (e: any) {
+      if (seq !== loadSeq.current) return;
       setErr(e?.message || "Failed to load.");
       setItem(null);
-      setSeller(null);
+      setOwner(null);
+      setInterestCount(0);
       setMyInterest(null);
       setOffers([]);
       setMyOffer(null);
     } finally {
+      if (seq !== loadSeq.current) return;
       setLoading(false);
     }
   }
@@ -309,11 +329,10 @@ export default function ItemDetailPage() {
   async function submitInterest() {
     if (!item || postType !== "give") return;
     if (!isLoggedIn || !userId) return router.push("/me");
-    if (isMinePost) return setMsg("This is your listing.");
+    if (isMinePost) return showToast("This is your listing.", "err");
+    if (mineInterested) return showToast("You already requested this item.", "err");
 
-    setSaving(true);
-    setMsg(null);
-
+    setBusy(true);
     try {
       const { data, error } = await supabase
         .from("interests")
@@ -324,7 +343,7 @@ export default function ItemDetailPage() {
             status: "pending",
             earliest_pickup: earliestPickup,
             time_window: timeWindow,
-            note: note.trim() || null,
+            note: interestNote.trim() || null,
           },
         ])
         .select("id,status")
@@ -333,8 +352,8 @@ export default function ItemDetailPage() {
       if (error) {
         const m = error.message.toLowerCase();
         if (m.includes("duplicate") || m.includes("unique")) {
-          setMsg("You already requested this item.");
-          await loadItem();
+          showToast("You already requested this item.", "err");
+          await loadEverything(userId, userEmail);
           return;
         }
         throw new Error(error.message);
@@ -342,13 +361,13 @@ export default function ItemDetailPage() {
 
       setMyInterest({ id: (data as any).id, status: (data as any).status ?? "pending" });
       setInterestCount((c) => c + 1);
-      setMsg("✅ Request sent.");
-      setNote("");
-      setShowInterest(false);
+      setInterestNote("");
+      setShowInterestModal(false);
+      showToast("Request sent ✅", "ok");
     } catch (e: any) {
-      setMsg(e?.message || "Could not send request.");
+      showToast(e?.message || "Could not send request.", "err");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   }
 
@@ -359,26 +378,32 @@ export default function ItemDetailPage() {
 
     const st = (myInterest?.status ?? "").toLowerCase();
     if (st === "accepted" || st === "reserved") {
-      setMsg("Already accepted/reserved. You can’t withdraw here.");
+      showToast("Already accepted/reserved. You can’t withdraw here.", "err");
       return;
     }
 
-    setSaving(true);
-    setMsg(null);
-
-    try {
-      const { error } = await supabase.from("interests").delete().eq("item_id", item.id).eq("user_id", userId);
-      if (error) throw new Error(error.message);
-
-      setMyInterest(null);
-      setInterestCount((c) => Math.max(0, c - 1));
-      setShowInterest(false);
-      setMsg("Removed ✅");
-    } catch (e: any) {
-      setMsg(e?.message || "Could not remove.");
-    } finally {
-      setSaving(false);
-    }
+    setConfirm({
+      title: "Withdraw request?",
+      body: "This removes your request from the lister’s list.",
+      actionLabel: "Withdraw",
+      danger: true,
+      onYes: async () => {
+        setConfirm(null);
+        setBusy(true);
+        try {
+          const { error } = await supabase.from("interests").delete().eq("item_id", item.id).eq("user_id", userId);
+          if (error) throw new Error(error.message);
+          setMyInterest(null);
+          setInterestCount((c) => Math.max(0, c - 1));
+          setShowInterestModal(false);
+          showToast("Removed ✅", "ok");
+        } catch (e: any) {
+          showToast(e?.message || "Could not remove.", "err");
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
   }
 
   async function confirmPickupAndChat() {
@@ -387,12 +412,10 @@ export default function ItemDetailPage() {
     if (isMinePost) return;
 
     const st = (myInterest.status ?? "").toLowerCase();
-    if (st !== "accepted") return setMsg("Confirm only after seller accepts.");
-    if (!item.owner_id) return setMsg("Missing seller id.");
+    if (st !== "accepted") return showToast("Confirm only after the lister accepts.", "err");
+    if (!item.owner_id) return showToast("Missing lister id.", "err");
 
-    setSaving(true);
-    setMsg(null);
-
+    setBusy(true);
     try {
       const { error: rpcErr } = await supabase.rpc("confirm_pickup", { p_interest_id: myInterest.id });
       if (rpcErr) throw new Error(rpcErr.message);
@@ -411,9 +434,9 @@ export default function ItemDetailPage() {
 
       router.push(`/messages/${threadId}`);
     } catch (e: any) {
-      setMsg(e?.message || "Could not confirm pickup.");
+      showToast(e?.message || "Could not confirm pickup.", "err");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   }
 
@@ -423,11 +446,10 @@ export default function ItemDetailPage() {
   async function submitOffer() {
     if (!item || postType !== "request") return;
     if (!isLoggedIn || !userId) return router.push("/me");
-    if (isMinePost) return setMsg("This is your request.");
+    if (isMinePost) return showToast("This is your request.", "err");
+    if (myOffer?.id) return showToast("You already offered help.", "err");
 
-    setSaving(true);
-    setMsg(null);
-
+    setBusy(true);
     try {
       const { data, error } = await supabase
         .from("request_offers")
@@ -446,8 +468,8 @@ export default function ItemDetailPage() {
       if (error) {
         const m = error.message.toLowerCase();
         if (m.includes("duplicate") || m.includes("unique")) {
-          setMsg("You already offered help.");
-          await loadItem();
+          showToast("You already offered help.", "err");
+          await loadEverything(userId, userEmail);
           return;
         }
         throw new Error(error.message);
@@ -456,11 +478,14 @@ export default function ItemDetailPage() {
       setMyOffer(data as any);
       setShowOfferModal(false);
       setOfferNote("");
-      setMsg("✅ Offer sent.");
+      showToast("Offer sent ✅", "ok");
+
+      // refresh offers if requester is viewing their own post in another session (optional)
+      await loadEverything(userId, userEmail);
     } catch (e: any) {
-      setMsg(e?.message || "Could not send offer.");
+      showToast(e?.message || "Could not send offer.", "err");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   }
 
@@ -471,25 +496,31 @@ export default function ItemDetailPage() {
 
     const st = (myOffer.status ?? "").toLowerCase();
     if (st === "accepted" || st === "completed") {
-      setMsg("You can’t withdraw after acceptance.");
+      showToast("You can’t withdraw after acceptance.", "err");
       return;
     }
 
-    setSaving(true);
-    setMsg(null);
-
-    try {
-      const { error } = await supabase.from("request_offers").delete().eq("id", myOffer.id).eq("helper_id", userId);
-      if (error) throw new Error(error.message);
-
-      setMyOffer(null);
-      setMsg("Removed ✅");
-      await loadItem();
-    } catch (e: any) {
-      setMsg(e?.message || "Could not withdraw.");
-    } finally {
-      setSaving(false);
-    }
+    setConfirm({
+      title: "Withdraw offer?",
+      body: "This removes your offer from the requester’s list.",
+      actionLabel: "Withdraw",
+      danger: true,
+      onYes: async () => {
+        setConfirm(null);
+        setBusy(true);
+        try {
+          const { error } = await supabase.from("request_offers").delete().eq("id", myOffer.id).eq("helper_id", userId);
+          if (error) throw new Error(error.message);
+          setMyOffer(null);
+          showToast("Removed ✅", "ok");
+          await loadEverything(userId, userEmail);
+        } catch (e: any) {
+          showToast(e?.message || "Could not withdraw.", "err");
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
   }
 
   async function acceptOfferAsRequester(offer: OfferRow) {
@@ -497,19 +528,17 @@ export default function ItemDetailPage() {
     if (!isLoggedIn || !userId) return router.push("/me");
     if (!isMinePost) return;
 
-    setSaving(true);
-    setMsg(null);
-
+    setBusy(true);
     try {
       const { error: rpcErr } = await supabase.rpc("accept_request_offer_keep_others", { p_offer_id: offer.id });
       if (rpcErr) throw new Error(rpcErr.message);
 
-      await loadItem();
-      setMsg("✅ Accepted. Chat unlocked.");
+      await loadEverything(userId, userEmail);
+      showToast("Accepted ✅ Chat unlocked.", "ok");
     } catch (e: any) {
-      setMsg(e?.message || "Could not accept.");
+      showToast(e?.message || "Could not accept.", "err");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   }
 
@@ -518,18 +547,17 @@ export default function ItemDetailPage() {
     if (!isLoggedIn || !userId) return router.push("/me");
     if (!isMinePost) return;
 
-    setSaving(true);
-    setMsg(null);
-
+    setBusy(true);
     try {
       const { error } = await supabase.from("request_offers").update({ status }).eq("id", offer.id);
       if (error) throw new Error(error.message);
 
-      await loadItem();
+      await loadEverything(userId, userEmail);
+      showToast("Updated ✅", "ok");
     } catch (e: any) {
-      setMsg(e?.message || "Could not update.");
+      showToast(e?.message || "Could not update.", "err");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   }
 
@@ -538,19 +566,17 @@ export default function ItemDetailPage() {
     if (!isLoggedIn || !userId) return router.push("/me");
     if (!isMinePost) return;
 
-    setSaving(true);
-    setMsg(null);
-
+    setBusy(true);
     try {
       const { error: rpcErr } = await supabase.rpc("complete_request_offer", { p_offer_id: offer.id });
       if (rpcErr) throw new Error(rpcErr.message);
 
-      await loadItem();
-      setMsg("✅ Marked completed.");
+      await loadEverything(userId, userEmail);
+      showToast("Marked completed ✅", "ok");
     } catch (e: any) {
-      setMsg(e?.message || "Could not complete.");
+      showToast(e?.message || "Could not complete.", "err");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   }
 
@@ -560,15 +586,12 @@ export default function ItemDetailPage() {
 
     const st = (offer.status ?? "").toLowerCase();
     if (st !== "accepted" && st !== "completed") {
-      setMsg("Chat unlocks only after acceptance.");
+      showToast("Chat unlocks only after acceptance.", "err");
       return;
     }
+    if (!item.owner_id) return showToast("Missing requester id.", "err");
 
-    if (!item.owner_id) return setMsg("Missing requester id.");
-
-    setSaving(true);
-    setMsg(null);
-
+    setBusy(true);
     try {
       const threadId = await ensureThread({
         itemId: item.id,
@@ -584,114 +607,171 @@ export default function ItemDetailPage() {
 
       router.push(`/messages/${threadId}`);
     } catch (e: any) {
-      setMsg(e?.message || "Could not open chat.");
+      showToast(e?.message || "Could not open chat.", "err");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   }
 
-  // initial load + auth
+  /* ---------------- Boot: single session fetch + auth listener ---------------- */
+
   useEffect(() => {
+    if (!itemId) return;
+
     (async () => {
-      await syncAuth();
-      await loadItem();
+      const { data } = await supabase.auth.getSession();
+      const s = data.session;
+      const uid = s?.user?.id ?? null;
+      const email = s?.user?.email ?? null;
+      setUserId(uid);
+      setUserEmail(email);
+      await loadEverything(uid, email);
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      syncAuth();
-      loadItem();
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
+      const uid = session?.user?.id ?? null;
+      const email = session?.user?.email ?? null;
+      setUserId(uid);
+      setUserEmail(email);
+      await loadEverything(uid, email);
     });
 
     return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId]);
 
-  // realtime (give interests)
+  /* ---------------- Realtime: lightweight refresh ---------------- */
+
   useEffect(() => {
-    if (!itemId || !userId) return;
-    if (postType !== "give") return;
+    if (!itemId) return;
 
     const channel = supabase
-      .channel(`interest-${itemId}-${userId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "interests", filter: `item_id=eq.${itemId}` }, (payload) => {
-        const row: any = payload.new;
-        if (row?.user_id === userId) setMyInterest({ id: row.id, status: row.status ?? null });
+      .channel(`item-detail-${itemId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "items", filter: `id=eq.${itemId}` }, () => {
+        void loadEverything(userId, userEmail);
       })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [itemId, userId, postType]);
-
-  // realtime (request offers)
-  useEffect(() => {
-    if (!itemId || !userId) return;
-    if (postType !== "request") return;
-
-    const channel = supabase
-      .channel(`offers-${itemId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "interests", filter: `item_id=eq.${itemId}` }, () => {
+        // only relevant for give pages, but safe to refresh
+        void loadEverything(userId, userEmail);
+      })
       .on("postgres_changes", { event: "*", schema: "public", table: "request_offers", filter: `request_id=eq.${itemId}` }, () => {
-        loadItem();
+        void loadEverything(userId, userEmail);
       })
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [itemId, userId, postType]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemId, userId, userEmail]);
 
-  // esc closes image
+  // esc closes image + modals
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpenImg(null);
+      if (e.key === "Escape") {
+        setOpenImg(null);
+        setShowInterestModal(false);
+        setShowOfferModal(false);
+        setConfirm(null);
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  const headerSubtitle = useMemo(() => {
+    if (!item) return "";
+    if (postType === "request") {
+      const parts = [
+        requestGroupLabel(item.request_group),
+        item.request_timeframe ? requestTimeframeLabel(item.request_timeframe) : "",
+        item.request_location ? item.request_location : "",
+      ].filter(Boolean);
+      return parts.join(" • ");
+    }
+    const parts = [item.category ? `Category: ${item.category}` : "", item.pickup_location ? `Pickup: ${item.pickup_location}` : ""].filter(Boolean);
+    return parts.join(" • ");
+  }, [item, postType]);
+
+  const ownerLabel = useMemo(() => {
+    if (!item) return "Ashland user";
+    if (item.is_anonymous) return "Anonymous";
+    const nm = (owner?.full_name ?? "").trim();
+    if (nm) return nm;
+    return "Ashland user";
+  }, [item, owner]);
+
+  const ownerRole = useMemo(() => {
+    if (!item || item.is_anonymous) return "";
+    return (owner?.user_role ?? "").trim();
+  }, [item, owner]);
+
+  const primaryCTA = useMemo(() => {
+    if (!item) return { label: "Loading…", disabled: true, onClick: () => {} };
+
+    const itemStatus = (item.status ?? "available").toLowerCase();
+
+    if (postType === "give") {
+      if (isMinePost) return { label: "Your listing", disabled: true, onClick: () => {} };
+      if (!isLoggedIn) return { label: "Request (login)", disabled: false, onClick: () => router.push("/me") };
+      if (mineInterested) {
+        if (interestReserved) return { label: "Reserved ✅", disabled: true, onClick: () => {} };
+        if (interestAccepted) return { label: "Accepted ✅", disabled: true, onClick: () => {} };
+        return { label: "Request sent", disabled: true, onClick: () => {} };
+      }
+      if (itemStatus !== "available") return { label: "Unavailable", disabled: true, onClick: () => {} };
+      return { label: "Request item", disabled: false, onClick: () => setShowInterestModal(true) };
+    }
+
+    // request
+    if (isMinePost) return { label: "View messages", disabled: false, onClick: () => router.push("/messages") };
+    if (!isLoggedIn) return { label: "Offer help (login)", disabled: false, onClick: () => router.push("/me") };
+    if (myOffer?.id) return { label: `Offer sent • ${offerStatusLabel(myOffer.status ?? "pending")}`, disabled: true, onClick: () => {} };
+    return { label: "Offer help", disabled: false, onClick: () => setShowOfferModal(true) };
+  }, [item, postType, isMinePost, isLoggedIn, mineInterested, interestReserved, interestAccepted, router, myOffer]);
+
   return (
     <div className="page">
       <header className="top">
-        <button className="back" onClick={() => router.back()}>
-          ← Back
+        <button className="navBtn" onClick={() => router.back()} aria-label="Back">
+          ←
         </button>
-        <div className="right">
-          <button className="ghost" onClick={() => router.push("/feed")}>
+
+        <div className="brand">
+          <div className="brandTitle">ScholarSwap</div>
+          <div className="brandSub">Exchange • Help • Reuse</div>
+        </div>
+
+        <div className="navRight">
+          <button className="navChip" onClick={() => router.push("/feed")}>
             Feed
           </button>
-          <button className="ghost" onClick={() => router.push("/me")}>
+          <button className="navChip" onClick={() => router.push("/me")}>
             Account
           </button>
         </div>
       </header>
 
-      {err && <div className="err">{err}</div>}
-      {loading && <div className="loading">Loading…</div>}
+      {err && <div className="alert err">{err}</div>}
+      {loading && <div className="alert">Loading…</div>}
 
       {!loading && item && (
         <main className="wrap">
+          {/* Title / type */}
           <div className="titleRow">
-            <h1 className="h1">{item.title}</h1>
-            <span className={`tag ${postType === "request" ? "tagReq" : "tagItem"}`}>{postType === "request" ? "REQUEST" : "ITEM"}</span>
+            <div className="titleLeft">
+              <h1 className="h1">{item.title}</h1>
+              {headerSubtitle ? <div className="sub">{headerSubtitle}</div> : null}
+            </div>
+
+            <span className={`typePill ${postType === "request" ? "req" : "give"}`}>{postType === "request" ? "REQUEST" : "ITEM"}</span>
           </div>
 
+          {/* Chips */}
           <div className="chips">
-            {postType === "give" && item.category ? <Chip>Category: {item.category}</Chip> : null}
-            {postType === "give" && item.pickup_location ? <Chip>Pickup: {item.pickup_location}</Chip> : null}
-
-            {postType === "request" ? (
-              <>
-                <Chip>Type: {requestGroupLabel(item.request_group)}</Chip>
-                {item.request_timeframe ? <Chip>Timeframe: {requestTimeframeLabel(item.request_timeframe)}</Chip> : null}
-                {item.request_location ? <Chip>Location: {item.request_location}</Chip> : null}
-              </>
-            ) : null}
-
             <Chip>
-              {postType === "give" ? "Lister" : "Poster"}:{" "}
-              {item.is_anonymous ? "Anonymous" : showName ? seller!.full_name : "Ashland user"}
-              {!item.is_anonymous && seller?.user_role ? ` (${seller.user_role})` : ""}
+              {postType === "give" ? "Lister" : "Poster"}: {ownerLabel}
+              {ownerRole ? <span className="muted"> ({ownerRole})</span> : null}
             </Chip>
 
             {postType === "give" ? <Chip>{interestCount} requests</Chip> : null}
@@ -702,39 +782,35 @@ export default function ItemDetailPage() {
             </Chip>
           </div>
 
-          {/* Media / Request hero */}
-          <section className="mediaBlock">
+          {/* Hero */}
+          <section className="hero">
             {postType === "give" ? (
               item.photo_url ? (
-                <button className="mediaBtn" onClick={() => setOpenImg(item.photo_url!)} aria-label="Open photo" type="button">
+                <button className="heroMediaBtn" onClick={() => setOpenImg(item.photo_url!)} type="button" aria-label="Open photo">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={item.photo_url} alt={item.title} className="mediaImg" />
+                  <img src={item.photo_url} alt={item.title} className="heroImg" />
                 </button>
               ) : (
-                <div className="noPhoto">No photo</div>
+                <div className="heroEmpty">No photo</div>
               )
             ) : (
-              <div className="reqHero">
-                <div className="reqLine">
-                  {requestGroupLabel(item.request_group)}
-                  {item.request_timeframe ? ` • ${requestTimeframeLabel(item.request_timeframe)}` : ""}
-                  {item.request_location ? ` • ${item.request_location}` : ""}
-                </div>
-                <div className="reqBody">{item.description || "No extra details provided."}</div>
+              <div className="heroReq">
+                <div className="heroReqLine">{headerSubtitle || "Request details"}</div>
+                <div className="heroReqBody">{item.description?.trim() ? item.description : "No extra details provided."}</div>
               </div>
             )}
           </section>
 
-          {/* Description (give only, requests already show in hero) */}
-          {postType === "give" && (
+          {/* Description (give only) */}
+          {postType === "give" ? (
             <section className="panel">
               <div className="panelTitle">Description</div>
               <div className="panelBody">{item.description?.trim() ? item.description : "—"}</div>
             </section>
-          )}
+          ) : null}
 
           {/* REQUEST: offers panel for requester */}
-          {postType === "request" && isMinePost && (
+          {postType === "request" && isMinePost ? (
             <section className="panel">
               <div className="panelTop">
                 <div className="panelTitle">Offers</div>
@@ -747,8 +823,9 @@ export default function ItemDetailPage() {
                 <div className="offerList">
                   {offers.map((o) => {
                     const st = (o.status ?? "pending").toLowerCase();
-                    const helperName = o.helper?.full_name || "Ashland user";
+                    const helperName = o.helper?.full_name?.trim() ? o.helper.full_name : "Ashland user";
                     const helperRole = o.helper?.user_role ? ` (${o.helper.user_role})` : "";
+                    const tone = statusTone(o.status ?? "pending");
 
                     return (
                       <div key={o.id} className="offerCard">
@@ -757,48 +834,46 @@ export default function ItemDetailPage() {
                             {helperName}
                             <span className="muted">{helperRole}</span>
                           </div>
-                          <span className={statusPillClass(o.status)}>{offerStatusLabel(o.status)}</span>
+                          <span className={`pill ${tone}`}>{offerStatusLabel(o.status)}</span>
                         </div>
 
-                        <div className="offerMeta">
-                          {o.availability ? `Availability: ${o.availability}` : "Availability: —"}
-                        </div>
+                        <div className="offerMeta">{o.availability ? `Availability: ${o.availability}` : "Availability: —"}</div>
 
                         <div className="offerNote">{o.note ? o.note : <span className="muted">No note.</span>}</div>
 
                         <div className="offerActions">
                           {(st === "pending" || st === "hold") && (
-                            <button className="btn primary" onClick={() => acceptOfferAsRequester(o)} disabled={saving}>
+                            <button className="btn primary" onClick={() => acceptOfferAsRequester(o)} disabled={busy}>
                               Accept
                             </button>
                           )}
 
                           {st === "pending" && (
-                            <button className="btn blue" onClick={() => setOfferStatusAsRequester(o, "hold")} disabled={saving}>
+                            <button className="btn softBlue" onClick={() => setOfferStatusAsRequester(o, "hold")} disabled={busy}>
                               Hold
                             </button>
                           )}
 
                           {st === "hold" && (
-                            <button className="btn ghost" onClick={() => setOfferStatusAsRequester(o, "pending")} disabled={saving}>
+                            <button className="btn ghost" onClick={() => setOfferStatusAsRequester(o, "pending")} disabled={busy}>
                               Move to pending
                             </button>
                           )}
 
                           {(st === "accepted" || st === "completed") && (
-                            <button className="btn teal" onClick={() => openChatForOffer(o)} disabled={saving}>
+                            <button className="btn softGreen" onClick={() => openChatForOffer(o)} disabled={busy}>
                               Open chat
                             </button>
                           )}
 
                           {st === "accepted" && (
-                            <button className="btn amber" onClick={() => completeOfferAsRequester(o)} disabled={saving}>
+                            <button className="btn softAmber" onClick={() => completeOfferAsRequester(o)} disabled={busy}>
                               Mark completed
                             </button>
                           )}
 
                           {(st === "pending" || st === "hold") && (
-                            <button className="btn danger" onClick={() => setOfferStatusAsRequester(o, "declined")} disabled={saving}>
+                            <button className="btn danger" onClick={() => setOfferStatusAsRequester(o, "declined")} disabled={busy}>
                               Decline
                             </button>
                           )}
@@ -809,256 +884,259 @@ export default function ItemDetailPage() {
                 </div>
               )}
             </section>
-          )}
+          ) : null}
 
-          {/* Actions */}
-          <section className="actions">
+          {/* Spacer for bottom bar */}
+          <div style={{ height: 84 }} />
+        </main>
+      )}
+
+      {/* Bottom action bar */}
+      {!loading && item && (
+        <div className="bottomBar">
+          <div className="barInner">
+            <button className={`cta ${primaryCTA.disabled ? "disabled" : ""}`} onClick={primaryCTA.onClick} disabled={primaryCTA.disabled || busy}>
+              {busy ? "Working…" : primaryCTA.label}
+            </button>
+
             {postType === "give" ? (
-              <>
-                <button
-                  className={`btn ${isMinePost ? "disabled" : "primary"}`}
-                  onClick={() => {
-                    if (!isLoggedIn) return router.push("/me");
-                    if (isMinePost) return;
-                    if (mineInterested) return;
-                    setMsg(null);
-                    setShowInterest(true);
-                  }}
-                  disabled={saving || mineInterested || isMinePost || (item.status ?? "available") !== "available"}
-                >
-                  {isMinePost
-                    ? "Your listing"
-                    : !isLoggedIn
-                    ? "Request (login)"
-                    : mineInterested
-                    ? isReserved
-                      ? "Reserved ✅"
-                      : isAccepted
-                      ? "Accepted ✅"
-                      : "Request sent"
-                    : "Request item"}
-                </button>
-
-                <button className={`btn ghost ${(!mineInterested || isAccepted || isReserved || isMinePost) ? "disabled" : ""}`}
-                  onClick={withdrawInterest}
-                  disabled={saving || !mineInterested || isAccepted || isReserved || isMinePost}
-                >
-                  Withdraw
-                </button>
-
-                {isAccepted && !isMinePost && (
-                  <button className="btn teal" onClick={confirmPickupAndChat} disabled={saving}>
-                    Confirm pickup & chat
-                  </button>
-                )}
-              </>
+              <button
+                className={`cta ghost ${(!mineInterested || interestAccepted || interestReserved || isMinePost) ? "disabled" : ""}`}
+                onClick={withdrawInterest}
+                disabled={busy || !mineInterested || interestAccepted || interestReserved || isMinePost}
+                title={interestAccepted || interestReserved ? "Cannot withdraw after acceptance/reserved" : "Withdraw request"}
+              >
+                Withdraw
+              </button>
             ) : (
               <>
-                {!isMinePost && (
-                  <>
-                    <button
-                      className={`btn ${myOffer?.id ? "disabled" : "green"}`}
-                      onClick={() => {
-                        if (!isLoggedIn) return router.push("/me");
-                        if (myOffer?.id) return;
-                        setMsg(null);
-                        setShowOfferModal(true);
-                      }}
-                      disabled={saving || !!myOffer?.id}
-                    >
-                      {!isLoggedIn
-                        ? "Offer help (login)"
-                        : myOffer?.id
-                        ? `Offer sent • ${offerStatusLabel(myOffer.status)}`
-                        : "Offer help"}
+                {myOffer?.id ? (
+                  myOfferAccepted ? (
+                    <button className="cta ghost" onClick={() => openChatForOffer(myOffer)} disabled={busy}>
+                      Start chat
                     </button>
-
-                    {myOffer?.id && (
-                      <>
-                        {myOfferAccepted ? (
-                          <button className="btn teal" onClick={() => openChatForOffer(myOffer)} disabled={saving}>
-                            Start chat
-                          </button>
-                        ) : (
-                          <button className="btn ghost" onClick={withdrawOffer} disabled={saving}>
-                            Withdraw offer
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </>
-                )}
-
-                {isMinePost && (
-                  <button className="btn ghost" onClick={() => router.push("/messages")}>
-                    Messages
+                  ) : (
+                    <button className="cta ghost" onClick={withdrawOffer} disabled={busy}>
+                      Withdraw
+                    </button>
+                  )
+                ) : (
+                  <button className="cta ghost" onClick={() => router.push("/me")} disabled={busy}>
+                    Account
                   </button>
                 )}
               </>
             )}
-
-            <button className="btn ghost" onClick={() => router.push("/me")}>
-              Account
-            </button>
-          </section>
-
-          {msg && !showInterest && !showOfferModal && <div className="toast">{msg}</div>}
-
-          {/* GIVE: Interest modal */}
-          {postType === "give" && showInterest && (
-            <div className="modal" onClick={() => setShowInterest(false)}>
-              <div className="modalInner" onClick={(e) => e.stopPropagation()}>
-                <div className="modalTop">
-                  <div className="modalTitle">Request this item</div>
-                  <button className="x" onClick={() => setShowInterest(false)}>✕</button>
-                </div>
-
-                <div className="modalHint">Tell the lister when you can pick up.</div>
-
-                <div className="field">
-                  <label>Earliest pickup</label>
-                  <select value={earliestPickup} onChange={(e) => setEarliestPickup(e.target.value as any)}>
-                    <option value="today">Today</option>
-                    <option value="tomorrow">Tomorrow</option>
-                    <option value="weekend">Weekend</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label>Time window</label>
-                  <select value={timeWindow} onChange={(e) => setTimeWindow(e.target.value as any)}>
-                    <option value="morning">Morning</option>
-                    <option value="afternoon">Afternoon</option>
-                    <option value="evening">Evening</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label>Optional note</label>
-                  <textarea
-                    value={note}
-                    onChange={(e) => setNote(e.target.value)}
-                    placeholder="Example: I can meet at the library after 3pm."
-                  />
-                </div>
-
-                {msg && <div className="toast">{msg}</div>}
-
-                <div className="modalActions">
-                  <button className="btn ghost" onClick={() => setShowInterest(false)}>Cancel</button>
-                  <button className="btn teal" onClick={submitInterest} disabled={saving}>
-                    {saving ? "Sending…" : "Send request"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* REQUEST: Offer modal */}
-          {postType === "request" && showOfferModal && (
-            <div className="modal" onClick={() => setShowOfferModal(false)}>
-              <div className="modalInner modalReq" onClick={(e) => e.stopPropagation()}>
-                <div className="modalTop">
-                  <div className="modalTitle">Offer help</div>
-                  <button className="x" onClick={() => setShowOfferModal(false)}>✕</button>
-                </div>
-
-                <div className="modalHint">Your offer appears in the requester’s list. Chat unlocks only if accepted.</div>
-
-                <div className="field">
-                  <label>Availability</label>
-                  <select value={offerAvailability} onChange={(e) => setOfferAvailability(e.target.value as any)}>
-                    <option value="today">Today</option>
-                    <option value="tomorrow">Tomorrow</option>
-                    <option value="this_week">This week</option>
-                    <option value="flexible">Flexible</option>
-                  </select>
-                </div>
-
-                <div className="field">
-                  <label>Optional note</label>
-                  <textarea
-                    value={offerNote}
-                    onChange={(e) => setOfferNote(e.target.value)}
-                    placeholder="Example: I can drive after 5pm. I have room for 2 bags."
-                  />
-                </div>
-
-                {msg && <div className="toast">{msg}</div>}
-
-                <div className="modalActions">
-                  <button className="btn ghost" onClick={() => setShowOfferModal(false)}>Cancel</button>
-                  <button className="btn green" onClick={submitOffer} disabled={saving}>
-                    {saving ? "Sending…" : "Send offer"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Image modal */}
-          {openImg && (
-            <div className="imgModal" onClick={() => setOpenImg(null)}>
-              <div className="imgInner" onClick={(e) => e.stopPropagation()}>
-                <div className="imgTop">
-                  <div className="imgTitle">{item.title}</div>
-                  <button className="x" onClick={() => setOpenImg(null)}>✕</button>
-                </div>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={openImg} alt={item.title} className="imgFull" />
-              </div>
-            </div>
-          )}
-        </main>
+          </div>
+        </div>
       )}
+
+      {/* GIVE: Interest modal */}
+      {postType === "give" && showInterestModal && (
+        <div className="modal" onClick={() => setShowInterestModal(false)}>
+          <div className="modalInner" onClick={(e) => e.stopPropagation()}>
+            <div className="modalTop">
+              <div className="modalTitle">Request this item</div>
+              <button className="x" onClick={() => setShowInterestModal(false)}>
+                ✕
+              </button>
+            </div>
+
+            <div className="modalHint">Tell the lister when you can pick up.</div>
+
+            <div className="field">
+              <label>Earliest pickup</label>
+              <select value={earliestPickup} onChange={(e) => setEarliestPickup(e.target.value as any)}>
+                <option value="today">Today</option>
+                <option value="tomorrow">Tomorrow</option>
+                <option value="weekend">Weekend</option>
+              </select>
+            </div>
+
+            <div className="field">
+              <label>Time window</label>
+              <select value={timeWindow} onChange={(e) => setTimeWindow(e.target.value as any)}>
+                <option value="morning">Morning</option>
+                <option value="afternoon">Afternoon</option>
+                <option value="evening">Evening</option>
+              </select>
+            </div>
+
+            <div className="field">
+              <label>Optional note</label>
+              <textarea
+                value={interestNote}
+                onChange={(e) => setInterestNote(e.target.value)}
+                placeholder="Example: I can meet at the library after 3pm."
+              />
+            </div>
+
+            <div className="modalActions">
+              <button className="btn ghost" onClick={() => setShowInterestModal(false)}>
+                Cancel
+              </button>
+              <button className="btn softGreen" onClick={submitInterest} disabled={busy}>
+                {busy ? "Sending…" : "Send request"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* REQUEST: Offer modal */}
+      {postType === "request" && showOfferModal && (
+        <div className="modal" onClick={() => setShowOfferModal(false)}>
+          <div className="modalInner" onClick={(e) => e.stopPropagation()}>
+            <div className="modalTop">
+              <div className="modalTitle">Offer help</div>
+              <button className="x" onClick={() => setShowOfferModal(false)}>
+                ✕
+              </button>
+            </div>
+
+            <div className="modalHint">Chat unlocks only if the requester accepts your offer.</div>
+
+            <div className="field">
+              <label>Availability</label>
+              <select value={offerAvailability} onChange={(e) => setOfferAvailability(e.target.value as any)}>
+                <option value="today">Today</option>
+                <option value="tomorrow">Tomorrow</option>
+                <option value="this_week">This week</option>
+                <option value="flexible">Flexible</option>
+              </select>
+            </div>
+
+            <div className="field">
+              <label>Optional note</label>
+              <textarea
+                value={offerNote}
+                onChange={(e) => setOfferNote(e.target.value)}
+                placeholder="Example: I can drive after 5pm. I have room for 2 bags."
+              />
+            </div>
+
+            <div className="modalActions">
+              <button className="btn ghost" onClick={() => setShowOfferModal(false)}>
+                Cancel
+              </button>
+              <button className="btn softGreen" onClick={submitOffer} disabled={busy}>
+                {busy ? "Sending…" : "Send offer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm modal */}
+      {confirm && (
+        <div className="modal" onClick={() => setConfirm(null)}>
+          <div className="modalInner" onClick={(e) => e.stopPropagation()}>
+            <div className="modalTop">
+              <div className="modalTitle">{confirm.title}</div>
+              <button className="x" onClick={() => setConfirm(null)}>
+                ✕
+              </button>
+            </div>
+            <div className="modalHint">{confirm.body}</div>
+            <div className="modalActions">
+              <button className="btn ghost" onClick={() => setConfirm(null)}>
+                Cancel
+              </button>
+              <button
+                className={`btn ${confirm.danger ? "danger" : "softGreen"}`}
+                onClick={async () => {
+                  await confirm.onYes();
+                }}
+              >
+                {confirm.actionLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Image modal */}
+      {openImg && item && (
+        <div className="imgModal" onClick={() => setOpenImg(null)}>
+          <div className="imgInner" onClick={(e) => e.stopPropagation()}>
+            <div className="imgTop">
+              <div className="imgTitle">{item.title}</div>
+              <button className="x" onClick={() => setOpenImg(null)}>
+                ✕
+              </button>
+            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={openImg} alt={item.title} className="imgFull" />
+          </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {toast && <div className={`toast ${toast.kind === "err" ? "toastErr" : "toastOk"}`}>{toast.kind === "err" ? "⚠ " : "✓ "}{toast.msg}</div>}
 
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background: #000;
-          color: #fff;
-          padding: 18px 16px 96px;
+          background: #f7f7f8;
+          color: #111827;
+          padding: 14px 14px 110px;
         }
 
         .top {
+          position: sticky;
+          top: 0;
+          z-index: 40;
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 12px;
-          margin-bottom: 12px;
-          position: sticky;
-          top: 0;
-          padding: 10px 0;
-          background: rgba(0,0,0,0.9);
-          backdrop-filter: blur(14px);
-          z-index: 20;
-          border-bottom: 1px solid rgba(148,163,184,0.12);
-        }
-
-        .back {
-          background: transparent;
-          color: #fff;
-          border: 1px solid rgba(148,163,184,0.25);
-          padding: 8px 12px;
-          border-radius: 12px;
-          cursor: pointer;
-          font-weight: 900;
-        }
-
-        .right {
-          display: flex;
           gap: 10px;
-          align-items: center;
+          padding: 10px 0;
+          background: rgba(247, 247, 248, 0.86);
+          backdrop-filter: blur(12px);
+          border-bottom: 1px solid rgba(17, 24, 39, 0.08);
         }
 
-        .ghost {
-          background: rgba(255,255,255,0.03);
-          color: rgba(255,255,255,0.86);
-          border: 1px solid rgba(148,163,184,0.25);
-          padding: 8px 12px;
-          border-radius: 12px;
+        .navBtn {
+          width: 42px;
+          height: 42px;
+          border-radius: 14px;
+          border: 1px solid #e5e7eb;
+          background: #fff;
           cursor: pointer;
+          font-weight: 950;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
+        }
+
+        .brand {
+          display: grid;
+          justify-items: center;
+          line-height: 1.1;
+          user-select: none;
+        }
+        .brandTitle {
+          font-weight: 950;
+          letter-spacing: -0.2px;
+        }
+        .brandSub {
+          font-size: 11px;
+          opacity: 0.7;
           font-weight: 900;
+        }
+
+        .navRight {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .navChip {
+          border-radius: 999px;
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          padding: 9px 10px;
+          font-weight: 900;
+          cursor: pointer;
+          box-shadow: 0 6px 16px rgba(0, 0, 0, 0.05);
         }
 
         .wrap {
@@ -1066,51 +1144,74 @@ export default function ItemDetailPage() {
           margin: 0 auto;
         }
 
-        .err { color: #f87171; font-weight: 800; margin: 10px 0; }
-        .loading { opacity: 0.8; font-weight: 800; margin: 10px 0; }
+        .alert {
+          margin: 10px 0;
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          padding: 10px 12px;
+          border-radius: 14px;
+          font-weight: 900;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
+        }
+        .alert.err {
+          border-color: rgba(185, 28, 28, 0.25);
+          background: rgba(185, 28, 28, 0.06);
+          color: #991b1b;
+        }
 
         .titleRow {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
           gap: 12px;
+          margin-top: 8px;
+        }
+
+        .titleLeft {
+          min-width: 0;
         }
 
         .h1 {
           margin: 0;
-          font-size: 36px;
+          font-size: 32px;
           font-weight: 950;
-          letter-spacing: -0.4px;
+          letter-spacing: -0.5px;
           line-height: 1.05;
         }
 
-        .tag {
-          padding: 6px 10px;
+        .sub {
+          margin-top: 8px;
+          opacity: 0.75;
+          font-weight: 900;
+          color: #374151;
+          overflow-wrap: anywhere;
+        }
+
+        .typePill {
+          flex: 0 0 auto;
           border-radius: 999px;
+          padding: 7px 10px;
           font-size: 12px;
           font-weight: 950;
-          border: 1px solid rgba(148,163,184,0.22);
-          background: rgba(255,255,255,0.04);
-          color: rgba(255,255,255,0.86);
-          white-space: nowrap;
-          margin-top: 6px;
+          border: 1px solid #e5e7eb;
+          background: #fff;
         }
-        .tagItem {
-          border: 1px solid rgba(52,211,153,0.25);
-          background: rgba(16,185,129,0.14);
-          color: rgba(209,250,229,0.92);
+        .typePill.give {
+          border-color: rgba(16, 185, 129, 0.3);
+          background: rgba(16, 185, 129, 0.10);
+          color: #065f46;
         }
-        .tagReq {
-          border: 1px solid rgba(34,197,94,0.25);
-          background: rgba(34,197,94,0.12);
-          color: rgba(209,250,229,0.92);
+        .typePill.req {
+          border-color: rgba(34, 197, 94, 0.3);
+          background: rgba(34, 197, 94, 0.10);
+          color: #166534;
         }
 
         .chips {
           margin-top: 12px;
           display: flex;
-          gap: 10px;
           flex-wrap: wrap;
+          gap: 10px;
         }
 
         .chip {
@@ -1119,80 +1220,91 @@ export default function ItemDetailPage() {
           gap: 8px;
           padding: 8px 10px;
           border-radius: 999px;
-          border: 1px solid rgba(148,163,184,0.20);
-          background: rgba(255,255,255,0.04);
-          color: rgba(255,255,255,0.88);
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          color: #111827;
           font-size: 13px;
           font-weight: 900;
           white-space: nowrap;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
         }
 
-        .muted { opacity: 0.75; }
+        .muted {
+          opacity: 0.75;
+          font-weight: 900;
+          color: #374151;
+        }
 
-        .mediaBlock {
+        .hero {
           margin-top: 14px;
         }
 
-        .mediaBtn {
-          padding: 0;
+        .heroMediaBtn {
+          width: 100%;
           border: none;
           background: transparent;
-          cursor: pointer;
-          width: 100%;
+          padding: 0;
+          cursor: zoom-in;
         }
 
-        .mediaImg {
+        .heroImg {
           width: 100%;
           height: 420px;
           object-fit: cover;
-          border-radius: 16px;
-          border: 1px solid rgba(148,163,184,0.18);
+          border-radius: 18px;
+          border: 1px solid #e5e7eb;
           display: block;
+          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.10);
         }
 
-        .noPhoto {
+        .heroEmpty {
           width: 100%;
-          height: 240px;
-          border-radius: 16px;
-          border: 1px dashed rgba(148,163,184,0.35);
+          height: 260px;
+          border-radius: 18px;
+          border: 1px dashed rgba(107, 114, 128, 0.35);
           display: flex;
           align-items: center;
           justify-content: center;
-          color: rgba(148,163,184,0.9);
-          font-weight: 900;
+          color: #6b7280;
+          font-weight: 950;
+          background: #ffffff;
         }
 
-        .reqHero {
+        .heroReq {
           width: 100%;
-          min-height: 220px;
-          border-radius: 16px;
-          border: 1px solid rgba(34,197,94,0.22);
-          background: linear-gradient(180deg, rgba(34,197,94,0.10), rgba(0,0,0,0.25));
+          min-height: 230px;
+          border-radius: 18px;
+          border: 1px solid rgba(16, 185, 129, 0.25);
+          background: linear-gradient(180deg, rgba(16, 185, 129, 0.10), rgba(255, 255, 255, 0.92));
           padding: 16px;
+          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.08);
           display: flex;
           flex-direction: column;
           justify-content: flex-end;
         }
 
-        .reqLine {
+        .heroReqLine {
           font-weight: 950;
-          font-size: 14px;
-          opacity: 0.92;
+          font-size: 13px;
+          opacity: 0.9;
+          color: #065f46;
         }
 
-        .reqBody {
+        .heroReqBody {
           margin-top: 10px;
-          opacity: 0.88;
+          opacity: 0.9;
           line-height: 1.55;
           white-space: pre-wrap;
+          color: #111827;
         }
 
         .panel {
           margin-top: 14px;
-          background: rgba(255,255,255,0.04);
-          border: 1px solid rgba(148,163,184,0.16);
-          border-radius: 16px;
+          background: #fff;
+          border: 1px solid #e5e7eb;
+          border-radius: 18px;
           padding: 14px;
+          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.06);
         }
 
         .panelTop {
@@ -1205,97 +1317,33 @@ export default function ItemDetailPage() {
 
         .panelTitle {
           font-weight: 950;
+          font-size: 16px;
         }
 
         .panelBody {
-          opacity: 0.9;
-          line-height: 1.55;
+          opacity: 0.92;
+          line-height: 1.6;
           white-space: pre-wrap;
+          color: #111827;
         }
 
         .smallMuted {
           font-size: 13px;
           opacity: 0.7;
           font-weight: 900;
+          color: #374151;
         }
 
-        .actions {
-          margin-top: 14px;
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-        }
-
-        .btn {
-          border-radius: 12px;
-          padding: 10px 14px;
-          cursor: pointer;
-          font-weight: 950;
-          border: 1px solid rgba(148,163,184,0.22);
-          background: rgba(255,255,255,0.03);
-          color: #fff;
-        }
-
-        .btn.disabled {
-          opacity: 0.65;
-          cursor: not-allowed;
-        }
-
-        .btn.primary {
-          border: 1px solid rgba(52,211,153,0.25);
-          background: rgba(16,185,129,0.18);
-        }
-
-        .btn.teal {
-          border: 1px solid rgba(16,185,129,0.30);
-          background: rgba(16,185,129,0.22);
-        }
-
-        .btn.green {
-          border: 1px solid rgba(34,197,94,0.30);
-          background: rgba(34,197,94,0.18);
-        }
-
-        .btn.blue {
-          border: 1px solid rgba(59,130,246,0.25);
-          background: rgba(59,130,246,0.12);
-        }
-
-        .btn.amber {
-          border: 1px solid rgba(234,179,8,0.25);
-          background: rgba(234,179,8,0.14);
-        }
-
-        .btn.danger {
-          border: 1px solid rgba(248,113,113,0.30);
-          background: rgba(239,68,68,0.08);
-          color: rgba(254,202,202,0.95);
-        }
-
-        .btn.ghost {
-          background: rgba(255,255,255,0.03);
-        }
-
-        .toast {
-          margin-top: 12px;
-          border: 1px solid rgba(148,163,184,0.22);
-          border-radius: 12px;
-          padding: 10px;
-          opacity: 0.92;
-          background: rgba(0,0,0,0.35);
-        }
-
-        /* Offers */
         .offerList {
           display: grid;
           gap: 10px;
         }
 
         .offerCard {
-          border: 1px solid rgba(148,163,184,0.18);
-          border-radius: 14px;
+          border: 1px solid #e5e7eb;
+          border-radius: 16px;
           padding: 12px;
-          background: rgba(0,0,0,0.22);
+          background: #fff;
         }
 
         .offerTop {
@@ -1308,6 +1356,7 @@ export default function ItemDetailPage() {
 
         .offerName {
           font-weight: 950;
+          color: #111827;
         }
 
         .offerMeta {
@@ -1315,12 +1364,14 @@ export default function ItemDetailPage() {
           opacity: 0.85;
           font-size: 13px;
           font-weight: 900;
+          color: #374151;
         }
 
         .offerNote {
           margin-top: 8px;
-          opacity: 0.9;
+          opacity: 0.92;
           white-space: pre-wrap;
+          color: #111827;
         }
 
         .offerActions {
@@ -1335,38 +1386,137 @@ export default function ItemDetailPage() {
           border-radius: 999px;
           font-size: 12px;
           font-weight: 950;
-          border: 1px solid rgba(148,163,184,0.22);
-          background: rgba(255,255,255,0.04);
-          color: rgba(255,255,255,0.85);
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          color: #111827;
         }
-        .pillGreen { border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.14); color: rgba(209,250,229,0.95); }
-        .pillBlue { border-color: rgba(59,130,246,0.35); background: rgba(59,130,246,0.14); color: rgba(191,219,254,0.95); }
-        .pillAmber { border-color: rgba(234,179,8,0.35); background: rgba(234,179,8,0.12); color: rgba(254,249,195,0.95); }
-        .pillRed { border-color: rgba(248,113,113,0.35); background: rgba(239,68,68,0.10); color: rgba(254,202,202,0.95); }
+        .toneGray {
+          border-color: rgba(107, 114, 128, 0.25);
+          background: rgba(107, 114, 128, 0.08);
+          color: #374151;
+        }
+        .toneGreen {
+          border-color: rgba(16, 185, 129, 0.30);
+          background: rgba(16, 185, 129, 0.12);
+          color: #065f46;
+        }
+        .toneBlue {
+          border-color: rgba(59, 130, 246, 0.30);
+          background: rgba(59, 130, 246, 0.10);
+          color: #1d4ed8;
+        }
+        .toneAmber {
+          border-color: rgba(234, 179, 8, 0.35);
+          background: rgba(234, 179, 8, 0.10);
+          color: #92400e;
+        }
+        .toneRed {
+          border-color: rgba(248, 113, 113, 0.35);
+          background: rgba(239, 68, 68, 0.08);
+          color: #991b1b;
+        }
+
+        .btn {
+          border-radius: 14px;
+          padding: 10px 12px;
+          cursor: pointer;
+          font-weight: 950;
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          color: #111827;
+        }
+        .btn.primary {
+          border-color: rgba(16, 185, 129, 0.35);
+          background: rgba(16, 185, 129, 0.12);
+          color: #065f46;
+        }
+        .btn.softGreen {
+          border-color: rgba(16, 185, 129, 0.35);
+          background: rgba(16, 185, 129, 0.12);
+          color: #065f46;
+        }
+        .btn.softBlue {
+          border-color: rgba(59, 130, 246, 0.35);
+          background: rgba(59, 130, 246, 0.10);
+          color: #1d4ed8;
+        }
+        .btn.softAmber {
+          border-color: rgba(234, 179, 8, 0.35);
+          background: rgba(234, 179, 8, 0.10);
+          color: #92400e;
+        }
+        .btn.danger {
+          border-color: rgba(185, 28, 28, 0.35);
+          background: rgba(185, 28, 28, 0.08);
+          color: #991b1b;
+        }
+        .btn.ghost {
+          background: #fff;
+        }
+
+        /* Bottom bar */
+        .bottomBar {
+          position: fixed;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          z-index: 60;
+          padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+          background: rgba(247, 247, 248, 0.88);
+          backdrop-filter: blur(14px);
+          border-top: 1px solid rgba(17, 24, 39, 0.08);
+        }
+
+        .barInner {
+          max-width: 920px;
+          margin: 0 auto;
+          display: grid;
+          grid-template-columns: 1.4fr 1fr;
+          gap: 10px;
+        }
+
+        .cta {
+          height: 46px;
+          border-radius: 16px;
+          border: 1px solid rgba(16, 185, 129, 0.35);
+          background: rgba(16, 185, 129, 0.14);
+          color: #065f46;
+          font-weight: 950;
+          cursor: pointer;
+          box-shadow: 0 18px 44px rgba(16, 185, 129, 0.12);
+        }
+        .cta.ghost {
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          color: #111827;
+          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.06);
+        }
+        .cta.disabled {
+          opacity: 0.65;
+          cursor: not-allowed;
+          box-shadow: none;
+        }
 
         /* Modals */
         .modal {
           position: fixed;
           inset: 0;
-          background: rgba(0,0,0,0.65);
+          background: rgba(17, 24, 39, 0.45);
           display: flex;
           align-items: center;
           justify-content: center;
           padding: 16px;
-          z-index: 50;
+          z-index: 80;
         }
 
         .modalInner {
           width: 100%;
           max-width: 520px;
           border-radius: 18px;
-          border: 1px solid rgba(148,163,184,0.22);
-          background: rgba(2,6,23,1);
-          padding: 16px;
-        }
-
-        .modalReq {
-          border-color: rgba(34,197,94,0.22);
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          padding: 14px;
+          box-shadow: 0 30px 80px rgba(0, 0, 0, 0.18);
         }
 
         .modalTop {
@@ -1377,24 +1527,27 @@ export default function ItemDetailPage() {
         }
 
         .modalTitle {
-          font-size: 18px;
+          font-size: 16px;
           font-weight: 950;
+          color: #111827;
         }
 
         .x {
-          background: transparent;
-          border: 1px solid rgba(148,163,184,0.22);
-          color: #fff;
+          background: #fff;
+          border: 1px solid #e5e7eb;
+          color: #111827;
           padding: 6px 10px;
-          border-radius: 10px;
+          border-radius: 12px;
           cursor: pointer;
           font-weight: 950;
         }
 
         .modalHint {
-          margin-top: 12px;
+          margin-top: 10px;
           opacity: 0.85;
           line-height: 1.45;
+          color: #374151;
+          font-weight: 700;
         }
 
         .field {
@@ -1405,17 +1558,19 @@ export default function ItemDetailPage() {
           display: block;
           font-weight: 900;
           margin-bottom: 6px;
+          color: #111827;
         }
 
         .field select,
         .field textarea {
           width: 100%;
-          background: #000;
-          color: #fff;
-          border: 1px solid rgba(148,163,184,0.22);
+          background: #fff;
+          color: #111827;
+          border: 1px solid #e5e7eb;
           padding: 10px 12px;
-          border-radius: 12px;
+          border-radius: 14px;
           outline: none;
+          font-weight: 800;
         }
 
         .field textarea {
@@ -1435,7 +1590,7 @@ export default function ItemDetailPage() {
         .imgModal {
           position: fixed;
           inset: 0;
-          background: rgba(0,0,0,0.75);
+          background: rgba(17, 24, 39, 0.70);
           display: flex;
           align-items: center;
           justify-content: center;
@@ -1446,10 +1601,11 @@ export default function ItemDetailPage() {
         .imgInner {
           width: min(1000px, 95vw);
           max-height: 90vh;
-          background: rgba(255,255,255,0.04);
-          border: 1px solid rgba(148,163,184,0.18);
-          border-radius: 16px;
+          background: #fff;
+          border: 1px solid #e5e7eb;
+          border-radius: 18px;
           overflow: hidden;
+          box-shadow: 0 30px 90px rgba(0, 0, 0, 0.22);
         }
 
         .imgTop {
@@ -1457,7 +1613,7 @@ export default function ItemDetailPage() {
           align-items: center;
           justify-content: space-between;
           padding: 10px 12px;
-          border-bottom: 1px solid rgba(148,163,184,0.15);
+          border-bottom: 1px solid #e5e7eb;
         }
 
         .imgTitle {
@@ -1465,6 +1621,7 @@ export default function ItemDetailPage() {
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+          color: #111827;
         }
 
         .imgFull {
@@ -1473,12 +1630,43 @@ export default function ItemDetailPage() {
           max-height: 80vh;
           object-fit: contain;
           display: block;
-          background: #000;
+          background: #111827;
+        }
+
+        /* Toast */
+        .toast {
+          position: fixed;
+          left: 50%;
+          transform: translateX(-50%);
+          bottom: 88px;
+          z-index: 10000;
+          border-radius: 14px;
+          padding: 10px 12px;
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          box-shadow: 0 18px 50px rgba(0, 0, 0, 0.14);
+          font-weight: 950;
+          max-width: min(720px, calc(100vw - 24px));
+          width: fit-content;
+          color: #111827;
+        }
+        .toastOk {
+          border-color: rgba(16, 185, 129, 0.28);
+        }
+        .toastErr {
+          border-color: rgba(185, 28, 28, 0.28);
         }
 
         @media (max-width: 520px) {
-          .h1 { font-size: 28px; }
-          .mediaImg { height: 300px; }
+          .h1 {
+            font-size: 26px;
+          }
+          .heroImg {
+            height: 320px;
+          }
+          .barInner {
+            grid-template-columns: 1fr;
+          }
         }
       `}</style>
     </div>
