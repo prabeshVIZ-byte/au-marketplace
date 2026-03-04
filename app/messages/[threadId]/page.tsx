@@ -90,19 +90,13 @@ function fmtTime(iso: string) {
 function fmtDayLabel(iso: string) {
   const d = new Date(iso);
   const now = new Date();
-  const sameYear = d.getFullYear() === now.getFullYear();
   const sameDay = d.toDateString() === now.toDateString();
-  const yday = new Date(now);
-  yday.setDate(now.getDate() - 1);
-  const isYesterday = d.toDateString() === yday.toDateString();
-
+  const y = new Date(now);
+  y.setDate(now.getDate() - 1);
+  const isYesterday = d.toDateString() === y.toDateString();
   if (sameDay) return "Today";
   if (isYesterday) return "Yesterday";
-  return d.toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-    ...(sameYear ? {} : { year: "numeric" }),
-  });
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
 function makeClientId() {
@@ -135,7 +129,7 @@ function dealLabelOf(trade: TradeRow | null) {
   return "Not started";
 }
 
-function dealPillTone(trade: TradeRow | null) {
+function dealToneOf(trade: TradeRow | null) {
   if (!trade) return "neutral" as const;
   if (trade.state === "proposed") return "warn" as const;
   if (trade.state === "confirmed") return "good" as const;
@@ -207,6 +201,19 @@ export default function ThreadPage() {
   const listRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
+
+  // ✅ FIX: keep composer ABOVE your bottom nav
+  const [bottomNavH, setBottomNavH] = useState(86);
+  useEffect(() => {
+    const update = () => {
+      const nav = document.querySelector("nav");
+      const h = nav ? (nav as HTMLElement).getBoundingClientRect().height : 86;
+      setBottomNavH(Math.max(72, Math.min(120, Math.round(h || 86))));
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
 
   // ---------- derived ----------
   const isAshland = useMemo(() => {
@@ -318,8 +325,7 @@ export default function ThreadPage() {
     const { data, error } = await q;
     if (error) throw new Error(error.message || "Error loading messages.");
 
-    const rows = ((data as MessageRow[]) || []).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
-    return rows;
+    return ((data as MessageRow[]) || []).sort((a, b) => isoToMs(a.created_at) - isoToMs(b.created_at));
   }
 
   async function loadInitialMessages() {
@@ -381,20 +387,16 @@ export default function ThreadPage() {
         onConflict: "thread_id,user_id",
       });
       setMyLastSeenAt(nowIso);
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   // ================= REACTIONS =================
   async function loadReactions(uid: string, msgIds: string[]) {
     if (msgIds.length === 0) return;
-
     const { data, error } = await supabase
       .from("message_reactions")
       .select("id,message_id,user_id,emoji,created_at")
       .in("message_id", msgIds);
-
     if (error) return;
 
     const counts: Record<string, Record<string, number>> = {};
@@ -403,7 +405,6 @@ export default function ThreadPage() {
     for (const r of (data as ReactionRow[]) || []) {
       counts[r.message_id] ??= {};
       counts[r.message_id][r.emoji] = (counts[r.message_id][r.emoji] || 0) + 1;
-
       if (r.user_id === uid) {
         mine[r.message_id] ??= {};
         mine[r.message_id][r.emoji] = true;
@@ -418,7 +419,6 @@ export default function ThreadPage() {
     if (!userId) return;
     const already = !!myReactions?.[messageId]?.[emoji];
 
-    // optimistic
     setMyReactions((prev) => {
       const next = { ...(prev || {}) };
       next[messageId] = { ...(next[messageId] || {}) };
@@ -458,6 +458,8 @@ export default function ThreadPage() {
     const tempId = `temp-${client_id}`;
     const now = new Date().toISOString();
 
+    const reply = replyTo;
+
     const optimistic: MessageRow = {
       id: tempId,
       thread_id: threadId,
@@ -467,7 +469,7 @@ export default function ThreadPage() {
       client_id,
       edited_at: null,
       deleted_at: null,
-      reply_to: replyTo?.id ?? null,
+      reply_to: reply?.id ?? null,
       attachments: payload.attachments ?? null,
     };
 
@@ -484,7 +486,7 @@ export default function ThreadPage() {
           sender_id: userId,
           body,
           client_id,
-          reply_to: replyTo?.id ?? null,
+          reply_to: reply?.id ?? null,
           attachments: payload.attachments ?? null,
         },
       ])
@@ -601,7 +603,7 @@ export default function ThreadPage() {
     await sendMessage({ body: "", attachments: { type: "image", url } });
   }
 
-  // ================= PICKUP CONFIRM (your gate) =================
+  // ================= PICKUP CONFIRM (gate) =================
   async function confirmPickupFromChat() {
     if (!isAshland || !userId) return router.push("/me");
     if (!thread?.item_id || !myInterest?.id) return;
@@ -795,15 +797,13 @@ export default function ThreadPage() {
     }
   }
 
-  // ================= REALTIME (MESSAGES + PRESENCE + REACTIONS) =================
+  // ================= PRESENCE / TYPING =================
   async function trackTyping(isTyping: boolean) {
     const ch = channelRef.current as any;
     if (!ch || !userId) return;
     try {
       await ch.track({ user_id: userId, typing: isTyping });
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   function onTextChange(v: string) {
@@ -824,7 +824,7 @@ export default function ThreadPage() {
     const node = el;
     function onScroll() {
       const dist = node.scrollHeight - node.scrollTop - node.clientHeight;
-      setStickToBottom(dist < 160);
+      setStickToBottom(dist < 180);
     }
 
     node.addEventListener("scroll", onScroll);
@@ -950,6 +950,7 @@ export default function ThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
+  // reactions load
   useEffect(() => {
     if (!userId) return;
     if (messages.length === 0) return;
@@ -981,70 +982,49 @@ export default function ThreadPage() {
     return isoToMs(otherLastSeenAt) >= isoToMs(lastMyMessage.created_at);
   }, [lastMyMessage, otherLastSeenAt]);
 
+  const grouped = useMemo(() => {
+    const out: Array<{ kind: "day"; key: string; label: string } | { kind: "msg"; msg: MessageRow }> = [];
+    let lastDay = "";
+    for (const m of messages) {
+      const dayKey = new Date(m.created_at).toDateString();
+      if (dayKey !== lastDay) {
+        lastDay = dayKey;
+        out.push({ kind: "day", key: dayKey, label: fmtDayLabel(m.created_at) });
+      }
+      out.push({ kind: "msg", msg: m });
+    }
+    return out;
+  }, [messages]);
+
+  const st = statusBadge(item?.status);
   const dealLabel = dealLabelOf(trade);
-  const dealTone = dealPillTone(trade);
+  const dealTone = dealToneOf(trade);
 
   const canProposeDeal = !trade && !!thread?.item_id && !!thread?.owner_id && !!thread?.requester_id && !mustConfirmBeforeChat;
   const canConfirmDeal = trade?.state === "proposed" && trade?.proposed_by !== userId && isParticipant(trade, userId);
   const canCompleteDeal = trade?.state === "confirmed" && isParticipant(trade, userId);
   const canCancelDeal = !!trade && (trade.state === "proposed" || trade.state === "confirmed") && isParticipant(trade, userId);
 
-  const grouped = useMemo(() => {
-    const out: Array<
-      | { kind: "day"; key: string; label: string }
-      | { kind: "msg"; msg: MessageRow; mine: boolean; time: string; deleted: boolean; isTemp: boolean; failed: boolean }
-    > = [];
+  // ✅ FIX: reserve space so the message box NEVER gets hidden
+  const COMPOSER_H = 76;
+  const BANNER_H = replyTo || editingId ? 58 : 0;
+  const reservedBottom = bottomNavH + COMPOSER_H + BANNER_H + 18;
 
-    let lastDayKey = "";
-    for (const m of messages) {
-      const dayKey = new Date(m.created_at).toDateString();
-      if (dayKey !== lastDayKey) {
-        lastDayKey = dayKey;
-        out.push({ kind: "day", key: dayKey, label: fmtDayLabel(m.created_at) });
-      }
-      const mine = !!userId && m.sender_id === userId;
-      const deleted = !!m.deleted_at;
-      const isTemp = String(m.id).startsWith("temp-");
-      const failed = m.edited_at === "FAILED";
-      out.push({
-        kind: "msg",
-        msg: m,
-        mine,
-        time: fmtTime(m.created_at),
-        deleted,
-        isTemp,
-        failed,
-      });
-    }
-    return out;
-  }, [messages, userId]);
-
-  // ================= RENDER =================
   if (!threadId) {
-    return (
-      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#0f172a", padding: 18 }}>
-        Invalid thread.
-      </div>
-    );
+    return <div style={{ minHeight: "100vh", padding: 18 }}>Invalid thread.</div>;
   }
 
   if (!isAshland) {
-    return (
-      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#0f172a", padding: 18 }}>
-        Checking access…
-      </div>
-    );
+    return <div style={{ minHeight: "100vh", padding: 18 }}>Checking access…</div>;
   }
 
-  const st = statusBadge(item?.status);
-
   return (
-    <div className="page" onClick={() => openMenuFor && setOpenMenuFor(null)}>
+    <div className="wrap" onClick={() => openMenuFor && setOpenMenuFor(null)}>
       {/* Sticky header */}
       <header className="top" onClick={(e) => e.stopPropagation()}>
         <div className="topRow">
           <button className="backBtn" type="button" onClick={() => router.push("/messages")}>
-            <span aria-hidden>←</span> Back
+            ← Back
           </button>
 
           <div className="brand">
@@ -1059,10 +1039,9 @@ export default function ThreadPage() {
             className="miniBtn"
             type="button"
             onClick={() => {
-              loadReads(userId!);
+              if (userId) loadReads(userId);
               loadTrade();
             }}
-            aria-label="Refresh"
             title="Refresh"
           >
             ↻
@@ -1079,9 +1058,7 @@ export default function ThreadPage() {
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={item.photo_url} alt={item.title} />
                 ) : (
-                  <div className="noThumb" aria-hidden>
-                    📦
-                  </div>
+                  <div className="noThumb">📦</div>
                 )}
               </div>
 
@@ -1094,12 +1071,9 @@ export default function ThreadPage() {
                 </div>
               </div>
 
-              <div className="chev" aria-hidden>
-                ›
-              </div>
+              <div className="chev">›</div>
             </button>
 
-            {/* Deal bar */}
             <div className="dealBar">
               <div className="dealLeft">
                 <div className="dealTitle">Deal</div>
@@ -1135,7 +1109,6 @@ export default function ThreadPage() {
               {tradeErr && <div className="tradeErr">{tradeErr}</div>}
             </div>
 
-            {/* Buyer gate (clean, single CTA) */}
             {mustConfirmBeforeChat && (
               <div className="gate">
                 <div className="gateText">
@@ -1148,19 +1121,10 @@ export default function ThreadPage() {
             )}
           </div>
         )}
-
-        {!loading && !item && (
-          <div className="meta">
-            <div className="emptyMeta">
-              <div className="emptyMetaTitle">Conversation</div>
-              <div className="emptyMetaSub">This thread has no item attached.</div>
-            </div>
-          </div>
-        )}
       </header>
 
-      {/* Messages */}
-      <main className="main" onClick={(e) => e.stopPropagation()}>
+      {/* Messages list */}
+      <main className="main" onClick={(e) => e.stopPropagation()} style={{ paddingBottom: reservedBottom }}>
         <div ref={listRef} className="list">
           {hasMore && (
             <button className="loadMore" onClick={loadOlder} disabled={loadingMore} type="button">
@@ -1180,28 +1144,30 @@ export default function ThreadPage() {
                 );
               }
 
-              const { msg: m, mine, time, deleted, isTemp, failed } = x;
-
+              const m = x.msg;
+              const mine = !!userId && m.sender_id === userId;
+              const deleted = !!m.deleted_at;
+              const isTemp = String(m.id).startsWith("temp-");
+              const failed = m.edited_at === "FAILED";
+              const time = fmtTime(m.created_at);
               const att = m.attachments || null;
+
               const replyTarget = m.reply_to ? messages.find((z) => z.id === m.reply_to) : null;
 
               return (
                 <div key={m.id} className={`row ${mine ? "mine" : "theirs"}`}>
                   <div className={`bubble ${mine ? "bMine" : "bTheirs"} ${deleted ? "deleted" : ""}`}>
-                    {/* reply preview */}
                     {replyTarget && !deleted && (
                       <button
                         className="replyPeek"
                         type="button"
                         onClick={() => {
-                          // simple: scroll to target by id if present
                           const el = document.getElementById(`msg-${replyTarget.id}`);
                           el?.scrollIntoView({ behavior: "smooth", block: "center" });
                         }}
                       >
                         <div className="replyPeekTop">
-                          Replying to{" "}
-                          <b>{replyTarget.sender_id === userId ? "you" : safeName(otherProfile)}</b>
+                          Replying to <b>{replyTarget.sender_id === userId ? "you" : safeName(otherProfile)}</b>
                         </div>
                         <div className="replyPeekBody">
                           {replyTarget.deleted_at ? "Message deleted" : (replyTarget.body || "").slice(0, 90)}
@@ -1209,7 +1175,6 @@ export default function ThreadPage() {
                       </button>
                     )}
 
-                    {/* body */}
                     <div id={`msg-${m.id}`} className="body">
                       {deleted ? (
                         <span className="deletedText">Message deleted</span>
@@ -1223,13 +1188,7 @@ export default function ThreadPage() {
                           {m.body ? <div className="text">{m.body}</div> : null}
 
                           {failed ? (
-                            <button
-                              className="fail"
-                              type="button"
-                              onClick={() => {
-                                if (failed && isTemp) retrySend(m);
-                              }}
-                            >
+                            <button className="fail" type="button" onClick={() => failed && isTemp && retrySend(m)}>
                               Send failed — tap to retry
                             </button>
                           ) : null}
@@ -1237,7 +1196,6 @@ export default function ThreadPage() {
                       )}
                     </div>
 
-                    {/* footer */}
                     <div className="metaRow">
                       <span className="time">{time}</span>
                       {m.edited_at && m.edited_at !== "FAILED" && !deleted ? <span className="metaTiny">Edited</span> : null}
@@ -1250,7 +1208,6 @@ export default function ThreadPage() {
                           className="menuBtn"
                           type="button"
                           onClick={() => setOpenMenuFor(openMenuFor === m.id ? null : m.id)}
-                          aria-label="Message actions"
                           title="Actions"
                         >
                           ⋯
@@ -1258,7 +1215,6 @@ export default function ThreadPage() {
                       )}
                     </div>
 
-                    {/* quick actions row (minimal) */}
                     {!deleted && (
                       <div className="actions">
                         <button className="rx" type="button" onClick={() => toggleReaction(m.id, "👍")}>
@@ -1274,7 +1230,14 @@ export default function ThreadPage() {
                         {openMenuFor === m.id && (
                           <div className={`menu ${mine ? "right" : "left"}`} onClick={(e) => e.stopPropagation()}>
                             <div className="menuGrid">
-                              <button className="menuItem" type="button" onClick={() => navigator.clipboard.writeText(m.body || "")}>
+                              <button
+                                className="menuItem"
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(m.body || "");
+                                  setOpenMenuFor(null);
+                                }}
+                              >
                                 Copy
                               </button>
                               {mine && !String(m.id).startsWith("temp-") ? (
@@ -1296,7 +1259,6 @@ export default function ThreadPage() {
                       </div>
                     )}
 
-                    {/* reaction chips */}
                     {!deleted && Object.keys(reactions[m.id] || {}).length > 0 && (
                       <div className={`chips ${mine ? "chipsMine" : "chipsTheirs"}`}>
                         {Object.entries(reactions[m.id] || {}).map(([emoji, count]) => {
@@ -1329,39 +1291,46 @@ export default function ThreadPage() {
         )}
       </main>
 
-      {/* Composer */}
-      <footer className="composerWrap" onClick={(e) => e.stopPropagation()}>
-        {replyTo && (
-          <div className="replyBanner">
-            <div className="replyText">
-              Replying to: {replyTo.deleted_at ? "Message deleted" : (replyTo.body || "").slice(0, 110)}
+      {/* ✅ Reply banner (fixed, above composer) */}
+      {replyTo && (
+        <div className="fixedBanner" style={{ bottom: bottomNavH + COMPOSER_H + 10 }}>
+          <div className="bannerInner">
+            <div className="bannerText">
+              Replying to: <b>{replyTo.deleted_at ? "Message deleted" : (replyTo.body || "").slice(0, 110)}</b>
             </div>
-            <button className="replyClose" type="button" onClick={() => setReplyTo(null)} aria-label="Cancel reply">
+            <button className="bannerX" type="button" onClick={() => setReplyTo(null)}>
               ✕
             </button>
           </div>
-        )}
+        </div>
+      )}
 
-        {editingId && (
-          <div className="editBanner">
-            <input
-              value={editingText}
-              onChange={(e) => setEditingText(e.target.value)}
-              className="editInput"
-              placeholder="Edit message…"
-            />
-            <button className="editSave" type="button" onClick={saveEdit}>
+      {/* ✅ Edit banner (fixed, above composer) */}
+      {editingId && (
+        <div className="fixedBanner" style={{ bottom: bottomNavH + COMPOSER_H + 10 }}>
+          <div className="bannerInner">
+            <input className="editInput" value={editingText} onChange={(e) => setEditingText(e.target.value)} />
+            <button className="saveBtn" type="button" onClick={saveEdit} disabled={!editingText.trim()}>
               Save
             </button>
-            <button className="editCancel" type="button" onClick={() => setEditingId(null)}>
+            <button className="ghostBtn" type="button" onClick={() => setEditingId(null)}>
               Cancel
             </button>
           </div>
-        )}
+        </div>
+      )}
 
-        <div className={`composer ${mustConfirmBeforeChat ? "disabled" : ""}`}>
-          <label className="iconBtn" title="Upload image">
-            <span aria-hidden>📎</span>
+      {/* ✅ THE MESSAGE BOX (fixed, always visible) */}
+      <div
+        className="composerWrap"
+        style={{
+          bottom: bottomNavH,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="composer">
+          <label className={`iconBtn ${uploading || mustConfirmBeforeChat ? "disabled" : ""}`} title="Upload image">
+            📷
             <input
               type="file"
               accept="image/jpeg,image/png,image/webp"
@@ -1372,6 +1341,7 @@ export default function ThreadPage() {
           </label>
 
           <input
+            className="msgInput"
             value={text}
             onChange={(e) => onTextChange(e.target.value)}
             onFocus={() => userId && markSeenNow(userId)}
@@ -1383,844 +1353,709 @@ export default function ThreadPage() {
             }}
             disabled={mustConfirmBeforeChat}
             placeholder={mustConfirmBeforeChat ? "Confirm pickup above to start chatting…" : "Message…"}
-            className="input"
           />
 
           <button
-            className="send"
+            className={`sendBtn ${!text.trim() || uploading || mustConfirmBeforeChat ? "disabled" : ""}`}
             type="button"
             onClick={() => sendMessage({ body: text, attachments: null })}
-            disabled={mustConfirmBeforeChat || uploading || !text.trim()}
-            aria-label="Send"
-            title="Send"
+            disabled={!text.trim() || uploading || mustConfirmBeforeChat}
           >
-            <span className="sendIcon" aria-hidden>
-              ➤
-            </span>
+            Send
           </button>
         </div>
-      </footer>
+      </div>
 
       <style jsx>{`
-        .page {
+        .wrap {
           min-height: 100vh;
-          background: #f7f7f8;
+          background: #f6f7f9;
           color: #0f172a;
-          padding-bottom: 110px;
         }
 
+        /* Sticky header */
         .top {
           position: sticky;
           top: 0;
-          z-index: 30;
-          background: rgba(247, 247, 248, 0.92);
-          backdrop-filter: blur(12px);
-          border-bottom: 1px solid #e5e7eb;
+          z-index: 20;
+          padding: 12px 12px 10px;
+          background: rgba(246, 247, 249, 0.86);
+          backdrop-filter: blur(10px);
+          border-bottom: 1px solid rgba(15, 23, 42, 0.08);
         }
-
         .topRow {
-          display: grid;
-          grid-template-columns: 88px 1fr 44px;
+          display: flex;
           align-items: center;
+          justify-content: space-between;
           gap: 10px;
-          padding: 14px 14px 10px;
         }
-
         .backBtn {
-          border: 1px solid #e5e7eb;
+          border: 1px solid rgba(15, 23, 42, 0.14);
           background: #ffffff;
           border-radius: 999px;
           padding: 10px 12px;
+          font-weight: 800;
           cursor: pointer;
-          font-weight: 950;
-          color: #111827;
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
         }
-
+        .miniBtn {
+          width: 42px;
+          height: 42px;
+          border-radius: 999px;
+          border: 1px solid rgba(15, 23, 42, 0.14);
+          background: #ffffff;
+          font-weight: 900;
+          cursor: pointer;
+        }
         .brand {
+          flex: 1;
           min-width: 0;
           text-align: center;
         }
-
         .brandName {
-          font-weight: 950;
-          letter-spacing: -0.4px;
-          font-size: 16px;
-          line-height: 1.1;
+          font-weight: 900;
+          letter-spacing: -0.02em;
         }
-
         .brandSub {
           font-size: 12px;
-          color: #6b7280;
-          font-weight: 900;
-          margin-top: 2px;
+          color: rgba(15, 23, 42, 0.65);
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-
         .typing {
-          color: #065f46;
-          font-weight: 950;
+          color: rgba(22, 163, 74, 0.9);
+          font-weight: 800;
         }
-
-        .miniBtn {
-          width: 44px;
-          height: 44px;
-          border-radius: 16px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          cursor: pointer;
-          font-weight: 950;
-          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
-        }
-
         .err {
-          padding: 0 14px 10px;
-          color: #b91c1c;
-          font-weight: 900;
+          margin-top: 10px;
+          padding: 10px 12px;
+          border-radius: 14px;
+          background: rgba(239, 68, 68, 0.1);
+          border: 1px solid rgba(239, 68, 68, 0.25);
+          color: #991b1b;
+          font-weight: 800;
           font-size: 13px;
         }
 
         .meta {
-          padding: 0 14px 12px;
+          margin-top: 10px;
           display: flex;
           flex-direction: column;
           gap: 10px;
         }
-
         .itemCard {
           width: 100%;
-          text-align: left;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          border-radius: 18px;
-          padding: 12px;
-          display: grid;
-          grid-template-columns: 58px 1fr 16px;
-          align-items: center;
+          display: flex;
           gap: 12px;
+          align-items: center;
+          padding: 12px;
+          border-radius: 18px;
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: #ffffff;
           cursor: pointer;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
+          box-shadow: 0 10px 26px rgba(2, 6, 23, 0.06);
+          text-align: left;
         }
-
         .thumb {
-          width: 58px;
-          height: 58px;
-          border-radius: 16px;
+          width: 48px;
+          height: 48px;
+          border-radius: 14px;
           overflow: hidden;
-          border: 1px solid #e5e7eb;
-          background: #fbfbfc;
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: #f3f4f6;
+          flex-shrink: 0;
+          display: grid;
+          place-items: center;
         }
-
         .thumb img {
           width: 100%;
           height: 100%;
           object-fit: cover;
-          display: block;
         }
-
         .noThumb {
-          width: 100%;
-          height: 100%;
-          display: grid;
-          place-items: center;
-          color: #6b7280;
-          font-weight: 950;
           font-size: 18px;
+          opacity: 0.7;
         }
-
         .itemInfo {
           min-width: 0;
+          flex: 1;
         }
-
         .itemTitle {
           font-weight: 950;
-          color: #111827;
-          font-size: 15px;
+          letter-spacing: -0.02em;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-
         .itemSub {
-          margin-top: 6px;
+          margin-top: 4px;
+          font-size: 12px;
+          color: rgba(15, 23, 42, 0.65);
           display: flex;
           align-items: center;
           gap: 8px;
           flex-wrap: wrap;
         }
+        .chev {
+          font-size: 22px;
+          opacity: 0.5;
+          font-weight: 900;
+        }
 
         .badge {
-          font-size: 12px;
-          font-weight: 950;
+          display: inline-flex;
           padding: 6px 10px;
           border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fbfbfc;
-          color: #6b7280;
+          font-weight: 900;
+          border: 1px solid rgba(15, 23, 42, 0.12);
+          background: rgba(2, 6, 23, 0.03);
+          color: rgba(15, 23, 42, 0.85);
         }
-
         .badge.good {
-          background: rgba(16, 185, 129, 0.12);
-          border-color: rgba(16, 185, 129, 0.25);
-          color: #065f46;
+          background: rgba(22, 163, 74, 0.1);
+          border-color: rgba(22, 163, 74, 0.25);
+          color: rgba(22, 163, 74, 0.95);
         }
-
         .badge.warn {
-          background: rgba(245, 158, 11, 0.12);
-          border-color: rgba(245, 158, 11, 0.25);
-          color: #92400e;
+          background: rgba(234, 179, 8, 0.12);
+          border-color: rgba(234, 179, 8, 0.26);
+          color: rgba(161, 98, 7, 0.95);
         }
-
         .badge.done {
           background: rgba(59, 130, 246, 0.12);
           border-color: rgba(59, 130, 246, 0.25);
-          color: #1e3a8a;
+          color: rgba(29, 78, 216, 0.95);
         }
-
-        .muted {
-          color: #6b7280;
-          font-weight: 800;
-          font-size: 12px;
+        .badge.neutral {
+          background: rgba(2, 6, 23, 0.03);
+          border-color: rgba(15, 23, 42, 0.12);
+          color: rgba(15, 23, 42, 0.85);
         }
 
         .dotSep {
-          color: #9ca3af;
-          font-weight: 900;
-          font-size: 12px;
+          opacity: 0.5;
         }
-
-        .chev {
-          color: #9ca3af;
-          font-weight: 950;
-          font-size: 20px;
-          text-align: right;
+        .muted {
+          color: rgba(15, 23, 42, 0.65);
+          font-weight: 800;
         }
 
         .dealBar {
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          border-radius: 18px;
           padding: 12px;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.05);
-          display: grid;
-          grid-template-columns: 1fr auto;
-          gap: 10px;
+          border-radius: 18px;
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: #ffffff;
+          box-shadow: 0 10px 26px rgba(2, 6, 23, 0.06);
+          display: flex;
           align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          flex-wrap: wrap;
         }
-
         .dealLeft {
-          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
         }
-
         .dealTitle {
           font-weight: 950;
-          color: #111827;
-          font-size: 13px;
         }
-
         .dealSub {
-          margin-top: 6px;
           display: flex;
           gap: 10px;
           align-items: center;
           flex-wrap: wrap;
         }
-
         .dealPill {
-          font-size: 12px;
-          font-weight: 950;
+          display: inline-flex;
           padding: 6px 10px;
           border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fbfbfc;
-          color: #6b7280;
+          font-weight: 900;
+          border: 1px solid rgba(15, 23, 42, 0.12);
+          background: rgba(2, 6, 23, 0.03);
+          color: rgba(15, 23, 42, 0.85);
+          font-size: 12px;
         }
-
         .dealPill.good {
-          background: rgba(16, 185, 129, 0.12);
-          border-color: rgba(16, 185, 129, 0.25);
-          color: #065f46;
+          background: rgba(22, 163, 74, 0.1);
+          border-color: rgba(22, 163, 74, 0.25);
+          color: rgba(22, 163, 74, 0.95);
         }
         .dealPill.warn {
-          background: rgba(245, 158, 11, 0.12);
-          border-color: rgba(245, 158, 11, 0.25);
-          color: #92400e;
+          background: rgba(234, 179, 8, 0.12);
+          border-color: rgba(234, 179, 8, 0.26);
+          color: rgba(161, 98, 7, 0.95);
         }
         .dealPill.done {
           background: rgba(59, 130, 246, 0.12);
           border-color: rgba(59, 130, 246, 0.25);
-          color: #1e3a8a;
+          color: rgba(29, 78, 216, 0.95);
         }
-
+        .dealPill.neutral {
+          background: rgba(2, 6, 23, 0.03);
+          border-color: rgba(15, 23, 42, 0.12);
+          color: rgba(15, 23, 42, 0.85);
+        }
         .unseen {
           font-size: 12px;
-          font-weight: 950;
-          color: #b91c1c;
-          background: rgba(239, 68, 68, 0.1);
-          border: 1px solid rgba(239, 68, 68, 0.2);
+          font-weight: 900;
+          color: rgba(220, 38, 38, 0.9);
+          background: rgba(220, 38, 38, 0.08);
+          border: 1px solid rgba(220, 38, 38, 0.18);
           padding: 6px 10px;
           border-radius: 999px;
         }
-
         .dealActions {
           display: flex;
           gap: 8px;
           flex-wrap: wrap;
-          justify-content: flex-end;
         }
-
-        .actionPrimary,
-        .actionGood,
-        .actionGhost {
-          height: 38px;
-          border-radius: 14px;
+        .actionPrimary {
+          border: 1px solid rgba(22, 163, 74, 0.25);
+          background: rgba(22, 163, 74, 0.12);
+          color: rgba(22, 163, 74, 0.95);
+          padding: 10px 12px;
+          border-radius: 999px;
           font-weight: 950;
           cursor: pointer;
-          padding: 0 12px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          color: #111827;
         }
-
-        .actionPrimary {
-          border-color: rgba(16, 185, 129, 0.25);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
-        }
-
         .actionGood {
-          border-color: rgba(34, 197, 94, 0.25);
-          background: rgba(34, 197, 94, 0.12);
-          color: #065f46;
+          border: 1px solid rgba(22, 163, 74, 0.25);
+          background: rgba(22, 163, 74, 0.18);
+          color: rgba(22, 163, 74, 0.98);
+          padding: 10px 12px;
+          border-radius: 999px;
+          font-weight: 950;
+          cursor: pointer;
         }
-
         .actionGhost {
-          background: #ffffff;
-          color: #111827;
+          border: 1px solid rgba(15, 23, 42, 0.14);
+          background: transparent;
+          color: rgba(15, 23, 42, 0.9);
+          padding: 10px 12px;
+          border-radius: 999px;
+          font-weight: 950;
+          cursor: pointer;
         }
-
         .tradeErr {
-          grid-column: 1 / -1;
-          color: #b91c1c;
-          font-weight: 900;
+          width: 100%;
+          margin-top: 8px;
           font-size: 12px;
-          margin-top: 6px;
+          font-weight: 800;
+          color: #991b1b;
         }
 
         .gate {
-          border-radius: 18px;
-          border: 1px solid rgba(16, 185, 129, 0.25);
-          background: rgba(16, 185, 129, 0.12);
           padding: 12px;
+          border-radius: 18px;
+          border: 1px solid rgba(22, 163, 74, 0.2);
+          background: rgba(22, 163, 74, 0.08);
           display: flex;
-          gap: 10px;
           align-items: center;
           justify-content: space-between;
+          gap: 10px;
+          flex-wrap: wrap;
         }
-
         .gateText {
           font-weight: 950;
-          color: #065f46;
-          font-size: 13px;
-          line-height: 1.2;
         }
-
         .gateBtn {
-          height: 38px;
-          border-radius: 14px;
-          border: 1px solid rgba(16, 185, 129, 0.25);
-          background: #065f46;
-          color: #ffffff;
+          border: 1px solid rgba(22, 163, 74, 0.25);
+          background: rgba(22, 163, 74, 0.18);
+          color: rgba(22, 163, 74, 0.98);
+          padding: 10px 12px;
+          border-radius: 999px;
           font-weight: 950;
           cursor: pointer;
-          padding: 0 12px;
           white-space: nowrap;
         }
 
-        .emptyMeta {
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          border-radius: 18px;
+        /* List */
+        .main {
           padding: 12px;
         }
-
-        .emptyMetaTitle {
-          font-weight: 950;
-          color: #111827;
-        }
-
-        .emptyMetaSub {
-          margin-top: 6px;
-          color: #6b7280;
-          font-weight: 800;
-          font-size: 12px;
-        }
-
-        .main {
-          padding: 12px 14px 0;
-          max-width: 900px;
-          margin: 0 auto;
-        }
-
         .list {
-          height: calc(100vh - 350px);
-          overflow-y: auto;
-          padding-bottom: 10px;
+          min-height: calc(100vh - 240px);
         }
-
         .loadMore {
           width: 100%;
-          height: 42px;
-          border-radius: 16px;
-          border: 1px solid #e5e7eb;
+          border-radius: 14px;
+          border: 1px solid rgba(15, 23, 42, 0.1);
           background: #ffffff;
-          color: #111827;
-          font-weight: 950;
-          cursor: pointer;
-          margin-bottom: 10px;
-        }
-
-        .loading {
-          color: #6b7280;
+          padding: 12px;
           font-weight: 900;
-          font-size: 13px;
-          padding: 10px 2px;
+          cursor: pointer;
+          box-shadow: 0 10px 26px rgba(2, 6, 23, 0.05);
         }
-
+        .loading {
+          margin-top: 12px;
+          opacity: 0.7;
+          font-weight: 800;
+        }
         .day {
+          margin: 14px 0 8px;
           display: flex;
           justify-content: center;
-          margin: 14px 0 10px;
         }
-
         .day span {
           font-size: 12px;
           font-weight: 950;
-          color: #6b7280;
-          border: 1px solid #e5e7eb;
-          background: rgba(255, 255, 255, 0.9);
+          color: rgba(15, 23, 42, 0.55);
+          background: rgba(2, 6, 23, 0.04);
+          border: 1px solid rgba(15, 23, 42, 0.08);
           padding: 6px 10px;
           border-radius: 999px;
         }
-
         .row {
           display: flex;
-          margin: 10px 0;
+          margin-top: 10px;
         }
-
         .row.mine {
           justify-content: flex-end;
         }
-
         .row.theirs {
           justify-content: flex-start;
         }
-
         .bubble {
           max-width: min(720px, 88vw);
           border-radius: 18px;
-          border: 1px solid #e5e7eb;
+          border: 1px solid rgba(15, 23, 42, 0.1);
           background: #ffffff;
-          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.06);
-          overflow: visible;
-        }
-
-        .bMine {
-          background: rgba(16, 185, 129, 0.12);
-          border-color: rgba(16, 185, 129, 0.22);
-        }
-
-        .bTheirs {
-          background: #ffffff;
-        }
-
-        .deleted {
-          opacity: 0.7;
-        }
-
-        .replyPeek {
-          width: 100%;
-          text-align: left;
-          border: none;
-          background: rgba(15, 23, 42, 0.04);
-          border-bottom: 1px solid rgba(229, 231, 235, 0.9);
-          padding: 10px 12px;
-          cursor: pointer;
-        }
-
-        .replyPeekTop {
-          font-size: 11px;
-          font-weight: 950;
-          color: #6b7280;
-        }
-
-        .replyPeekBody {
-          margin-top: 4px;
-          font-size: 12px;
-          font-weight: 800;
-          color: #111827;
-          opacity: 0.9;
+          box-shadow: 0 10px 26px rgba(2, 6, 23, 0.05);
           overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
         }
-
+        .bMine {
+          border-top-right-radius: 10px;
+        }
+        .bTheirs {
+          border-top-left-radius: 10px;
+        }
+        .deleted {
+          opacity: 0.65;
+        }
         .body {
-          padding: 10px 12px;
+          padding: 12px 12px 6px;
         }
-
         .text {
           white-space: pre-wrap;
           word-break: break-word;
-          font-weight: 700;
-          color: #111827;
-          font-size: 14px;
-          line-height: 1.35;
+          font-weight: 650;
+          color: rgba(15, 23, 42, 0.92);
         }
-
         .deletedText {
           font-style: italic;
-          color: #6b7280;
-          font-weight: 800;
+          color: rgba(15, 23, 42, 0.65);
+          font-weight: 700;
         }
-
         .img {
           width: 100%;
           max-height: 360px;
           object-fit: cover;
           border-radius: 14px;
-          border: 1px solid rgba(229, 231, 235, 0.9);
           margin-bottom: 10px;
-          display: block;
         }
 
-        .fail {
-          margin-top: 10px;
-          width: 100%;
-          height: 36px;
+        .replyPeek {
+          width: calc(100% - 16px);
+          margin: 10px 8px 0;
           border-radius: 14px;
-          border: 1px solid rgba(239, 68, 68, 0.25);
-          background: rgba(239, 68, 68, 0.1);
-          color: #b91c1c;
-          font-weight: 950;
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: rgba(2, 6, 23, 0.03);
+          padding: 10px 10px;
+          text-align: left;
           cursor: pointer;
+        }
+        .replyPeekTop {
+          font-size: 12px;
+          font-weight: 900;
+          color: rgba(15, 23, 42, 0.75);
+        }
+        .replyPeekBody {
+          margin-top: 4px;
+          font-size: 12px;
+          font-weight: 750;
+          color: rgba(15, 23, 42, 0.7);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
 
         .metaRow {
-          padding: 0 12px 10px;
+          padding: 6px 10px 10px;
           display: flex;
           gap: 10px;
-          align-items: center;
           justify-content: flex-end;
+          align-items: center;
+          color: rgba(15, 23, 42, 0.55);
+          font-size: 12px;
+          font-weight: 800;
         }
-
         .time {
-          color: #6b7280;
-          font-weight: 900;
-          font-size: 12px;
+          margin-right: auto;
+          opacity: 0.75;
         }
-
         .metaTiny {
-          color: #6b7280;
-          font-weight: 900;
-          font-size: 12px;
+          opacity: 0.75;
         }
-
         .menuBtn {
-          margin-left: auto;
-          width: 34px;
-          height: 28px;
-          border-radius: 12px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: rgba(2, 6, 23, 0.03);
+          border-radius: 10px;
+          padding: 4px 8px;
           cursor: pointer;
           font-weight: 950;
-          color: #111827;
         }
 
         .actions {
-          padding: 0 12px 12px;
+          padding: 0 10px 10px;
           display: flex;
           gap: 8px;
-          align-items: center;
           flex-wrap: wrap;
-          justify-content: flex-end;
-          position: relative;
+          align-items: center;
         }
-
         .rx {
-          height: 32px;
           border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
+          padding: 7px 10px;
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: rgba(2, 6, 23, 0.03);
           cursor: pointer;
-          font-weight: 950;
-          padding: 0 10px;
+          font-weight: 900;
         }
-
         .act {
-          height: 32px;
-          border-radius: 12px;
-          border: 1px solid #e5e7eb;
+          border-radius: 999px;
+          padding: 7px 10px;
+          border: 1px solid rgba(15, 23, 42, 0.1);
           background: #ffffff;
           cursor: pointer;
           font-weight: 950;
-          padding: 0 10px;
-          color: #111827;
+        }
+        .fail {
+          margin-top: 10px;
+          width: 100%;
+          border-radius: 12px;
+          border: 1px solid rgba(220, 38, 38, 0.2);
+          background: rgba(220, 38, 38, 0.08);
+          color: rgba(153, 27, 27, 0.95);
+          padding: 10px;
+          font-weight: 950;
+          cursor: pointer;
         }
 
         .menu {
-          position: absolute;
-          top: 40px;
-          z-index: 50;
-          border-radius: 16px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          box-shadow: 0 18px 40px rgba(0, 0, 0, 0.12);
-          padding: 10px;
-          width: 220px;
+          position: relative;
         }
-
-        .menu.right {
-          right: 12px;
-        }
-
         .menu.left {
-          left: 12px;
+          margin-left: 0;
         }
-
+        .menu.right {
+          margin-left: auto;
+        }
         .menuGrid {
-          display: grid;
-          grid-template-columns: 1fr;
-          gap: 8px;
-        }
-
-        .menuItem {
-          height: 38px;
-          border-radius: 14px;
-          border: 1px solid #e5e7eb;
+          position: absolute;
+          right: 0;
+          top: 34px;
+          width: 170px;
           background: #ffffff;
-          cursor: pointer;
-          font-weight: 950;
-          color: #111827;
-          text-align: left;
-          padding: 0 12px;
+          border: 1px solid rgba(15, 23, 42, 0.12);
+          border-radius: 14px;
+          box-shadow: 0 18px 40px rgba(2, 6, 23, 0.12);
+          padding: 8px;
+          display: grid;
+          gap: 8px;
+          z-index: 50;
         }
-
+        .menuItem {
+          width: 100%;
+          border-radius: 12px;
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: rgba(2, 6, 23, 0.03);
+          padding: 10px;
+          font-weight: 900;
+          cursor: pointer;
+          text-align: left;
+        }
         .menuItem.danger {
-          border-color: rgba(239, 68, 68, 0.25);
-          background: rgba(239, 68, 68, 0.08);
-          color: #b91c1c;
+          border-color: rgba(220, 38, 38, 0.22);
+          background: rgba(220, 38, 38, 0.08);
+          color: rgba(153, 27, 27, 0.95);
         }
 
         .chips {
+          padding: 0 10px 10px;
           display: flex;
           gap: 8px;
-          padding: 0 12px 12px;
           flex-wrap: wrap;
-          justify-content: flex-end;
         }
-
         .chip {
-          height: 30px;
           border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
+          padding: 6px 10px;
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: rgba(2, 6, 23, 0.03);
           cursor: pointer;
-          font-weight: 950;
-          padding: 0 10px;
-          color: #111827;
+          font-weight: 900;
           font-size: 12px;
         }
-
         .chip.on {
-          border-color: rgba(16, 185, 129, 0.25);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
+          border-color: rgba(22, 163, 74, 0.22);
+          background: rgba(22, 163, 74, 0.1);
+          color: rgba(22, 163, 74, 0.95);
         }
 
         .toBottom {
           position: fixed;
           right: 14px;
-          bottom: 118px;
-          height: 44px;
+          bottom: calc(${bottomNavH}px + 88px);
           border-radius: 999px;
-          border: 1px solid rgba(16, 185, 129, 0.25);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
+          padding: 10px 12px;
+          border: 1px solid rgba(15, 23, 42, 0.12);
+          background: #ffffff;
+          box-shadow: 0 16px 36px rgba(2, 6, 23, 0.12);
           font-weight: 950;
           cursor: pointer;
-          padding: 0 14px;
-          box-shadow: 0 18px 40px rgba(0, 0, 0, 0.12);
+          z-index: 40;
         }
 
+        /* ✅ fixed banners */
+        .fixedBanner {
+          position: fixed;
+          left: 12px;
+          right: 12px;
+          z-index: 60;
+        }
+        .bannerInner {
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: rgba(255, 255, 255, 0.92);
+          backdrop-filter: blur(10px);
+          border-radius: 16px;
+          box-shadow: 0 18px 40px rgba(2, 6, 23, 0.12);
+          padding: 10px;
+          display: flex;
+          gap: 10px;
+          align-items: center;
+        }
+        .bannerText {
+          flex: 1;
+          min-width: 0;
+          font-size: 12px;
+          font-weight: 900;
+          color: rgba(15, 23, 42, 0.75);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .bannerX {
+          width: 38px;
+          height: 38px;
+          border-radius: 12px;
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: rgba(2, 6, 23, 0.03);
+          cursor: pointer;
+          font-weight: 950;
+        }
+        .editInput {
+          flex: 1;
+          height: 40px;
+          border-radius: 12px;
+          border: 1px solid rgba(15, 23, 42, 0.12);
+          background: #ffffff;
+          padding: 0 12px;
+          outline: none;
+          font-weight: 800;
+        }
+        .saveBtn {
+          height: 40px;
+          padding: 0 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(22, 163, 74, 0.22);
+          background: rgba(22, 163, 74, 0.12);
+          font-weight: 950;
+          cursor: pointer;
+        }
+        .saveBtn:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .ghostBtn {
+          height: 40px;
+          padding: 0 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(15, 23, 42, 0.14);
+          background: transparent;
+          font-weight: 950;
+          cursor: pointer;
+        }
+
+        /* ✅ COMPOSER (THE MESSAGE BOX) */
         .composerWrap {
           position: fixed;
           left: 0;
           right: 0;
-          bottom: 0;
-          padding: 10px 14px 16px;
-          background: rgba(247, 247, 248, 0.92);
-          backdrop-filter: blur(12px);
-          border-top: 1px solid #e5e7eb;
-          z-index: 40;
-        }
-
-        .replyBanner {
-          border: 1px solid rgba(16, 185, 129, 0.25);
-          background: rgba(16, 185, 129, 0.12);
-          border-radius: 16px;
+          z-index: 55;
           padding: 10px 12px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          margin-bottom: 10px;
+          /* safe-area support */
+          padding-bottom: calc(10px + env(safe-area-inset-bottom));
+          background: rgba(246, 247, 249, 0.9);
+          backdrop-filter: blur(10px);
+          border-top: 1px solid rgba(15, 23, 42, 0.08);
         }
-
-        .replyText {
-          font-weight: 900;
-          color: #065f46;
-          font-size: 12px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          flex: 1;
-        }
-
-        .replyClose {
-          width: 36px;
-          height: 36px;
-          border-radius: 14px;
-          border: 1px solid rgba(16, 185, 129, 0.25);
-          background: rgba(255, 255, 255, 0.7);
-          cursor: pointer;
-          font-weight: 950;
-          color: #065f46;
-        }
-
-        .editBanner {
-          border: 1px solid rgba(59, 130, 246, 0.25);
-          background: rgba(59, 130, 246, 0.1);
-          border-radius: 16px;
-          padding: 10px;
-          display: grid;
-          grid-template-columns: 1fr auto auto;
-          gap: 8px;
-          margin-bottom: 10px;
-        }
-
-        .editInput {
-          height: 42px;
-          border-radius: 14px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          padding: 0 12px;
-          outline: none;
-          font-weight: 800;
-          color: #111827;
-        }
-
-        .editSave,
-        .editCancel {
-          height: 42px;
-          border-radius: 14px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          cursor: pointer;
-          font-weight: 950;
-          padding: 0 12px;
-          color: #111827;
-        }
-
         .composer {
-          display: grid;
-          grid-template-columns: 46px 1fr 46px;
+          max-width: 980px;
+          margin: 0 auto;
+          display: flex;
           gap: 10px;
           align-items: center;
         }
-
-        .composer.disabled {
-          opacity: 0.7;
-        }
-
         .iconBtn {
           width: 46px;
           height: 46px;
-          border-radius: 16px;
-          border: 1px solid #e5e7eb;
+          border-radius: 14px;
+          border: 1px solid rgba(15, 23, 42, 0.12);
           background: #ffffff;
           display: grid;
           place-items: center;
           cursor: pointer;
-          font-weight: 950;
-          color: #111827;
-          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+          font-weight: 900;
         }
-
-        .input {
+        .iconBtn.disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+        .msgInput {
+          flex: 1;
           height: 46px;
-          border-radius: 16px;
-          border: 1px solid #e5e7eb;
+          border-radius: 14px;
+          border: 1px solid rgba(15, 23, 42, 0.12);
           background: #ffffff;
           padding: 0 12px;
           outline: none;
           font-weight: 800;
-          color: #111827;
         }
-
-        .input::placeholder {
-          color: #9ca3af;
-          font-weight: 800;
+        .msgInput:disabled {
+          opacity: 0.7;
         }
-
-        .send {
-          width: 46px;
+        .sendBtn {
           height: 46px;
-          border-radius: 16px;
-          border: 1px solid rgba(16, 185, 129, 0.25);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
+          padding: 0 16px;
+          border-radius: 14px;
+          border: 1px solid rgba(22, 163, 74, 0.22);
+          background: rgba(22, 163, 74, 0.12);
+          color: rgba(22, 163, 74, 0.98);
           font-weight: 950;
           cursor: pointer;
-          display: grid;
-          place-items: center;
         }
-
-        .send:disabled {
-          opacity: 0.6;
+        .sendBtn.disabled {
+          opacity: 0.55;
           cursor: not-allowed;
         }
 
-        .sendIcon {
-          font-size: 16px;
-          transform: translateX(1px);
-        }
-
-        @media (min-width: 900px) {
-          .topRow {
-            padding-left: 18px;
-            padding-right: 18px;
-          }
-          .meta {
-            padding-left: 18px;
-            padding-right: 18px;
-          }
+        @media (min-width: 720px) {
           .main {
             padding-left: 18px;
             padding-right: 18px;
           }
-          .composerWrap {
+          .top {
             padding-left: 18px;
             padding-right: 18px;
-          }
-          .list {
-            height: calc(100vh - 330px);
           }
         }
       `}</style>
