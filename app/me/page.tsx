@@ -2,1751 +2,1413 @@
 
 export const dynamic = "force-dynamic";
 
-import { useEffect, useMemo, useState } from "react";
+import Image from "next/image";
+import { Outfit } from "next/font/google";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
-import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
 
-/* ---------------- Types ---------------- */
+const brandFont = Outfit({
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+});
 
-type ProfileRow = {
-  id: string;
-  email: string | null;
-  full_name: string | null;
-  user_role: string | null;
-  created_at?: string;
-};
+type OwnerRole = "student" | "faculty" | null;
+type PostType = "give" | "request" | null;
 
-type MyItemRow = {
+type FeedRowFromView = {
   id: string;
   title: string;
   description: string | null;
+  category: string | null;
   status: string | null;
   created_at: string;
   photo_url: string | null;
-  post_type?: "give" | "request" | null;
+  expires_at: string | null;
+  interest_count: number;
+  owner_role?: OwnerRole;
+
+  post_type?: PostType;
+  request_group?: string | null;
+  request_timeframe?: string | null;
+  request_location?: string | null;
 };
 
-type MyRequestRow = {
-  item_id: string;
-  created_at?: string | null;
-  items: {
-    id: string;
-    title: string;
-    photo_url: string | null;
-    status: string | null;
-    post_type?: "give" | "request" | null;
-  } | null;
+type ItemMeta = {
+  id: string;
+  owner_id: string | null;
+  is_claimed: boolean | null;
+  post_type: PostType;
+  request_group: string | null;
+  request_timeframe: string | null;
+  request_location: string | null;
+  status?: string | null;
 };
 
-type IncomingInterestRow = {
-  id: string; // interests.id
-  item_id: string;
-  user_id: string;
-  created_at: string | null;
-  owner_seen_at: string | null;
-  owner_dismissed_at: string | null;
-  status: string | null;
-
-  items: {
-    id: string;
-    title: string;
-    photo_url: string | null;
-    status: string | null;
-    owner_id: string;
-    post_type?: "give" | "request" | null;
-  } | null;
-
-  requester: {
-    full_name: string | null;
-    email: string | null;
-    user_role: string | null;
-  } | null;
+type FeedRow = FeedRowFromView & {
+  owner_id?: string | null;
+  is_claimed?: boolean | null;
+  post_type?: PostType;
 };
 
-type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
-
-type IncomingOfferRow = {
-  id: string; // request_offers.id
-  request_id: string;
-  helper_id: string;
-  status: OfferStatus | null;
-  availability: string | null;
-  note: string | null;
-  created_at: string | null;
-  updated_at: string | null;
-
-  request_item: {
-    id: string;
-    title: string;
-    status: string | null;
-    owner_id: string;
-    post_type?: "give" | "request" | null;
-  } | null;
-
-  helper: {
-    full_name: string | null;
-    email: string | null;
-    user_role: string | null;
-  } | null;
-};
-
-type MyOfferRow = {
-  id: string; // request_offers.id
-  request_id: string;
-  helper_id: string;
-  status: OfferStatus | null;
-  availability: string | null;
-  note: string | null;
-  created_at: string | null;
-
-  request_item: {
-    id: string;
-    title: string;
-    status: string | null;
-    post_type?: "give" | "request" | null;
-  } | null;
-};
-
-/* ---------------- Helpers ---------------- */
-
-function isAshlandEmail(email: string) {
-  return email.trim().toLowerCase().endsWith("@ashland.edu");
-}
-
-function fmtWhen(ts: string | null | undefined) {
-  if (!ts) return "";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString();
+function formatShortDate(d: string) {
+  const dt = new Date(d);
+  if (Number.isNaN(dt.getTime())) return "";
+  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function normStatus(s: string | null | undefined) {
-  return (s ?? "").trim().toLowerCase();
+  return (s ?? "available").toLowerCase().trim();
 }
 
-function niceNameFromProfile(p: { full_name: string | null; email: string | null } | null, fallbackLabel: string) {
-  const name = (p?.full_name ?? "").trim();
-  if (name) return name;
-  const email = (p?.email ?? "").trim();
-  if (email) return email.split("@")[0];
-  return fallbackLabel; // no ids shown
+function statusLabel(status: string | null, postType: PostType) {
+  if ((postType ?? "give") === "request") return "REQUEST";
+  const st = normStatus(status);
+  if (st === "claimed") return "CLAIMED";
+  return "AVAILABLE";
 }
 
-/* ---------------- Page ---------------- */
+function statusHint(status: string | null, postType: PostType) {
+  if ((postType ?? "give") === "request") return "";
+  const st = normStatus(status);
+  if (st === "reserved") return "In talks • Waitlist open";
+  return "";
+}
 
-export default function AccountPage() {
+function requestGroupLabel(g: string | null | undefined) {
+  const k = (g ?? "").toLowerCase();
+  if (k === "logistics") return "Logistics";
+  if (k === "services") return "Services";
+  if (k === "urgent") return "Urgent";
+  if (k === "collaboration") return "Collaboration";
+  return "Request";
+}
+
+function requestTimeframeLabel(t: string | null | undefined) {
+  const k = (t ?? "").toLowerCase();
+  if (k === "today") return "Today";
+  if (k === "this_week") return "This week";
+  if (k === "flexible") return "Flexible";
+  return "";
+}
+
+export default function FeedPage() {
   const router = useRouter();
 
-  // page state
+  const [items, setItems] = useState<FeedRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // auth state
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // logged-out UI (email+password)
-  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
-  const [authEmail, setAuthEmail] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [authBusy, setAuthBusy] = useState(false);
-  const [authMsg, setAuthMsg] = useState<string | null>(null);
+  const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
+  const [savingId, setSavingId] = useState<string | null>(null);
 
-  // data state
-  const [profile, setProfile] = useState<ProfileRow | null>(null);
+  // image modal
+  const [openImg, setOpenImg] = useState<string | null>(null);
+  const [openTitle, setOpenTitle] = useState<string>("");
 
-  // tabs
-  const [tab, setTab] = useState<"listings" | "my_activity" | "requests" | "history">("listings");
+  // UI state
+  const [tab, setTab] = useState<"items" | "requests">("items");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<"newest" | "popular">("newest");
+  const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
-  const [myItems, setMyItems] = useState<MyItemRow[]>([]);
-  const [myRequests, setMyRequests] = useState<MyRequestRow[]>([]);
-  const [myOffers, setMyOffers] = useState<MyOfferRow[]>([]);
-
-  const [incomingInterests, setIncomingInterests] = useState<IncomingInterestRow[]>([]);
-  const [incomingOffers, setIncomingOffers] = useState<IncomingOfferRow[]>([]);
-  const [incomingLoading, setIncomingLoading] = useState(false);
-
-  const [stats, setStats] = useState<{ listed: number; interests: number; offers: number; chats: number }>({
-    listed: 0,
-    interests: 0,
-    offers: 0,
-    chats: 0,
-  });
-
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [deletingNotifId, setDeletingNotifId] = useState<string | null>(null);
-  const [offerActingId, setOfferActingId] = useState<string | null>(null);
-  const [myOfferActingId, setMyOfferActingId] = useState<string | null>(null);
-
-  const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && isAshlandEmail(userEmail);
-  }, [userId, userEmail]);
-
-  const unseenIncomingInterestCount = useMemo(() => {
-    return incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at).length;
-  }, [incomingInterests]);
-
-  const unseenIncomingOfferCount = useMemo(() => {
-    return incomingOffers.filter((o) => (o.status ?? "pending") === "pending").length;
-  }, [incomingOffers]);
-
-  const hasNewRequests = unseenIncomingInterestCount + unseenIncomingOfferCount > 0;
-
-  const activeListings = useMemo(() => myItems.filter((x) => normStatus(x.status) !== "claimed"), [myItems]);
-  const completedListings = useMemo(() => myItems.filter((x) => normStatus(x.status) === "claimed"), [myItems]);
+  // search delight
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [searchPulse, setSearchPulse] = useState(false);
+  const searchRef = useRef<HTMLInputElement | null>(null);
 
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
-    const s = data.session;
-    const uid = s?.user?.id ?? null;
-    const email = s?.user?.email ?? null;
-    setUserId(uid);
-    setUserEmail(email);
-    return { uid, email };
+    const session = data.session;
+    setUserId(session?.user?.id ?? null);
+    setUserEmail(session?.user?.email ?? null);
   }
 
-  async function loadProfile(uid: string) {
-    const { data: pData, error: pErr } = await supabase
-      .from("profiles")
-      .select("id,email,full_name,user_role,created_at")
-      .eq("id", uid)
-      .maybeSingle()
-      .returns<ProfileRow>();
+  const isAshland = !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  const isLoggedIn = !!userId && !!userEmail && isAshland;
 
-    if (pErr) {
-      console.warn("profile load:", pErr.message);
-      setProfile(null);
-      return;
-    }
-    setProfile(pData ?? null);
+  async function loadMyInterestMap(uid: string, itemIds: string[]) {
+    if (itemIds.length === 0) return;
+    const { data, error } = await supabase.from("interests").select("item_id").eq("user_id", uid).in("item_id", itemIds);
+    if (error) return;
+
+    const map: Record<string, boolean> = {};
+    for (const r of (data as any[]) || []) map[String(r.item_id)] = true;
+    setMyInterested(map);
   }
 
-  async function loadMyListings(uid: string) {
-    const { data: iData, error: iErr } = await supabase
-      .from("items")
-      .select("id,title,description,status,created_at,photo_url,post_type")
-      .eq("owner_id", uid)
-      .order("created_at", { ascending: false })
-      .returns<MyItemRow[]>();
-
-    if (iErr) {
-      setMyItems([]);
-      setErr(iErr.message);
-      return [];
-    }
-
-    const rows = iData ?? [];
-    setMyItems(rows);
-    return rows;
-  }
-
-  async function loadMyRequests(uid: string) {
-    const { data: rData, error: rErr } = await supabase
-      .from("interests")
-      .select("item_id,created_at,items:items(id,title,photo_url,status,post_type)")
-      .eq("user_id", uid)
-      .order("created_at", { ascending: false })
-      .returns<MyRequestRow[]>();
-
-    if (rErr) {
-      console.warn("my requests load:", rErr.message);
-      setMyRequests([]);
-      return [];
-    }
-
-    const rows = rData ?? [];
-    setMyRequests(rows);
-    return rows;
-  }
-
-  async function loadMyOffers(uid: string) {
+  async function loadOwnerMeta(itemIds: string[]) {
+    if (itemIds.length === 0) return new Map<string, ItemMeta>();
     const { data, error } = await supabase
-      .from("request_offers")
-      .select("id,request_id,helper_id,status,availability,note,created_at,request_item:items(id,title,status,post_type)")
-      .eq("helper_id", uid)
-      .order("created_at", { ascending: false })
-      .returns<MyOfferRow[]>();
-
-    if (error) {
-      console.warn("my offers load:", error.message);
-      setMyOffers([]);
-      return [];
-    }
-
-    setMyOffers((data as MyOfferRow[]) ?? []);
-    return (data as MyOfferRow[]) ?? [];
-  }
-
-  async function loadIncomingInterests(uid: string) {
-    const { data: owned, error: ownedErr } = await supabase.from("items").select("id").eq("owner_id", uid);
-    if (ownedErr) {
-      console.warn("incoming interests: owned items load:", ownedErr.message);
-      setIncomingInterests([]);
-      return;
-    }
-
-    const ownedIds = (owned ?? []).map((x: any) => x.id).filter(Boolean);
-    if (ownedIds.length === 0) {
-      setIncomingInterests([]);
-      return;
-    }
-
-    const { data: ints, error: intsErr } = await supabase
-      .from("interests")
-      .select("id,item_id,user_id,created_at,owner_seen_at,owner_dismissed_at,status")
-      .in("item_id", ownedIds)
-      .is("owner_dismissed_at", null)
-      .order("created_at", { ascending: false });
-
-    if (intsErr) {
-      console.warn("incoming interests: interests load:", intsErr.message);
-      setIncomingInterests([]);
-      return;
-    }
-
-    const interestRows = (ints ?? []) as Array<{
-      id: string;
-      item_id: string;
-      user_id: string;
-      created_at: string | null;
-      owner_seen_at: string | null;
-      owner_dismissed_at: string | null;
-      status: string | null;
-    }>;
-
-    if (interestRows.length === 0) {
-      setIncomingInterests([]);
-      return;
-    }
-
-    const uniqueItemIds = Array.from(new Set(interestRows.map((r) => r.item_id)));
-
-    const { data: itemsData, error: itemsErr } = await supabase
       .from("items")
-      .select("id,title,photo_url,status,owner_id,post_type")
-      .in("id", uniqueItemIds);
+      .select("id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,status")
+      .in("id", itemIds);
 
-    if (itemsErr) console.warn("incoming interests: items load:", itemsErr.message);
+    if (error) return new Map<string, ItemMeta>();
 
-    const itemMap: Record<
-      string,
-      { id: string; title: string; photo_url: string | null; status: string | null; owner_id: string; post_type?: "give" | "request" | null }
-    > = {};
-    (itemsData ?? []).forEach((it: any) => {
-      itemMap[it.id] = {
-        id: String(it.id),
-        title: String(it.title ?? ""),
-        photo_url: it.photo_url ?? null,
-        status: it.status ?? null,
-        owner_id: String(it.owner_id ?? ""),
-        post_type: (it.post_type ?? null) as any,
-      };
-    });
-
-    const uniqueUserIds = Array.from(new Set(interestRows.map((r) => r.user_id)));
-
-    const { data: profs, error: profErr } = await supabase.from("profiles").select("id,full_name,email,user_role").in("id", uniqueUserIds);
-    if (profErr) console.warn("incoming interests: profiles load:", profErr.message);
-
-    const profMap: Record<string, { full_name: string | null; email: string | null; user_role: string | null }> = {};
-    (profs ?? []).forEach((p: any) => {
-      profMap[p.id] = { full_name: p.full_name ?? null, email: p.email ?? null, user_role: p.user_role ?? null };
-    });
-
-    const merged: IncomingInterestRow[] = interestRows
-      .map((r) => {
-        const it = itemMap[r.item_id] ?? null;
-        const req = profMap[r.user_id] ?? null;
-        return {
-          id: String(r.id),
-          item_id: String(r.item_id),
-          user_id: String(r.user_id),
-          created_at: r.created_at ?? null,
-          owner_seen_at: r.owner_seen_at ?? null,
-          owner_dismissed_at: r.owner_dismissed_at ?? null,
-          status: r.status ?? null,
-          items: it,
-          requester: req,
-        };
-      })
-      .filter((r) => r.items?.owner_id === uid);
-
-    setIncomingInterests(merged);
+    const m = new Map<string, ItemMeta>();
+    for (const r of (data as ItemMeta[]) || []) m.set(r.id, r);
+    return m;
   }
 
-  async function loadIncomingOffers(uid: string) {
-    const { data: ownedReqs, error: ownedErr } = await supabase.from("items").select("id,title,status,owner_id,post_type").eq("owner_id", uid).eq("post_type", "request");
-    if (ownedErr) {
-      console.warn("incoming offers: owned requests load:", ownedErr.message);
-      setIncomingOffers([]);
-      return;
-    }
-
-    const reqIds = (ownedReqs ?? []).map((x: any) => x.id).filter(Boolean);
-    if (reqIds.length === 0) {
-      setIncomingOffers([]);
-      return;
-    }
-
-    const reqMap: Record<string, any> = {};
-    (ownedReqs ?? []).forEach((r: any) => (reqMap[String(r.id)] = r));
-
-    const { data: offers, error: offErr } = await supabase
-      .from("request_offers")
-      .select("id,request_id,helper_id,status,availability,note,created_at,updated_at")
-      .in("request_id", reqIds)
-      .order("created_at", { ascending: false });
-
-    if (offErr) {
-      console.warn("incoming offers: offers load:", offErr.message);
-      setIncomingOffers([]);
-      return;
-    }
-
-    const offerRows = (offers ?? []) as Array<{
-      id: string;
-      request_id: string;
-      helper_id: string;
-      status: OfferStatus | null;
-      availability: string | null;
-      note: string | null;
-      created_at: string | null;
-      updated_at: string | null;
-    }>;
-
-    if (offerRows.length === 0) {
-      setIncomingOffers([]);
-      return;
-    }
-
-    const helperIds = Array.from(new Set(offerRows.map((o) => o.helper_id)));
-    const { data: helpers, error: hErr } = await supabase.from("profiles").select("id,full_name,email,user_role").in("id", helperIds);
-    if (hErr) console.warn("incoming offers: helper profiles load:", hErr.message);
-
-    const helperMap: Record<string, any> = {};
-    (helpers ?? []).forEach((p: any) => {
-      helperMap[String(p.id)] = { full_name: p.full_name ?? null, email: p.email ?? null, user_role: p.user_role ?? null };
-    });
-
-    const merged: IncomingOfferRow[] = offerRows
-      .map((o) => {
-        const reqItem = reqMap[String(o.request_id)] ?? null;
-        const helper = helperMap[String(o.helper_id)] ?? null;
-        return {
-          id: String(o.id),
-          request_id: String(o.request_id),
-          helper_id: String(o.helper_id),
-          status: (o.status ?? "pending") as OfferStatus,
-          availability: o.availability ?? null,
-          note: o.note ?? null,
-          created_at: o.created_at ?? null,
-          updated_at: o.updated_at ?? null,
-          request_item: reqItem
-            ? {
-                id: String(reqItem.id),
-                title: String(reqItem.title ?? ""),
-                status: reqItem.status ?? null,
-                owner_id: String(reqItem.owner_id ?? ""),
-                post_type: (reqItem.post_type ?? null) as any,
-              }
-            : null,
-          helper,
-        };
-      })
-      .filter((x) => x.request_item?.owner_id === uid);
-
-    setIncomingOffers(merged);
-  }
-
-  async function loadIncomingAll(uid: string) {
-    setIncomingLoading(true);
-    try {
-      await Promise.all([loadIncomingInterests(uid), loadIncomingOffers(uid)]);
-    } finally {
-      setIncomingLoading(false);
-    }
-  }
-
-  async function markIncomingSeen() {
-    const unseen = incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at);
-    if (unseen.length === 0) return;
-
-    const nowIso = new Date().toISOString();
-    const ids = unseen.map((r) => r.id).filter(Boolean);
-
-    await supabase.from("interests").update({ owner_seen_at: nowIso }).in("id", ids);
-
-    setIncomingInterests((prev) =>
-      prev.map((r) => {
-        if (r.owner_seen_at || r.owner_dismissed_at) return r;
-        return { ...r, owner_seen_at: nowIso };
-      })
-    );
-  }
-
-  async function deleteNotification(r: IncomingInterestRow) {
-    if (!confirm("Delete this request? This will remove the request from your list.")) return;
-
-    setDeletingNotifId(r.id);
-    const { error } = await supabase.from("interests").delete().eq("id", r.id);
-    setDeletingNotifId(null);
-
-    if (error) return alert(error.message);
-    setIncomingInterests((prev) => prev.filter((x) => x.id !== r.id));
-  }
-
-  async function updateOfferStatus(o: IncomingOfferRow, next: OfferStatus) {
-    setOfferActingId(o.id);
-    const { error } = await supabase.from("request_offers").update({ status: next }).eq("id", o.id);
-    setOfferActingId(null);
-    if (error) return alert(error.message);
-
-    setIncomingOffers((prev) => prev.map((x) => (x.id === o.id ? { ...x, status: next } : x)));
-  }
-
-  async function startChatWithHelper(o: IncomingOfferRow) {
-    if (!userId) return;
-    if ((o.status ?? "pending") !== "accepted") return alert("Accept this helper first.");
-    if (!o.request_item?.id) return alert("Missing request.");
-    if (!o.helper_id) return alert("Missing helper.");
-
-    try {
-      setOfferActingId(o.id);
-
-      const threadId = await ensureThread({
-        itemId: o.request_item.id,
-        ownerId: userId,
-        requesterId: o.helper_id,
-      });
-
-      await insertSystemMessage({
-        threadId,
-        senderId: userId,
-        body: "✅ Offer accepted. Use this chat to finalize details and confirm completion.",
-      });
-
-      router.push(`/messages/${threadId}`);
-    } catch (e: any) {
-      alert(e?.message || "Could not open chat.");
-    } finally {
-      setOfferActingId(null);
-    }
-  }
-
-  async function withdrawMyOffer(off: MyOfferRow) {
-    const st = (off.status ?? "pending") as OfferStatus;
-    if (st === "accepted" || st === "completed") return alert("This offer is already accepted/completed. You can't withdraw.");
-    if (!confirm("Withdraw this offer?")) return;
-
-    setMyOfferActingId(off.id);
-    const { error } = await supabase.from("request_offers").delete().eq("id", off.id);
-    setMyOfferActingId(null);
-
-    if (error) return alert(error.message);
-
-    setMyOffers((prev) => prev.filter((x) => x.id !== off.id));
-    setStats((s) => ({ ...s, offers: Math.max(0, s.offers - 1) }));
-  }
-
-  async function startChatFromMyOffer(off: MyOfferRow) {
-    if (!userId) return;
-    const st = (off.status ?? "pending") as OfferStatus;
-    if (st !== "accepted") return alert("Chat unlocks after the poster accepts your offer.");
-
-    const reqId = off.request_item?.id ?? off.request_id;
-    if (!reqId) return alert("Missing request.");
-
-    try {
-      setMyOfferActingId(off.id);
-      const { data, error } = await supabase.from("items").select("owner_id").eq("id", reqId).single();
-      if (error) throw new Error(error.message);
-
-      const ownerId = (data as any)?.owner_id ?? null;
-      if (!ownerId) throw new Error("Missing request owner.");
-
-      const threadId = await ensureThread({
-        itemId: reqId,
-        ownerId,
-        requesterId: userId,
-      });
-
-      await insertSystemMessage({
-        threadId,
-        senderId: userId,
-        body: "✅ Helper here. My offer was accepted — ready to finalize details.",
-      });
-
-      router.push(`/messages/${threadId}`);
-    } catch (e: any) {
-      alert(e?.message || "Could not open chat.");
-    } finally {
-      setMyOfferActingId(null);
-    }
-  }
-
-  async function loadAll() {
+  async function loadFeed() {
     setLoading(true);
     setErr(null);
 
-    const { uid, email } = await syncAuth();
+    const { data, error } = await supabase
+      .from("v_feed_items")
+      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
+      .order("created_at", { ascending: false });
 
-    if (!uid || !email || !isAshlandEmail(email)) {
-      setProfile(null);
-      setMyItems([]);
-      setMyRequests([]);
-      setMyOffers([]);
-      setIncomingInterests([]);
-      setIncomingOffers([]);
-      setStats({ listed: 0, interests: 0, offers: 0, chats: 0 });
+    if (error) {
+      setItems([]);
+      setMyInterested({});
+      setErr(error.message || "Error loading feed.");
       setLoading(false);
       return;
     }
 
-    await loadProfile(uid);
+    const rows = ((data as FeedRowFromView[]) || []).map((x) => ({ ...x })) as FeedRow[];
+    const ids = rows.map((x) => x.id);
+    const meta = await loadOwnerMeta(ids);
 
-    const [iRows, rRows, oRows] = await Promise.all([loadMyListings(uid), loadMyRequests(uid), loadMyOffers(uid)]);
-    await loadIncomingAll(uid);
-
-    let chats = 0;
-    try {
-      const { count, error: tErr } = await supabase.from("threads").select("id", { count: "exact", head: true }).or(`owner_id.eq.${uid},requester_id.eq.${uid}`);
-      if (!tErr) chats = count ?? 0;
-    } catch {
-      chats = 0;
-    }
-
-    setStats({
-      listed: iRows.length,
-      interests: rRows.length,
-      offers: oRows.length,
-      chats,
+    const merged = rows.map((x) => {
+      const m = meta.get(x.id);
+      return {
+        ...x,
+        owner_id: m?.owner_id ?? null,
+        is_claimed: m?.is_claimed ?? null,
+        post_type: (m?.post_type ?? x.post_type ?? "give") as PostType,
+        request_group: m?.request_group ?? x.request_group ?? null,
+        request_timeframe: m?.request_timeframe ?? x.request_timeframe ?? null,
+        request_location: m?.request_location ?? x.request_location ?? null,
+        status: (m?.status ?? x.status ?? "available") as any,
+      };
     });
+
+    // Hide ONLY completed/claimed
+    const visible = merged.filter((x) => {
+      const st = normStatus(x.status);
+      const claimed = !!x.is_claimed || st === "claimed";
+      return !claimed;
+    });
+
+    setItems(visible);
+
+    const giveIds = visible.filter((x) => (x.post_type ?? "give") === "give").map((x) => x.id);
+    if (isLoggedIn && userId) await loadMyInterestMap(userId, giveIds);
+    else setMyInterested({});
 
     setLoading(false);
   }
 
-  async function signOut() {
-    await supabase.auth.signOut();
-    setDrawerOpen(false);
-    await loadAll();
-  }
-
-  async function deleteListing(id: string) {
-    if (!confirm("Delete this post? This cannot be undone.")) return;
-
-    setDeletingId(id);
-    const { error } = await supabase.from("items").delete().eq("id", id);
-    setDeletingId(null);
-
-    if (error) return alert(error.message);
-
-    setMyItems((prev) => prev.filter((x) => x.id !== id));
-    setStats((s) => ({ ...s, listed: Math.max(0, s.listed - 1) }));
-  }
-
-  async function handleAuth() {
-    setAuthMsg(null);
-    setErr(null);
-
-    const email = authEmail.trim().toLowerCase();
-    if (!email) return setAuthMsg("Enter your email.");
-    if (!isAshlandEmail(email)) return setAuthMsg("Use your @ashland.edu email.");
-    if (authPassword.length < 6) return setAuthMsg("Password must be at least 6 characters.");
-
-    setAuthBusy(true);
-
-    if (authMode === "signin") {
-      const { error } = await supabase.auth.signInWithPassword({ email, password: authPassword });
-      setAuthBusy(false);
-      if (error) return setAuthMsg(error.message);
-      await loadAll();
+  async function onPrimaryAction(item: FeedRow) {
+    if (!isLoggedIn || !userId) {
+      router.push("/me");
       return;
     }
 
-    const { error } = await supabase.auth.signUp({ email, password: authPassword });
-    setAuthBusy(false);
-    if (error) return setAuthMsg(error.message);
+    const postType = (item.post_type ?? "give") as PostType;
 
-    await loadAll();
+    if (postType === "request") {
+      router.push(`/item/${item.id}`);
+      return;
+    }
+
+    const isMine = !!item.owner_id && item.owner_id === userId;
+    if (isMine) return;
+
+    const already = myInterested[item.id] === true;
+    setSavingId(item.id);
+
+    if (already) {
+      const { error } = await supabase.from("interests").delete().eq("item_id", item.id).eq("user_id", userId);
+      setSavingId(null);
+      if (error) return alert(error.message);
+
+      setMyInterested((p) => ({ ...p, [item.id]: false }));
+      setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) } : x)));
+      return;
+    }
+
+    const { error } = await supabase.from("interests").insert([{ item_id: item.id, user_id: userId }]);
+    setSavingId(null);
+
+    if (error) {
+      const msg = error.message.toLowerCase();
+      if (msg.includes("duplicate") || msg.includes("unique")) {
+        setMyInterested((p) => ({ ...p, [item.id]: true }));
+        return;
+      }
+      return alert(error.message);
+    }
+
+    setMyInterested((p) => ({ ...p, [item.id]: true }));
+    setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
   }
 
+  // micro pulse while typing
   useEffect(() => {
-    loadAll();
-    const { data: sub } = supabase.auth.onAuthStateChange(() => loadAll());
+    if (!query) return;
+    setSearchPulse(true);
+    const t = setTimeout(() => setSearchPulse(false), 220);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  // when switching tabs, don't nuke query; only hide irrelevant filters
+  useEffect(() => {
+    setFiltersOpen(false);
+    if (tab === "requests") setCategoryFilter("all"); // category only applies to items
+  }, [tab]);
+
+  useEffect(() => {
+    (async () => {
+      await syncAuth();
+      await loadFeed();
+    })();
+
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      syncAuth();
+      loadFeed();
+    });
+
     return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setDrawerOpen(false);
+      if (e.key === "Escape") {
+        setOpenImg(null);
+        setFiltersOpen(false);
+      }
+      if (e.key === "/" && !openImg) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [openImg]);
 
-  const displayName = (profile?.full_name ?? "").trim() || (userEmail ? userEmail.split("@")[0] : "") || "Account";
-  const roleLabel = (profile?.user_role ?? "").trim() || "member";
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    for (const x of items) {
+      if ((x.post_type ?? "give") !== "give") continue;
+      const c = (x.category ?? "").trim();
+      if (c) set.add(c);
+    }
+    return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
+  }, [items]);
 
-  if (loading) return <div style={pageWrap}>Loading…</div>;
+  const tabbed = useMemo(() => {
+    return items.filter((x) => {
+      const pt = (x.post_type ?? "give") as PostType;
+      return tab === "items" ? pt !== "request" : pt === "request";
+    });
+  }, [items, tab]);
 
-  /* ---------------- LOGGED OUT ---------------- */
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
 
-  if (!isLoggedIn) {
-    return (
-      <div style={{ ...pageWrap, paddingBottom: 120 }}>
-        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Account</h1>
-        <p style={{ opacity: 0.8, marginTop: 10 }}>
-          Sign in or sign up using your <b>@ashland.edu</b> email.
-        </p>
+    let list = tabbed.filter((x) => {
+      const pt = (x.post_type ?? "give") as PostType;
 
-        <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button onClick={() => setAuthMode("signin")} style={pillBtn(authMode === "signin")}>
-            Sign in
-          </button>
-          <button onClick={() => setAuthMode("signup")} style={pillBtn(authMode === "signup")}>
-            Sign up
-          </button>
-        </div>
+      if (roleFilter !== "all") {
+        const r = (x.owner_role ?? null) as OwnerRole;
+        if (!r) return false;
+        if (r !== roleFilter) return false;
+      }
 
-        <div style={panel}>
-          <div style={{ fontWeight: 1000, marginBottom: 10 }}>{authMode === "signin" ? "Welcome back" : "Create an account"}</div>
+      if (tab === "items" && pt !== "request") {
+        if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
+      }
 
-          <input value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="you@ashland.edu" autoComplete="email" inputMode="email" style={inputStyle} />
+      if (q) {
+        const blob =
+          [
+            x.title,
+            x.description ?? "",
+            x.category ?? "",
+            x.request_group ?? "",
+            x.request_timeframe ?? "",
+            x.request_location ?? "",
+          ]
+            .join(" ")
+            .toLowerCase() || "";
+        if (!blob.includes(q)) return false;
+      }
 
-          <input
-            value={authPassword}
-            onChange={(e) => setAuthPassword(e.target.value)}
-            placeholder="password"
-            type="password"
-            autoComplete={authMode === "signin" ? "current-password" : "new-password"}
-            style={{ ...inputStyle, marginTop: 10 }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleAuth();
-            }}
-          />
+      return true;
+    });
 
-          <button onClick={handleAuth} disabled={authBusy} style={primaryBtn(authBusy)}>
-            {authBusy ? "Working…" : authMode === "signin" ? "Sign in" : "Sign up"}
-          </button>
+    if (sort === "popular") {
+      list = [...list].sort((a, b) => (b.interest_count || 0) - (a.interest_count || 0));
+    } else {
+      list = [...list].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    }
 
-          {authMsg && <div style={{ marginTop: 10, color: "#fca5a5", fontWeight: 900 }}>{authMsg}</div>}
+    return list;
+  }, [tabbed, query, sort, roleFilter, categoryFilter, tab]);
 
-          <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>You can still browse the feed without logging in.</div>
-
-          <button onClick={() => router.push("/feed")} style={{ ...outlineBtn, width: "100%", height: 44 }}>
-            Browse feed
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  /* ---------------- LOGGED IN ---------------- */
+  const showEmpty = !loading && !err && filtered.length === 0;
 
   return (
-    <div style={pageWrap}>
-      <style jsx>{`
-        /* ====== IMPORTANT: sticky header reliability on mobile ======
-           Sticky breaks if any ancestor has overflow: hidden/auto/scroll.
-           We only clip X overflow on the outer shell, and never add overflow on parents of .header.
-        */
+    <div className={`${brandFont.className} page`}>
+      {/* DARK STICKY HEADER (matches /me) */}
+      <header className="topbar">
+        {/* Row 1 */}
+        <div className="row brandRow">
+          <button className="iconBtn" onClick={() => router.push("/feed")} aria-label="Home" type="button">
+            <Image src="/scholarswap-logo.png" alt="ScholarSwap" width={34} height={34} priority className="logoImg" />
+          </button>
 
-        .shell {
-          max-width: 1200px;
-          margin: 0 auto;
-          padding: 16px;
-          padding-bottom: calc(120px + env(safe-area-inset-bottom));
-          overflow-x: clip; /* safer than hidden for sticky on iOS */
+          <div className="brandCenter" role="heading" aria-level={1}>
+            <span className="brandName">ScholarSwap</span>
+            <Image src="/Ashland_Eagles_logo.svg.png" alt="Ashland University" width={18} height={18} priority className="brandMark" />
+          </div>
+
+          <button className="plusBtn" onClick={() => router.push("/create")} aria-label="Create" type="button">
+            +
+          </button>
+        </div>
+
+        {/* Row 2 */}
+        <div className="row tabsRow">
+          <div className="seg" role="tablist" aria-label="Feed tabs">
+            <button className={`segBtn ${tab === "items" ? "active" : ""}`} onClick={() => setTab("items")} type="button">
+              Items
+            </button>
+            <button className={`segBtn ${tab === "requests" ? "active" : ""}`} onClick={() => setTab("requests")} type="button">
+              Requests
+            </button>
+            <span className={`segIndicator ${tab === "items" ? "left" : "right"}`} aria-hidden="true" />
+          </div>
+
+          <button
+            className={`ctrlBtn ${filtersOpen ? "ctrlActive" : ""}`}
+            onClick={() => setFiltersOpen((v) => !v)}
+            type="button"
+            aria-label="Open filters"
+            title="Filters"
+          >
+            <span className="ctrlIcon">≡</span>
+          </button>
+        </div>
+
+        {/* Row 3 */}
+        <div className={`row searchWrap ${searchFocused ? "searchFocused" : ""} ${searchPulse ? "searchPulse" : ""}`}>
+          <div className="searchRow">
+            <button
+              type="button"
+              className="searchIconBtn"
+              aria-label="Focus search"
+              onClick={() => searchRef.current?.focus()}
+              title="Search"
+            >
+              🔎
+            </button>
+
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              placeholder={tab === "items" ? "Search items, categories…" : "Search requests, locations…"}
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+            />
+
+            {query ? (
+              <button className="clearBtn" onClick={() => setQuery("")} type="button" aria-label="Clear search">
+                ✕
+              </button>
+            ) : (
+              <div className="kbdHint" aria-hidden="true">
+                /
+              </div>
+            )}
+          </div>
+
+          {tab === "items" && (
+            <div className="chipRow" aria-label="Categories">
+              {categories.map((c) => {
+                const active = categoryFilter === c;
+                const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
+                return (
+                  <button key={c} className={`chip ${active ? "chipOn" : ""}`} onClick={() => setCategoryFilter(c)} type="button">
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="subline">
+          <div className="subTitle">{tab === "items" ? "Public Items" : "Public Requests"}</div>
+          <div className="count">
+            Showing <b>{filtered.length}</b>
+          </div>
+        </div>
+
+        {err && <div className="err">{err}</div>}
+        {loading && <div className="loading">Loading…</div>}
+      </header>
+
+      {/* FILTER SHEET */}
+      {filtersOpen && (
+        <div className="sheetBackdrop" onClick={() => setFiltersOpen(false)} role="dialog" aria-modal="true">
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheetTop">
+              <div className="sheetTitle">Filters</div>
+              <button className="sheetClose" onClick={() => setFiltersOpen(false)} type="button" aria-label="Close">
+                ✕
+              </button>
+            </div>
+
+            <div className="sheetGrid">
+              <div className="sheetBlock">
+                <div className="sheetLabel">Sort</div>
+                <div className="togRow">
+                  <button className={`tog ${sort === "newest" ? "togOn" : ""}`} onClick={() => setSort("newest")} type="button">
+                    ↕️ Newest
+                  </button>
+                  <button className={`tog ${sort === "popular" ? "togOn" : ""}`} onClick={() => setSort("popular")} type="button">
+                    🔥 Popular
+                  </button>
+                </div>
+              </div>
+
+              <div className="sheetBlock">
+                <div className="sheetLabel">Lister</div>
+                <div className="togRow">
+                  <button className={`tog ${roleFilter === "all" ? "togOn" : ""}`} onClick={() => setRoleFilter("all")} type="button">
+                    👤 All
+                  </button>
+                  <button className={`tog ${roleFilter === "student" ? "togOn" : ""}`} onClick={() => setRoleFilter("student")} type="button">
+                    🎓 Student
+                  </button>
+                  <button className={`tog ${roleFilter === "faculty" ? "togOn" : ""}`} onClick={() => setRoleFilter("faculty")} type="button">
+                    🧑‍🏫 Faculty
+                  </button>
+                </div>
+              </div>
+
+              <div className="sheetActions">
+                <button
+                  className="ghost"
+                  type="button"
+                  onClick={() => {
+                    setSort("newest");
+                    setRoleFilter("all");
+                    setCategoryFilter("all");
+                    setQuery("");
+                  }}
+                >
+                  Reset
+                </button>
+                <button className="primary" type="button" onClick={() => setFiltersOpen(false)}>
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* GRID */}
+      <main className="main">
+        {showEmpty ? (
+          <div className="empty">
+            <div className="emptyTitle">No results</div>
+            <div className="emptyBody">Try clearing search, changing category, or resetting filters.</div>
+            <div className="emptyActions">
+              <button
+                className="btn btnGhost"
+                onClick={() => {
+                  setQuery("");
+                  setRoleFilter("all");
+                  setCategoryFilter("all");
+                  setSort("newest");
+                }}
+                type="button"
+              >
+                Reset
+              </button>
+              <button className="btn btnPrimary" onClick={() => router.push("/create")} type="button">
+                Create post
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="grid">
+            {filtered.map((item) => {
+              const postType = (item.post_type ?? "give") as PostType;
+              const isMine = !!userId && !!item.owner_id && item.owner_id === userId;
+              const interested = myInterested[item.id] === true;
+
+              const group = requestGroupLabel(item.request_group);
+              const tf = requestTimeframeLabel(item.request_timeframe);
+              const loc = (item.request_location ?? "").trim();
+
+              return (
+                <article key={item.id} className={`card ${postType === "request" ? "cardRequest" : ""}`}>
+                  {postType === "request" ? (
+                    <div className="reqHero">
+                      <div className="badge badgeRequest">{statusLabel(item.status, postType)}</div>
+                      <div className="reqMeta">
+                        {group}
+                        {tf ? ` • ${tf}` : ""}
+                        {loc ? ` • ${loc}` : ""}
+                      </div>
+                      <div className="title clamp2">{item.title}</div>
+                    </div>
+                  ) : (
+                    <div className="media">
+                      <div className="badge badgeItem">{statusLabel(item.status, postType)}</div>
+
+                      {item.photo_url ? (
+                        <button
+                          className="mediaBtn"
+                          onClick={() => {
+                            setOpenImg(item.photo_url!);
+                            setOpenTitle(item.title);
+                          }}
+                          aria-label="Open photo"
+                          type="button"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={item.photo_url} alt={item.title} loading="lazy" className="mediaImg" />
+                        </button>
+                      ) : (
+                        <div className="noPhoto">No photo</div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="body">
+                    <div className="metaRow">
+                      <span className="meta">
+                        {postType === "request"
+                          ? `Type: ${group}`
+                          : item.category
+                          ? `Category: ${item.category}`
+                          : "Category: —"}
+                      </span>
+                      {item.owner_role ? <span className="meta">• {item.owner_role}</span> : null}
+                      {isMine ? <span className="mine">Yours</span> : null}
+                    </div>
+
+                    {postType !== "request" ? <div className="title">{item.title}</div> : null}
+
+                    {postType !== "request" && statusHint(item.status, postType) ? <div className="hint">{statusHint(item.status, postType)}</div> : null}
+
+                    <div className="desc clamp2">{item.description || "—"}</div>
+
+                    <div className="footerRow">
+                      {postType === "request" ? <span className="small">Tap to offer help</span> : <span className="small">{item.interest_count || 0} requests</span>}
+                      {item.expires_at ? <span className="small">Ends: {formatShortDate(item.expires_at)}</span> : null}
+                    </div>
+
+                    <div className="actions">
+                      <button className="btn btnGhost" onClick={() => router.push(`/item/${item.id}`)} type="button">
+                        View
+                      </button>
+
+                      <button
+                        className={`btn btnPrimary ${isMine ? "btnDisabled" : ""}`}
+                        onClick={() => onPrimaryAction(item)}
+                        disabled={savingId === item.id || isMine}
+                        type="button"
+                      >
+                        {isMine
+                          ? "Yours"
+                          : savingId === item.id
+                          ? "Saving…"
+                          : postType === "request"
+                          ? isLoggedIn
+                            ? "Offer help"
+                            : "Offer (login)"
+                          : isLoggedIn
+                          ? interested
+                            ? "Requested"
+                            : "Request"
+                          : "Request (login)"}
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </main>
+
+      {/* IMAGE MODAL */}
+      {openImg && (
+        <div className="modal" onClick={() => setOpenImg(null)} role="dialog" aria-modal="true">
+          <div className="modalInner" onClick={(e) => e.stopPropagation()}>
+            <div className="modalTop">
+              <div className="modalTitle">{openTitle || "Photo"}</div>
+              <button className="modalClose" onClick={() => setOpenImg(null)} type="button">
+                ✕
+              </button>
+            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={openImg} alt={openTitle || "Full photo"} className="modalImg" />
+          </div>
+        </div>
+      )}
+
+      {/* ✅ DARK THEME STYLES (matches /me) */}
+      <style jsx>{`
+        .page {
+          min-height: 100vh;
+          background: #000;
+          color: #fff;
         }
 
-        .header {
+        /* ====== TOPBAR ====== */
+        .topbar {
           position: sticky;
-          top: env(safe-area-inset-top);
-          z-index: 50;
-          background: rgba(0, 0, 0, 0.94);
+          top: 0;
+          z-index: 30;
+          background: rgba(0, 0, 0, 0.92);
           backdrop-filter: blur(12px);
           -webkit-backdrop-filter: blur(12px);
-          border: 1px solid #0f223f;
-          border-radius: 16px;
-          padding: 12px;
-          transform: translateZ(0); /* iOS paint fix */
-          will-change: transform;
+          border-bottom: 1px solid #0f223f;
         }
 
-        .topRow {
+        .row {
+          padding: 10px 12px;
+        }
+
+        .brandRow {
+          display: grid;
+          grid-template-columns: 44px 1fr 44px;
+          align-items: center;
+          gap: 10px;
+          padding-top: 12px;
+          padding-bottom: 8px;
+        }
+
+        .iconBtn {
+          width: 44px;
+          height: 44px;
+          border-radius: 16px;
+          overflow: hidden;
+          background: #0b1730;
+          border: 1px solid #0f223f;
+          display: grid;
+          place-items: center;
+          padding: 0;
+          cursor: pointer;
+        }
+
+        .logoImg {
+          width: 34px;
+          height: 34px;
+          object-fit: contain;
+        }
+
+        .brandCenter {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          min-width: 0;
+        }
+
+        .brandName {
+          font-size: 22px;
+          font-weight: 900;
+          letter-spacing: -0.6px;
+          white-space: nowrap;
+          color: #fff;
+        }
+
+        .brandMark {
+          opacity: 0.9;
+          transform: translateY(1px);
+        }
+
+        .plusBtn {
+          width: 44px;
+          height: 44px;
+          border-radius: 16px;
+          border: 1px solid rgba(22, 163, 74, 0.55);
+          background: rgba(22, 163, 74, 0.14);
+          color: #fff;
+          font-size: 24px;
+          font-weight: 900;
+          display: grid;
+          place-items: center;
+          cursor: pointer;
+          transition: transform 0.12s ease, box-shadow 0.12s ease;
+          box-shadow: 0 14px 30px rgba(22, 163, 74, 0.12);
+        }
+
+        .plusBtn:active {
+          transform: translateY(1px);
+          box-shadow: 0 10px 20px rgba(22, 163, 74, 0.1);
+        }
+
+        .tabsRow {
+          display: grid;
+          grid-template-columns: 1fr 46px;
+          gap: 10px;
+          align-items: center;
+          padding-top: 6px;
+          padding-bottom: 6px;
+        }
+
+        .seg {
+          position: relative;
+          height: 44px;
+          border-radius: 999px;
+          border: 1px solid #334155;
+          background: rgba(11, 23, 48, 0.6);
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          overflow: hidden;
+        }
+
+        .segBtn {
+          border: none;
+          background: transparent;
+          color: #cbd5e1;
+          font-weight: 950;
+          cursor: pointer;
+          z-index: 2;
+          transition: color 0.18s ease;
+        }
+
+        .segBtn.active {
+          color: #fff;
+        }
+
+        .segIndicator {
+          position: absolute;
+          top: 3px;
+          bottom: 3px;
+          width: calc(50% - 6px);
+          border-radius: 999px;
+          background: rgba(22, 163, 74, 0.14);
+          border: 1px solid rgba(22, 163, 74, 0.55);
+          transition: transform 0.22s ease;
+          z-index: 1;
+        }
+
+        .segIndicator.left {
+          transform: translateX(3px);
+        }
+
+        .segIndicator.right {
+          transform: translateX(calc(100% + 3px));
+        }
+
+        .ctrlBtn {
+          width: 46px;
+          height: 44px;
+          border-radius: 16px;
+          border: 1px solid #334155;
+          background: rgba(11, 23, 48, 0.7);
+          color: #fff;
+          cursor: pointer;
+          display: grid;
+          place-items: center;
+          transition: transform 0.12s ease, border-color 0.18s ease, background 0.18s ease;
+        }
+
+        .ctrlBtn:active {
+          transform: translateY(1px);
+        }
+
+        .ctrlActive {
+          border-color: rgba(22, 163, 74, 0.55);
+          background: rgba(22, 163, 74, 0.12);
+        }
+
+        .ctrlIcon {
+          font-size: 18px;
+          font-weight: 900;
+          opacity: 0.95;
+        }
+
+        .searchWrap {
+          padding-top: 6px;
+          padding-bottom: 10px;
+        }
+
+        .searchRow {
+          height: 46px;
+          border-radius: 999px;
+          border: 1px solid #334155;
+          background: rgba(11, 23, 48, 0.7);
+          display: grid;
+          grid-template-columns: 40px 1fr 40px;
+          align-items: center;
+          gap: 8px;
+          padding: 0 6px;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+          transition: border-color 0.18s ease, box-shadow 0.18s ease;
+        }
+
+        .searchFocused .searchRow {
+          border-color: rgba(22, 163, 74, 0.55);
+          box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.12), 0 10px 24px rgba(0, 0, 0, 0.28);
+        }
+
+        .searchPulse .searchRow {
+          animation: glow 0.22s ease-out;
+        }
+
+        @keyframes glow {
+          from {
+            box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.18), 0 10px 24px rgba(0, 0, 0, 0.28);
+          }
+          to {
+            box-shadow: 0 0 0 10px rgba(22, 163, 74, 0), 0 10px 24px rgba(0, 0, 0, 0.28);
+          }
+        }
+
+        .searchIconBtn {
+          width: 40px;
+          height: 40px;
+          border-radius: 999px;
+          border: 1px solid #334155;
+          background: rgba(0, 0, 0, 0.25);
+          color: #fff;
+          cursor: pointer;
+          display: grid;
+          place-items: center;
+          transition: transform 0.12s ease;
+        }
+
+        .searchIconBtn:active {
+          transform: translateY(1px);
+        }
+
+        .searchRow input {
+          width: 100%;
+          min-width: 0;
+          border: none;
+          outline: none;
+          background: transparent;
+          color: #fff;
+          font-weight: 900;
+          font-size: 14px;
+        }
+
+        .searchRow input::placeholder {
+          color: #94a3b8;
+          font-weight: 800;
+        }
+
+        .clearBtn,
+        .kbdHint {
+          width: 40px;
+          height: 40px;
+          border-radius: 999px;
+          border: 1px solid #334155;
+          background: rgba(0, 0, 0, 0.25);
+          color: #fff;
+          display: grid;
+          place-items: center;
+          font-weight: 950;
+        }
+
+        .clearBtn {
+          cursor: pointer;
+          transition: transform 0.12s ease;
+        }
+
+        .clearBtn:active {
+          transform: translateY(1px);
+        }
+
+        .kbdHint {
+          color: #64748b;
+        }
+
+        .chipRow {
+          margin-top: 10px;
+          display: flex;
+          gap: 10px;
+          overflow-x: auto;
+          overflow-y: hidden;
+          padding-bottom: 6px;
+          -webkit-overflow-scrolling: touch;
+          scrollbar-width: none;
+        }
+
+        .chipRow::-webkit-scrollbar {
+          display: none;
+        }
+
+        .chip {
+          flex: 0 0 auto;
+          border-radius: 999px;
+          border: 1px solid #334155;
+          background: rgba(11, 23, 48, 0.7);
+          color: #e5e7eb;
+          padding: 10px 12px;
+          font-weight: 900;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .chipOn {
+          border-color: rgba(22, 163, 74, 0.55);
+          background: rgba(22, 163, 74, 0.14);
+          color: #fff;
+        }
+
+        .subline {
+          padding: 0 12px 10px;
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          gap: 12px;
+        }
+
+        .subTitle {
+          font-size: 13px;
+          font-weight: 950;
+          color: #e5e7eb;
+        }
+
+        .count {
+          font-size: 12px;
+          color: #94a3b8;
+          font-weight: 900;
+        }
+
+        .err {
+          padding: 0 12px 10px;
+          color: #f87171;
+          font-weight: 900;
+        }
+
+        .loading {
+          padding: 0 12px 10px;
+          color: #94a3b8;
+          font-weight: 800;
+        }
+
+        /* ====== FILTER SHEET ====== */
+        .sheetBackdrop {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.55);
+          z-index: 9998;
+          display: flex;
+          align-items: flex-end;
+          justify-content: center;
+          padding: 12px;
+        }
+
+        .sheet {
+          width: min(720px, 100%);
+          border-radius: 18px;
+          border: 1px solid #0f223f;
+          background: rgba(11, 23, 48, 0.92);
+          backdrop-filter: blur(14px);
+          box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+          overflow: hidden;
+          color: #fff;
+        }
+
+        .sheetTop {
+          padding: 12px 12px 8px;
           display: flex;
           align-items: center;
           justify-content: space-between;
+          border-bottom: 1px solid #0f223f;
+        }
+
+        .sheetTitle {
+          font-weight: 950;
+          font-size: 14px;
+          color: #fff;
+        }
+
+        .sheetClose {
+          width: 38px;
+          height: 38px;
+          border-radius: 14px;
+          border: 1px solid #334155;
+          background: rgba(0, 0, 0, 0.25);
+          color: #fff;
+          cursor: pointer;
+          font-weight: 950;
+        }
+
+        .sheetGrid {
+          padding: 12px;
+          display: grid;
           gap: 12px;
-          min-width: 0;
         }
 
-        .identity {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          min-width: 0;
-        }
-
-        .nameLine {
-          font-size: 18px;
-          font-weight: 1000;
-          line-height: 1.1;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .subLine {
-          opacity: 0.75;
-          font-size: 12px;
-          margin-top: 2px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        /* Tabs: always a horizontal rail (never wrapped) */
-        .tabs {
-          display: flex;
-          gap: 10px;
-          overflow-x: auto;
-          -webkit-overflow-scrolling: touch;
-          padding-top: 10px;
-          padding-bottom: 6px;
-        }
-        .tabs::-webkit-scrollbar {
-          display: none;
-        }
-
-        .statsRow {
-          display: flex;
-          gap: 12px;
-          flex-wrap: nowrap; /* stays compact like your screenshot */
-          overflow-x: auto;
-          -webkit-overflow-scrolling: touch;
-          margin-top: 6px;
-          opacity: 0.78;
-          font-size: 12px;
-          font-weight: 900;
-          padding-bottom: 2px;
-        }
-        .statsRow::-webkit-scrollbar {
-          display: none;
-        }
-
-        /* CONTENT spacing so first section doesn't look glued under header */
-        .content {
-          margin-top: 12px;
-        }
-
-        /* guardrail: nothing should overflow horizontally */
-        .reqCard {
+        .sheetBlock {
           border: 1px solid #0f223f;
-          background: #0b1730;
+          background: rgba(0, 0, 0, 0.22);
           border-radius: 16px;
-          padding: 14px;
-          overflow: hidden;
+          padding: 12px;
         }
 
-        .reqRow {
-          display: flex;
-          align-items: flex-start;
-          gap: 12px;
-          min-width: 0;
-          flex-wrap: wrap; /* forces buttons to go under on small screens */
-        }
-
-        .reqMain {
-          flex: 1;
-          min-width: 0;
-        }
-
-        .reqTitle {
-          font-weight: 1000;
-          font-size: 16px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .reqMeta {
-          opacity: 0.8;
+        .sheetLabel {
           font-size: 12px;
-          margin-top: 6px;
-          line-height: 1.35;
-          overflow-wrap: anywhere;
-          word-break: break-word;
+          font-weight: 950;
+          color: #94a3b8;
+          margin-bottom: 10px;
         }
 
-        /* Buttons: on phones, always full-width row under content (prevents squeeze/overlap) */
-        .reqActions {
+        .togRow {
           display: flex;
           gap: 10px;
           flex-wrap: wrap;
-          justify-content: flex-start;
-          align-items: center;
-          width: 100%;
-          margin-top: 10px;
+        }
+
+        .tog {
+          border-radius: 999px;
+          border: 1px solid #334155;
+          background: rgba(0, 0, 0, 0.25);
+          color: #e5e7eb;
+          padding: 10px 12px;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .togOn {
+          border-color: rgba(22, 163, 74, 0.55);
+          background: rgba(22, 163, 74, 0.14);
+          color: #fff;
+        }
+
+        .sheetActions {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+
+        .ghost {
+          height: 44px;
+          border-radius: 14px;
+          border: 1px solid #334155;
+          background: rgba(0, 0, 0, 0.25);
+          color: #fff;
+          font-weight: 950;
+          cursor: pointer;
+        }
+
+        .primary {
+          height: 44px;
+          border-radius: 14px;
+          border: 1px solid rgba(22, 163, 74, 0.55);
+          background: rgba(22, 163, 74, 0.18);
+          color: #fff;
+          font-weight: 950;
+          cursor: pointer;
+          box-shadow: 0 14px 30px rgba(22, 163, 74, 0.12);
+        }
+
+        /* ====== GRID ====== */
+        .main {
+          padding: 14px 12px 96px;
+        }
+
+        .grid {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 14px;
         }
 
         @media (min-width: 720px) {
-          .reqActions {
-            width: auto;
-            margin-top: 0;
-            justify-content: flex-end;
+          .main {
+            padding: 16px 16px 96px;
+            max-width: 1100px;
+            margin: 0 auto;
+          }
+          .grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 16px;
           }
         }
 
-        /* slider rail (phones + desktop) */
-        .rail {
-          margin-top: 12px;
+        .card {
+          background: #0b1730;
+          border-radius: 18px;
+          border: 1px solid #0f223f;
+          overflow: hidden;
+          box-shadow: 0 14px 30px rgba(0, 0, 0, 0.35);
+        }
+
+        .cardRequest {
+          border: 1px solid rgba(22, 163, 74, 0.35);
+        }
+
+        .media {
+          position: relative;
+          height: 210px;
+          background: #020617;
+        }
+
+        .mediaBtn {
+          width: 100%;
+          height: 100%;
+          padding: 0;
+          border: none;
+          background: transparent;
+          cursor: pointer;
+        }
+
+        .mediaImg {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
+        }
+
+        .noPhoto {
+          width: 100%;
+          height: 100%;
           display: flex;
-          gap: 12px;
-          overflow-x: auto;
-          padding-bottom: 10px;
-          -webkit-overflow-scrolling: touch;
-          scroll-snap-type: x mandatory;
-        }
-        .rail::-webkit-scrollbar {
-          display: none;
-        }
-
-        .railItem {
-          scroll-snap-align: start;
-          flex: 0 0 auto;
-          width: min(320px, 86vw);
+          align-items: center;
+          justify-content: center;
+          color: #94a3b8;
+          font-weight: 800;
+          border: 1px dashed #334155;
+          margin: 10px;
+          border-radius: 14px;
         }
 
-        @media (min-width: 900px) {
-          .railItem {
-            width: 340px;
-          }
+        .reqHero {
+          position: relative;
+          height: 210px;
+          padding: 16px;
+          display: flex;
+          flex-direction: column;
+          justify-content: flex-end;
+          background: rgba(22, 163, 74, 0.08);
         }
 
-        /* Slightly tighter on very small screens so header "freeze" doesn't feel huge */
-        @media (max-width: 390px) {
-          .header {
-            padding: 10px;
-          }
-          .nameLine {
-            font-size: 17px;
-          }
+        .badge {
+          position: absolute;
+          top: 12px;
+          left: 12px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          font-size: 12px;
+          font-weight: 900;
+          border: 1px solid rgba(22, 163, 74, 0.35);
+          background: rgba(22, 163, 74, 0.12);
+          color: #fff;
+        }
+
+        .reqMeta {
+          font-size: 13px;
+          font-weight: 900;
+          color: #cbd5e1;
+          margin-bottom: 8px;
+        }
+
+        .body {
+          padding: 14px;
+        }
+
+        .metaRow {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          align-items: center;
+        }
+
+        .meta {
+          font-size: 12px;
+          color: #94a3b8;
+          font-weight: 800;
+        }
+
+        .mine {
+          font-size: 12px;
+          padding: 4px 8px;
+          border-radius: 999px;
+          border: 1px solid #334155;
+          background: rgba(0, 0, 0, 0.25);
+          color: #fff;
+          font-weight: 900;
+        }
+
+        .title {
+          margin-top: 8px;
+          font-size: 18px;
+          font-weight: 950;
+          letter-spacing: -0.2px;
+          color: #fff;
+        }
+
+        .hint {
+          margin-top: 8px;
+          font-size: 12px;
+          font-weight: 900;
+          color: rgba(34, 197, 94, 0.95);
+        }
+
+        .desc {
+          margin-top: 10px;
+          color: #cbd5e1;
+          font-size: 14px;
+          min-height: 40px;
+        }
+
+        .footerRow {
+          margin-top: 10px;
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          color: #94a3b8;
+          font-weight: 900;
+          font-size: 12px;
+        }
+
+        .actions {
+          margin-top: 12px;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+
+        .btn {
+          width: 100%;
+          padding: 10px 12px;
+          border-radius: 14px;
+          cursor: pointer;
+          font-weight: 950;
+          border: 1px solid #334155;
+          transition: transform 0.12s ease, box-shadow 0.12s ease;
+        }
+
+        .btn:active {
+          transform: translateY(1px);
+        }
+
+        .btnGhost {
+          background: rgba(0, 0, 0, 0.25);
+          color: #fff;
+        }
+
+        .btnPrimary {
+          border: 1px solid rgba(22, 163, 74, 0.55);
+          background: rgba(22, 163, 74, 0.18);
+          color: #fff;
+          box-shadow: 0 14px 30px rgba(22, 163, 74, 0.12);
+        }
+
+        .btnDisabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+          background: rgba(0, 0, 0, 0.25);
+          border: 1px solid #334155;
+          color: #94a3b8;
+          box-shadow: none;
+        }
+
+        .clamp2 {
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+
+        /* ====== EMPTY ====== */
+        .empty {
+          border: 1px solid #0f223f;
+          background: #0b1730;
+          border-radius: 18px;
+          padding: 16px;
+        }
+        .emptyTitle {
+          font-weight: 950;
+          font-size: 16px;
+        }
+        .emptyBody {
+          margin-top: 6px;
+          color: #cbd5e1;
+          opacity: 0.9;
+        }
+        .emptyActions {
+          margin-top: 12px;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+
+        /* ====== MODAL ====== */
+        .modal {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.7);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 20px;
+          z-index: 9999;
+        }
+
+        .modalInner {
+          width: min(1000px, 95vw);
+          max-height: 90vh;
+          background: #0b1730;
+          border: 1px solid #0f223f;
+          border-radius: 16px;
+          overflow: hidden;
+          box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+        }
+
+        .modalTop {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 10px 12px;
+          border-bottom: 1px solid #0f223f;
+        }
+
+        .modalTitle {
+          font-weight: 950;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: #fff;
+        }
+
+        .modalClose {
+          background: rgba(0, 0, 0, 0.25);
+          color: #fff;
+          border: 1px solid #334155;
+          padding: 6px 10px;
+          border-radius: 12px;
+          cursor: pointer;
+          font-weight: 950;
+        }
+
+        .modalImg {
+          width: 100%;
+          height: auto;
+          max-height: 80vh;
+          object-fit: contain;
+          display: block;
+          background: #000;
         }
       `}</style>
-
-      <div className="shell">
-        {/* ====== STICKY HEADER (FREEZES ON TOP) ====== */}
-        <div className="header">
-          <div className="topRow">
-            <div className="identity">
-              <div style={avatar} title={displayName}>
-                {displayName.slice(0, 1).toUpperCase()}
-              </div>
-
-              <div style={{ minWidth: 0 }}>
-                <div className="nameLine">{displayName}</div>
-                <div className="subLine">
-                  {roleLabel} • {userEmail}
-                </div>
-              </div>
-            </div>
-
-            <button onClick={() => setDrawerOpen(true)} style={iconBtn} aria-label="Open menu" title="Menu">
-              ☰
-            </button>
-          </div>
-
-          {err && <div style={{ marginTop: 10, color: "#f87171", fontWeight: 900 }}>{err}</div>}
-
-          <div className="tabs">
-            <button onClick={() => setTab("listings")} style={tabPill(tab === "listings")}>
-              Listings
-            </button>
-
-            <button onClick={() => setTab("my_activity")} style={tabPill(tab === "my_activity")}>
-              My activity
-            </button>
-
-            <button
-              onClick={async () => {
-                setTab("requests");
-                await markIncomingSeen();
-              }}
-              style={tabPill(tab === "requests")}
-            >
-              Requests
-              {hasNewRequests && <span style={dot} aria-label="New requests" title="New requests" />}
-            </button>
-
-            <button onClick={() => setTab("history")} style={tabPill(tab === "history")}>
-              History
-            </button>
-          </div>
-
-          <div className="statsRow">
-            <span>Listed: {stats.listed}</span>
-            <span>Interests: {stats.interests}</span>
-            <span>Offers: {stats.offers}</span>
-            <span>Chats: {stats.chats}</span>
-          </div>
-        </div>
-
-        {/* ====== CONTENT ====== */}
-        <div className="content">
-          {tab === "listings" && (
-            <>
-              <div style={sectionHint}>Your active posts (give + requests). Completed (claimed) posts live in History.</div>
-
-              {activeListings.length === 0 ? (
-                <EmptyBox title="No active listings." body="List something or post a request to start exchanging.">
-                  <button onClick={() => router.push("/create")} style={outlineBtn}>
-                    ＋ Create post
-                  </button>
-                </EmptyBox>
-              ) : (
-                <div className="rail">
-                  {activeListings.map((item) => (
-                    <div className="railItem" key={item.id}>
-                      <ItemCard
-                        item={item}
-                        variant="active"
-                        onEdit={() => router.push(`/item/${item.id}/edit`)}
-                        onManage={() => router.push(`/manage/${item.id}`)}
-                        onDelete={() => deleteListing(item.id)}
-                        deleting={deletingId === item.id}
-                      />
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-
-          {tab === "my_activity" && (
-            <>
-              <div style={sectionHint}>Your activity across both flows.</div>
-
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontWeight: 1000, fontSize: 18 }}>My interests (items I requested)</div>
-                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>These are GIVE posts you requested.</div>
-              </div>
-
-              {myRequests.length === 0 ? (
-                <EmptyBox title="No interests yet." body="Go to the feed and request an item.">
-                  <button onClick={() => router.push("/feed")} style={outlineBtn}>
-                    Browse feed
-                  </button>
-                </EmptyBox>
-              ) : (
-                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                  {myRequests.map((r) => {
-                    const it = r.items;
-                    return (
-                      <div key={r.item_id + (r.created_at ?? "")} className="reqCard">
-                        <div className="reqRow">
-                          <Thumb photoUrl={it?.photo_url ?? null} label={it?.title ?? "Item"} />
-
-                          <div className="reqMain">
-                            <div className="reqTitle">{it?.title ?? "Unknown item"}</div>
-                            <div className="reqMeta">
-                              Status: <b>{it?.status ?? "—"}</b>
-                              {r.created_at ? ` • Sent: ${fmtWhen(r.created_at)}` : ""}
-                            </div>
-                          </div>
-
-                          <div className="reqActions">
-                            <button onClick={() => router.push(`/item/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
-                              View
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              <div style={{ marginTop: 18 }}>
-                <div style={{ fontWeight: 1000, fontSize: 18 }}>My offers (help I offered)</div>
-                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>REQUEST posts where you offered help. Chat unlocks only after acceptance.</div>
-              </div>
-
-              {myOffers.length === 0 ? (
-                <EmptyBox title="No offers yet." body="Find a request post in the feed and tap “Offer help”.">
-                  <button onClick={() => router.push("/feed")} style={outlineBtn}>
-                    Browse feed
-                  </button>
-                </EmptyBox>
-              ) : (
-                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                  {myOffers.map((o) => {
-                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
-                    const st = (o.status ?? "pending") as OfferStatus;
-                    const acting = myOfferActingId === o.id;
-
-                    return (
-                      <div key={o.id} className="reqCard">
-                        <div className="reqRow">
-                          <div style={{ ...thumbWrap, width: 54, height: 54 }}>🤝</div>
-
-                          <div className="reqMain">
-                            <div className="reqTitle">
-                              Offered help on <span style={{ opacity: 0.9 }}>{title}</span>
-                            </div>
-                            <div className="reqMeta">
-                              Status: <b>{st}</b>
-                              {o.created_at ? ` • Offered: ${fmtWhen(o.created_at)}` : ""}
-                              {o.availability ? ` • Availability: ${o.availability}` : ""}
-                            </div>
-                            {o.note ? <div style={{ marginTop: 8, opacity: 0.82, fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.note}</div> : null}
-                          </div>
-
-                          <div className="reqActions">
-                            <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
-                              View
-                            </button>
-
-                            <button
-                              onClick={() => startChatFromMyOffer(o)}
-                              disabled={acting || st !== "accepted"}
-                              style={{
-                                ...outlineBtn,
-                                marginTop: 0,
-                                border: st === "accepted" ? "1px solid rgba(22,163,74,0.55)" : "1px solid #334155",
-                                background: st === "accepted" ? "rgba(22,163,74,0.14)" : "transparent",
-                                cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
-                                opacity: acting || st !== "accepted" ? 0.65 : 1,
-                              }}
-                              title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
-                            >
-                              {acting ? "Opening…" : "Start chat"}
-                            </button>
-
-                            <button
-                              onClick={() => withdrawMyOffer(o)}
-                              disabled={acting || st === "accepted" || st === "completed"}
-                              style={{
-                                ...outlineBtn,
-                                marginTop: 0,
-                                border: "1px solid #7f1d1d",
-                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                              }}
-                              title={st === "accepted" || st === "completed" ? "Cannot withdraw after acceptance/completion" : "Withdraw offer"}
-                            >
-                              {acting ? "Working…" : "Withdraw"}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </>
-          )}
-
-          {tab === "requests" && (
-            <>
-              <div style={sectionHint}>Incoming requests for your GIVE listings + offers for your REQUEST posts.</div>
-
-              <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button
-                  onClick={() => {
-                    if (userId) loadIncomingAll(userId);
-                  }}
-                  disabled={incomingLoading}
-                  style={{
-                    ...outlineBtn,
-                    marginTop: 0,
-                    cursor: incomingLoading ? "not-allowed" : "pointer",
-                    opacity: incomingLoading ? 0.8 : 1,
-                  }}
-                >
-                  {incomingLoading ? "Refreshing…" : "Refresh"}
-                </button>
-              </div>
-
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontWeight: 1000, fontSize: 18 }}>Incoming item requests (GIVE)</div>
-                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>People who requested your items.</div>
-              </div>
-
-              {incomingInterests.length === 0 ? (
-                <EmptyBox title="No incoming item requests." body="When someone requests your item, it will appear here." />
-              ) : (
-                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                  {incomingInterests.map((r) => {
-                    const itemTitle = r.items?.title?.trim() ? r.items.title : "Unknown item";
-                    const who = niceNameFromProfile(r.requester, "Ashland user");
-                    const when = fmtWhen(r.created_at);
-                    const deleting = deletingNotifId === r.id;
-
-                    return (
-                      <div key={r.id} className="reqCard">
-                        <div className="reqRow">
-                          <Thumb photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
-
-                          <div className="reqMain">
-                            <div className="reqTitle">
-                              {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
-                            </div>
-                            <div className="reqMeta">
-                              {when ? `Requested: ${when} • ` : ""}
-                              {r.owner_seen_at ? "Seen" : "New"}
-                              {r.status ? ` • ${r.status}` : ""}
-                            </div>
-                          </div>
-
-                          <div className="reqActions">
-                            <button onClick={() => router.push(`/manage/${r.item_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
-                              Open
-                            </button>
-
-                            <button
-                              onClick={() => deleteNotification(r)}
-                              disabled={deleting}
-                              style={{
-                                ...outlineBtn,
-                                marginTop: 0,
-                                border: "1px solid #7f1d1d",
-                                cursor: deleting ? "not-allowed" : "pointer",
-                                opacity: deleting ? 0.75 : 1,
-                              }}
-                              title="Delete request"
-                            >
-                              {deleting ? "Deleting…" : "Delete"}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              <div style={{ marginTop: 18 }}>
-                <div style={{ fontWeight: 1000, fontSize: 18 }}>Incoming help offers (REQUEST)</div>
-                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>
-                  Accept one helper; put others on hold; decline if needed. Chat opens only after acceptance.
-                </div>
-              </div>
-
-              {incomingOffers.length === 0 ? (
-                <EmptyBox title="No incoming offers." body="When someone offers help on your request post, it will appear here." />
-              ) : (
-                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                  {incomingOffers.map((o) => {
-                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
-                    const who = niceNameFromProfile(o.helper, "Ashland user");
-                    const when = fmtWhen(o.created_at);
-                    const st = (o.status ?? "pending") as OfferStatus;
-                    const acting = offerActingId === o.id;
-
-                    return (
-                      <div key={o.id} className="reqCard">
-                        <div className="reqRow">
-                          <div style={{ ...thumbWrap, width: 54, height: 54 }}>🤝</div>
-
-                          <div className="reqMain">
-                            <div className="reqTitle">
-                              {who} offered help on <span style={{ opacity: 0.9 }}>{title}</span>
-                            </div>
-                            <div className="reqMeta">
-                              {when ? `Offered: ${when} • ` : ""}
-                              Status: <b>{st}</b>
-                              {o.availability ? ` • Availability: ${o.availability}` : ""}
-                            </div>
-                            {o.note ? <div style={{ marginTop: 8, opacity: 0.82, fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.note}</div> : null}
-                          </div>
-
-                          <div className="reqActions">
-                            <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtn, marginTop: 0 }}>
-                              View
-                            </button>
-
-                            <button
-                              onClick={() => updateOfferStatus(o, "accepted")}
-                              disabled={acting || st === "accepted" || st === "completed"}
-                              style={{
-                                ...outlineBtn,
-                                marginTop: 0,
-                                border: "1px solid rgba(22,163,74,0.55)",
-                                background: "rgba(22,163,74,0.14)",
-                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                              }}
-                            >
-                              {acting ? "Working…" : "Accept"}
-                            </button>
-
-                            <button
-                              onClick={() => updateOfferStatus(o, "hold")}
-                              disabled={acting || st === "accepted" || st === "completed"}
-                              style={{
-                                ...outlineBtn,
-                                marginTop: 0,
-                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                              }}
-                            >
-                              Hold
-                            </button>
-
-                            <button
-                              onClick={() => updateOfferStatus(o, "declined")}
-                              disabled={acting || st === "declined" || st === "completed"}
-                              style={{
-                                ...outlineBtn,
-                                marginTop: 0,
-                                border: "1px solid #7f1d1d",
-                                cursor: acting || st === "declined" || st === "completed" ? "not-allowed" : "pointer",
-                                opacity: acting || st === "declined" || st === "completed" ? 0.65 : 1,
-                              }}
-                            >
-                              Decline
-                            </button>
-
-                            <button
-                              onClick={() => startChatWithHelper(o)}
-                              disabled={acting || st !== "accepted"}
-                              style={{
-                                ...outlineBtn,
-                                marginTop: 0,
-                                border: st === "accepted" ? "1px solid rgba(22,163,74,0.55)" : "1px solid #334155",
-                                background: st === "accepted" ? "rgba(22,163,74,0.14)" : "transparent",
-                                cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
-                                opacity: acting || st !== "accepted" ? 0.65 : 1,
-                              }}
-                              title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
-                            >
-                              {acting ? "Opening…" : "Start chat"}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </>
-          )}
-
-          {tab === "history" && (
-            <>
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontWeight: 1000, fontSize: 20 }}>Completed listings</div>
-                <div style={{ opacity: 0.75, marginTop: 6 }}>These were picked up (claimed). No actions needed.</div>
-              </div>
-
-              {completedListings.length === 0 ? (
-                <EmptyBox title="No completed listings yet." body="When a pickup is marked, it will move here." />
-              ) : (
-                <div className="rail">
-                  {completedListings.map((item) => (
-                    <div className="railItem" key={item.id}>
-                      <ItemCard item={item} variant="history" />
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* Drawer */}
-        {drawerOpen && (
-          <div onClick={() => setDrawerOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 9998 }}>
-            <div
-              onClick={(e) => e.stopPropagation()}
-              style={{
-                position: "absolute",
-                right: 12,
-                top: 12,
-                width: "min(360px, calc(100vw - 24px))",
-                background: "#0b1730",
-                border: "1px solid #0f223f",
-                borderRadius: 16,
-                overflow: "hidden",
-              }}
-            >
-              <div style={{ padding: 14, borderBottom: "1px solid #0f223f", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ fontWeight: 1000 }}>Menu</div>
-                <button onClick={() => setDrawerOpen(false)} style={smallCloseBtn}>
-                  ✕
-                </button>
-              </div>
-
-              <div style={{ padding: 14, display: "grid", gap: 10 }}>
-                <button
-                  onClick={() => {
-                    setDrawerOpen(false);
-                    router.push("/messages");
-                  }}
-                  style={drawerBtn}
-                >
-                  Messages
-                </button>
-
-                <button
-                  onClick={() => {
-                    setDrawerOpen(false);
-                    router.push("/pickups");
-                  }}
-                  style={drawerBtn}
-                >
-                  My pickups
-                </button>
-
-                <button onClick={signOut} style={{ ...drawerBtn, border: "1px solid #7f1d1d" }}>
-                  Sign out
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
     </div>
   );
 }
-
-/* ---------------- Components ---------------- */
-
-function ItemCard({
-  item,
-  variant,
-  onEdit,
-  onManage,
-  onDelete,
-  deleting,
-}: {
-  item: MyItemRow;
-  variant: "active" | "history";
-  onEdit?: () => void;
-  onManage?: () => void;
-  onDelete?: () => void;
-  deleting?: boolean;
-}) {
-  const status = item.status ?? "—";
-  const type = (item.post_type ?? "give") as "give" | "request";
-
-  return (
-    <div style={card}>
-      <div style={cardMediaWrap}>
-        {item.photo_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.photo_url} alt={item.title} style={cardImg} />
-        ) : (
-          <div style={noPhoto}>{type === "request" ? "Request" : "No photo"}</div>
-        )}
-      </div>
-
-      <div style={{ marginTop: 10, minHeight: 44 }}>
-        <div style={cardTitle}>{item.title}</div>
-        <div style={cardSub}>{item.description ? item.description : "—"}</div>
-      </div>
-
-      <div style={cardMeta}>
-        Type: <b>{type}</b> • Status: <b>{status}</b>
-      </div>
-
-      {variant === "active" ? (
-        <div style={cardActions}>
-          <button onClick={onEdit} style={cardBtnPrimary}>
-            Edit
-          </button>
-          <button onClick={onManage} style={cardBtnOutline}>
-            Manage
-          </button>
-          <button onClick={onDelete} disabled={!!deleting} style={cardBtnDanger(!!deleting)}>
-            {deleting ? "Deleting…" : "Delete"}
-          </button>
-        </div>
-      ) : (
-        <div style={{ marginTop: 10, opacity: 0.7, fontSize: 12 }}>Completed ✅</div>
-      )}
-    </div>
-  );
-}
-
-function Thumb({ photoUrl, label }: { photoUrl: string | null; label: string }) {
-  return (
-    <div style={thumbWrap}>
-      {photoUrl ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={photoUrl} alt={label} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-      ) : (
-        "—"
-      )}
-    </div>
-  );
-}
-
-function EmptyBox({ title, body, children }: { title: string; body: string; children?: React.ReactNode }) {
-  return (
-    <div style={{ marginTop: 14, ...panel }}>
-      <div style={{ fontWeight: 1000 }}>{title}</div>
-      <div style={{ opacity: 0.8, marginTop: 6 }}>{body}</div>
-      {children ? <div style={{ marginTop: 10 }}>{children}</div> : null}
-    </div>
-  );
-}
-
-/* ---------------- Styles ---------------- */
-
-const pageWrap: React.CSSProperties = {
-  minHeight: "100vh",
-  background: "black",
-  color: "white",
-};
-
-const avatar: React.CSSProperties = {
-  width: 44,
-  height: 44,
-  borderRadius: 14,
-  border: "1px solid #0f223f",
-  background: "#0b1730",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  fontWeight: 1000,
-  fontSize: 16,
-  flexShrink: 0,
-};
-
-const iconBtn: React.CSSProperties = {
-  width: 42,
-  height: 42,
-  borderRadius: 12,
-  border: "1px solid #334155",
-  background: "transparent",
-  color: "white",
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-const panel: React.CSSProperties = {
-  borderRadius: 16,
-  border: "1px solid #0f223f",
-  background: "#0b1730",
-  padding: 14,
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  height: 44,
-  borderRadius: 12,
-  border: "1px solid #334155",
-  background: "rgba(0,0,0,0.35)",
-  color: "white",
-  padding: "0 12px",
-  outline: "none",
-  fontWeight: 700,
-};
-
-function primaryBtn(disabled: boolean): React.CSSProperties {
-  return {
-    marginTop: 12,
-    width: "100%",
-    height: 44,
-    borderRadius: 12,
-    border: "1px solid rgba(22,163,74,0.55)",
-    background: disabled ? "rgba(22,163,74,0.10)" : "rgba(22,163,74,0.18)",
-    color: "white",
-    cursor: disabled ? "not-allowed" : "pointer",
-    fontWeight: 1000,
-  };
-}
-
-function pillBtn(active: boolean): React.CSSProperties {
-  return {
-    borderRadius: 999,
-    border: active ? "1px solid #16a34a" : "1px solid #334155",
-    background: active ? "rgba(22,163,74,0.18)" : "transparent",
-    color: "white",
-    padding: "10px 12px",
-    cursor: "pointer",
-    fontWeight: 900,
-  };
-}
-
-const outlineBtn: React.CSSProperties = {
-  border: "1px solid #334155",
-  background: "transparent",
-  color: "white",
-  padding: "10px 12px",
-  borderRadius: 12,
-  cursor: "pointer",
-  fontWeight: 900,
-  whiteSpace: "nowrap",
-};
-
-function tabPill(active: boolean): React.CSSProperties {
-  return {
-    flex: "0 0 auto",
-    borderRadius: 999,
-    border: active ? "1px solid #16a34a" : "1px solid #334155",
-    background: active ? "rgba(22,163,74,0.18)" : "transparent",
-    color: "white",
-    padding: "10px 12px",
-    cursor: "pointer",
-    fontWeight: 900,
-    whiteSpace: "nowrap",
-  };
-}
-
-const dot: React.CSSProperties = {
-  display: "inline-block",
-  width: 8,
-  height: 8,
-  borderRadius: 999,
-  background: "#ef4444",
-  marginLeft: 8,
-  boxShadow: "0 0 0 3px rgba(239,68,68,0.20)",
-};
-
-const sectionHint: React.CSSProperties = {
-  marginTop: 14,
-  opacity: 0.78,
-  fontSize: 13,
-};
-
-const card: React.CSSProperties = {
-  background: "#0b1730",
-  padding: 14,
-  borderRadius: 16,
-  border: "1px solid #0f223f",
-  width: "100%",
-};
-
-const cardMediaWrap: React.CSSProperties = {
-  width: "100%",
-  height: 150,
-  borderRadius: 14,
-  overflow: "hidden",
-  border: "1px solid #0f223f",
-  background: "#020617",
-};
-
-const cardImg: React.CSSProperties = {
-  width: "100%",
-  height: "100%",
-  objectFit: "cover",
-  display: "block",
-};
-
-const noPhoto: React.CSSProperties = {
-  width: "100%",
-  height: "100%",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  color: "#94a3b8",
-  border: "1px dashed #334155",
-  borderRadius: 14,
-};
-
-const cardTitle: React.CSSProperties = {
-  fontSize: 18,
-  fontWeight: 1000,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const cardSub: React.CSSProperties = {
-  opacity: 0.78,
-  marginTop: 6,
-  fontSize: 13,
-  display: "-webkit-box",
-  WebkitLineClamp: 2,
-  WebkitBoxOrient: "vertical" as any,
-  overflow: "hidden",
-  overflowWrap: "anywhere",
-};
-
-const cardMeta: React.CSSProperties = {
-  opacity: 0.78,
-  marginTop: 10,
-  fontSize: 13,
-};
-
-const cardActions: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: 10,
-  marginTop: 12,
-};
-
-const cardBtnPrimary: React.CSSProperties = {
-  border: "1px solid #16a34a",
-  background: "rgba(22,163,74,0.14)",
-  color: "white",
-  padding: "10px 12px",
-  borderRadius: 12,
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-const cardBtnOutline: React.CSSProperties = {
-  border: "1px solid #334155",
-  background: "transparent",
-  color: "white",
-  padding: "10px 12px",
-  borderRadius: 12,
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-function cardBtnDanger(disabled: boolean): React.CSSProperties {
-  return {
-    border: "1px solid #7f1d1d",
-    background: disabled ? "#7f1d1d" : "transparent",
-    color: "white",
-    padding: "10px 12px",
-    borderRadius: 12,
-    cursor: disabled ? "not-allowed" : "pointer",
-    fontWeight: 900,
-    opacity: disabled ? 0.8 : 1,
-  };
-}
-
-const thumbWrap: React.CSSProperties = {
-  width: 54,
-  height: 54,
-  borderRadius: 14,
-  border: "1px solid #0f223f",
-  background: "#020617",
-  overflow: "hidden",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  color: "#94a3b8",
-  flexShrink: 0,
-};
-
-const smallCloseBtn: React.CSSProperties = {
-  border: "1px solid #334155",
-  background: "transparent",
-  color: "white",
-  borderRadius: 12,
-  padding: "6px 10px",
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-const drawerBtn: React.CSSProperties = {
-  width: "100%",
-  border: "1px solid #334155",
-  background: "transparent",
-  color: "white",
-  padding: "10px 12px",
-  borderRadius: 12,
-  cursor: "pointer",
-  fontWeight: 900,
-  textAlign: "left",
-};
