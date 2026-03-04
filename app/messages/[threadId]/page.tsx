@@ -7,7 +7,6 @@ import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { insertSystemMessage } from "@/lib/ensureThread";
 
-
 // ================= TYPES =================
 type ProfileRow = { id: string; full_name: string | null; user_role: string | null };
 
@@ -65,6 +64,7 @@ type TradeRow = {
   fulfilled_by: string | null;
   canceled_by: string | null;
   updated_at: string;
+  created_at?: string;
 };
 
 // ================= CONFIG =================
@@ -82,20 +82,27 @@ function safeName(p: ProfileRow | null) {
   return n || "Ashland user";
 }
 
-function pillStyle() {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "8px 10px",
-    borderRadius: 999,
-    border: "1px solid rgba(148,163,184,0.2)",
-    background: "rgba(255,255,255,0.04)",
-    color: "rgba(255,255,255,0.88)",
-    fontSize: 13,
-    fontWeight: 900,
-    whiteSpace: "nowrap",
-  } as const;
+function fmtTime(iso: string) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtDayLabel(iso: string) {
+  const d = new Date(iso);
+  const now = new Date();
+  const sameYear = d.getFullYear() === now.getFullYear();
+  const sameDay = d.toDateString() === now.toDateString();
+  const yday = new Date(now);
+  yday.setDate(now.getDate() - 1);
+  const isYesterday = d.toDateString() === yday.toDateString();
+
+  if (sameDay) return "Today";
+  if (isYesterday) return "Yesterday";
+  return d.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
 }
 
 function makeClientId() {
@@ -106,14 +113,48 @@ function isAllowedImage(file: File) {
   return ["image/jpeg", "image/png", "image/webp"].includes(file.type);
 }
 
+function normStatus(s?: string | null) {
+  return (s ?? "").toLowerCase().trim();
+}
+
+function statusBadge(status?: string | null) {
+  const st = normStatus(status);
+  if (!st) return { label: "Active", tone: "neutral" as const };
+  if (st.includes("complete") || st === "completed") return { label: "Completed", tone: "done" as const };
+  if (st.includes("claim") || st === "claimed") return { label: "Claimed", tone: "done" as const };
+  if (st.includes("reserve") || st === "reserved") return { label: "Reserved", tone: "warn" as const };
+  if (st.includes("available")) return { label: "Available", tone: "good" as const };
+  return { label: "Active", tone: "neutral" as const };
+}
+
+function dealLabelOf(trade: TradeRow | null) {
+  if (!trade) return "Not started";
+  if (trade.state === "proposed") return "Waiting for confirmation";
+  if (trade.state === "confirmed") return "Confirmed";
+  if (trade.state === "fulfilled") return "Completed";
+  return "Not started";
+}
+
+function dealPillTone(trade: TradeRow | null) {
+  if (!trade) return "neutral" as const;
+  if (trade.state === "proposed") return "warn" as const;
+  if (trade.state === "confirmed") return "good" as const;
+  if (trade.state === "fulfilled") return "done" as const;
+  return "neutral" as const;
+}
+
+function isParticipant(t: TradeRow, uid: string | null) {
+  if (!uid) return false;
+  return t.seller_id === uid || t.buyer_id === uid;
+}
+
 // ================= PAGE =================
 export default function ThreadPage() {
   const router = useRouter();
   const params = useParams();
 
-  // ✅ robust threadId
   const threadId = useMemo(() => {
-    const raw = params?.threadId;
+    const raw = (params as any)?.threadId;
     const id = typeof raw === "string" ? raw : Array.isArray(raw) ? raw[0] : "";
     return (id || "").trim();
   }, [params]);
@@ -128,7 +169,7 @@ export default function ThreadPage() {
   const [otherProfile, setOtherProfile] = useState<ProfileRow | null>(null);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
 
-  // ---------- trade/fulfillment ----------
+  // ---------- trade ----------
   const [trade, setTrade] = useState<TradeRow | null>(null);
   const [tradeLoading, setTradeLoading] = useState(false);
   const [tradeErr, setTradeErr] = useState<string | null>(null);
@@ -142,11 +183,9 @@ export default function ThreadPage() {
   const [myLastSeenAt, setMyLastSeenAt] = useState<string | null>(null);
   const [otherLastSeenAt, setOtherLastSeenAt] = useState<string | null>(null);
 
-  // ---------- typing/presence ----------
+  // ---------- presence ----------
   const [otherTyping, setOtherTyping] = useState(false);
   const typingTimeoutRef = useRef<any>(null);
-
-  // realtime channel refs (stable, no hunting)
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   // ---------- UI ----------
@@ -154,16 +193,17 @@ export default function ThreadPage() {
   const [err, setErr] = useState<string | null>(null);
 
   const [text, setText] = useState("");
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingText, setEditingText] = useState<string>("");
   const [replyTo, setReplyTo] = useState<MessageRow | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  // paging
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
+
+  const [openMenuFor, setOpenMenuFor] = useState<string | null>(null);
+
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
 
-  // scroll behavior
   const listRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
@@ -403,7 +443,7 @@ export default function ThreadPage() {
     }
   }
 
-  // ================= SEND / RETRY / EDIT / DELETE =================
+  // ================= SEND / EDIT / DELETE =================
   async function sendMessage(payload: { body: string; attachments?: any | null }) {
     if (!isAshland || !userId) return router.push("/me");
     if (mustConfirmBeforeChat) return;
@@ -452,7 +492,7 @@ export default function ThreadPage() {
       .single();
 
     if (error) {
-      setErr(error.message || "Send failed. Tap the message to retry.");
+      setErr(error.message || "Send failed. Tap retry.");
       setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, edited_at: "FAILED" } : m)));
       return;
     }
@@ -476,6 +516,7 @@ export default function ThreadPage() {
     if (String(m.id).startsWith("temp-")) return;
     setEditingId(m.id);
     setEditingText(m.body || "");
+    setOpenMenuFor(null);
   }
 
   async function saveEdit() {
@@ -505,8 +546,9 @@ export default function ThreadPage() {
     if (!ok) return;
 
     setErr(null);
-    const deletedAt = new Date().toISOString();
+    setOpenMenuFor(null);
 
+    const deletedAt = new Date().toISOString();
     setMessages((prev) => prev.map((x) => (x.id === id ? { ...x, deleted_at: deletedAt } : x)));
     const { error } = await supabase.from("messages").update({ deleted_at: deletedAt }).eq("id", id);
     if (error) setErr(error.message || "Delete failed.");
@@ -516,13 +558,10 @@ export default function ThreadPage() {
   async function uploadImage(file: File) {
     if (!userId) return null;
 
-    // keep simple: allow any image, but validate common formats
     if (!file.type?.startsWith("image/")) {
       setErr("Please upload an image file.");
       return null;
     }
-
-    // optional: strict types
     if (!isAllowedImage(file)) {
       setErr("Upload JPG, PNG, or WEBP.");
       return null;
@@ -555,16 +594,14 @@ export default function ThreadPage() {
     const f = e.target.files?.[0];
     e.target.value = "";
     if (!f) return;
+
     const url = await uploadImage(f);
     if (!url) return;
 
-    await sendMessage({
-      body: "",
-      attachments: { type: "image", url },
-    });
+    await sendMessage({ body: "", attachments: { type: "image", url } });
   }
 
-  // ================= PICKUP CONFIRM (your existing gate) =================
+  // ================= PICKUP CONFIRM (your gate) =================
   async function confirmPickupFromChat() {
     if (!isAshland || !userId) return router.push("/me");
     if (!thread?.item_id || !myInterest?.id) return;
@@ -588,12 +625,7 @@ export default function ThreadPage() {
     }
   }
 
-  // ================= TRADE (FULFILLMENT LOOP) =================
-  function isParticipant(t: TradeRow, uid: string | null) {
-    if (!uid) return false;
-    return t.seller_id === uid || t.buyer_id === uid;
-  }
-
+  // ================= TRADE =================
   async function loadTrade() {
     if (!threadId) return;
     setTradeLoading(true);
@@ -614,7 +646,6 @@ export default function ThreadPage() {
     }
 
     const row = (data?.[0] as TradeRow) ?? null;
-    // if canceled, treat as no active deal
     if (row?.state === "canceled") setTrade(null);
     else setTrade(row);
 
@@ -623,8 +654,6 @@ export default function ThreadPage() {
 
   async function proposeTrade() {
     if (!userId || !thread || !thread.item_id || !thread.owner_id || !thread.requester_id) return;
-
-    // don’t allow before pickup confirmation if you’re gating chat
     if (mustConfirmBeforeChat) return;
 
     setTradeErr(null);
@@ -641,7 +670,6 @@ export default function ThreadPage() {
     ]);
 
     if (error) {
-      // unique index likely hit; just reload
       await loadTrade();
       return;
     }
@@ -676,7 +704,6 @@ export default function ThreadPage() {
       return;
     }
 
-    // reserve item
     await supabase.from("items").update({ status: "reserved" }).eq("id", trade.item_id);
 
     await insertSystemMessage({
@@ -686,7 +713,6 @@ export default function ThreadPage() {
     });
 
     await loadTrade();
-    // refresh item header status
     if (thread?.item_id) {
       const { data: it } = await supabase
         .from("items")
@@ -750,7 +776,6 @@ export default function ThreadPage() {
       return;
     }
 
-    // set item back to available (only if not already completed)
     await supabase.from("items").update({ status: "available" }).eq("id", trade.item_id);
 
     await insertSystemMessage({
@@ -792,28 +817,24 @@ export default function ThreadPage() {
   }
 
   // scroll detect
-useEffect(() => {
-  const el = listRef.current;
-  if (!el) return;
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
 
-  const node = el; // ✅ node is HTMLDivElement, not nullable
+    const node = el;
+    function onScroll() {
+      const dist = node.scrollHeight - node.scrollTop - node.clientHeight;
+      setStickToBottom(dist < 160);
+    }
 
-  function onScroll() {
-    const distanceFromBottom =
-      node.scrollHeight - node.scrollTop - node.clientHeight;
-
-    setStickToBottom(distanceFromBottom < 120);
-  }
-
-  node.addEventListener("scroll", onScroll);
-  return () => node.removeEventListener("scroll", onScroll);
-}, []);
+    node.addEventListener("scroll", onScroll);
+    return () => node.removeEventListener("scroll", onScroll);
+  }, []);
 
   // realtime subscription
   useEffect(() => {
     if (!threadId || !userId) return;
 
-    // cleanup old
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current);
       channelRef.current = null;
@@ -825,10 +846,7 @@ useEffect(() => {
         const state = (ch.presenceState() as any) || {};
         const keys = Object.keys(state);
         const otherKeys = keys.filter((k) => k !== userId);
-
-        const typing =
-          otherKeys.some((k) => (state?.[k] || []).some((x: any) => !!x?.typing)) || false;
-
+        const typing = otherKeys.some((k) => (state?.[k] || []).some((x: any) => !!x?.typing)) || false;
         setOtherTyping(typing);
       })
       .on(
@@ -840,7 +858,6 @@ useEffect(() => {
           if (ev === "INSERT") {
             const row = payload.new as MessageRow;
 
-            // dedupe via client_id
             setMessages((prev) => {
               if (prev.some((m) => m.id === row.id)) return prev;
 
@@ -857,9 +874,10 @@ useEffect(() => {
             if (row.sender_id && row.sender_id !== userId) {
               setTimeout(() => {
                 if (stickToBottom) markSeenNow(userId);
-              }, 50);
+              }, 60);
             }
-            setTimeout(() => scrollToBottom(), 30);
+
+            setTimeout(() => scrollToBottom(), 40);
           }
 
           if (ev === "UPDATE") {
@@ -868,14 +886,9 @@ useEffect(() => {
           }
         }
       )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "message_reactions" },
-        () => {
-          // reload counts (cheap enough for MVP)
-          if (userId) loadReactions(userId, messages.map((m) => m.id));
-        }
-      )
+      .on("postgres_changes", { event: "*", schema: "public", table: "message_reactions" }, () => {
+        if (userId) loadReactions(userId, messages.map((m) => m.id));
+      })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
           channelRef.current = ch;
@@ -937,7 +950,6 @@ useEffect(() => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
-  // reload reactions when messages change
   useEffect(() => {
     if (!userId) return;
     if (messages.length === 0) return;
@@ -969,25 +981,48 @@ useEffect(() => {
     return isoToMs(otherLastSeenAt) >= isoToMs(lastMyMessage.created_at);
   }, [lastMyMessage, otherLastSeenAt]);
 
-  // trade UI
-  const dealLabel =
-    trade?.state === "proposed"
-      ? "Waiting for confirmation"
-      : trade?.state === "confirmed"
-      ? "Confirmed"
-      : trade?.state === "fulfilled"
-      ? "Completed"
-      : "Not started";
+  const dealLabel = dealLabelOf(trade);
+  const dealTone = dealPillTone(trade);
 
   const canProposeDeal = !trade && !!thread?.item_id && !!thread?.owner_id && !!thread?.requester_id && !mustConfirmBeforeChat;
   const canConfirmDeal = trade?.state === "proposed" && trade?.proposed_by !== userId && isParticipant(trade, userId);
   const canCompleteDeal = trade?.state === "confirmed" && isParticipant(trade, userId);
-  const canCancelDeal = trade && (trade.state === "proposed" || trade.state === "confirmed") && isParticipant(trade, userId);
+  const canCancelDeal = !!trade && (trade.state === "proposed" || trade.state === "confirmed") && isParticipant(trade, userId);
+
+  const grouped = useMemo(() => {
+    const out: Array<
+      | { kind: "day"; key: string; label: string }
+      | { kind: "msg"; msg: MessageRow; mine: boolean; time: string; deleted: boolean; isTemp: boolean; failed: boolean }
+    > = [];
+
+    let lastDayKey = "";
+    for (const m of messages) {
+      const dayKey = new Date(m.created_at).toDateString();
+      if (dayKey !== lastDayKey) {
+        lastDayKey = dayKey;
+        out.push({ kind: "day", key: dayKey, label: fmtDayLabel(m.created_at) });
+      }
+      const mine = !!userId && m.sender_id === userId;
+      const deleted = !!m.deleted_at;
+      const isTemp = String(m.id).startsWith("temp-");
+      const failed = m.edited_at === "FAILED";
+      out.push({
+        kind: "msg",
+        msg: m,
+        mine,
+        time: fmtTime(m.created_at),
+        deleted,
+        isTemp,
+        failed,
+      });
+    }
+    return out;
+  }, [messages, userId]);
 
   // ================= RENDER =================
   if (!threadId) {
     return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#0f172a", padding: 18 }}>
         Invalid thread.
       </div>
     );
@@ -995,673 +1030,1200 @@ useEffect(() => {
 
   if (!isAshland) {
     return (
-      <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
+      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#0f172a", padding: 18 }}>
         Checking access…
       </div>
     );
   }
 
+  const st = statusBadge(item?.status);
+
   return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 18, paddingBottom: 120 }}>
-      {/* top bar */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-        <button
-          onClick={() => router.push("/messages")}
-          style={{
-            background: "transparent",
-            color: "white",
-            border: "1px solid rgba(148,163,184,0.25)",
-            padding: "8px 12px",
-            borderRadius: 12,
-            cursor: "pointer",
-            fontWeight: 900,
-          }}
-        >
-          ← Back
-        </button>
+    <div className="page" onClick={() => openMenuFor && setOpenMenuFor(null)}>
+      {/* Sticky header */}
+      <header className="top" onClick={(e) => e.stopPropagation()}>
+        <div className="topRow">
+          <button className="backBtn" type="button" onClick={() => router.push("/messages")}>
+            <span aria-hidden>←</span> Back
+          </button>
 
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          {unseenCount > 0 && (
-            <span
-              style={{
-                ...pillStyle(),
-                border: "1px solid rgba(239,68,68,0.35)",
-                background: "rgba(239,68,68,0.10)",
-              }}
-            >
-              Unseen: {unseenCount}
-            </span>
-          )}
-
-          {otherTyping && <span style={pillStyle()}>Typing…</span>}
-        </div>
-      </div>
-
-      <h1 style={{ marginTop: 14, fontSize: 26, fontWeight: 950 }}>Conversation</h1>
-
-      {err && <div style={{ color: "#f87171", marginTop: 10 }}>{err}</div>}
-      {loading && <div style={{ opacity: 0.8, marginTop: 10 }}>Loading…</div>}
-
-      {/* header */}
-      {!loading && item && (
-        <div
-          style={{
-            marginTop: 12,
-            background: "rgba(255,255,255,0.04)",
-            border: "1px solid rgba(148,163,184,0.15)",
-            borderRadius: 18,
-            padding: 14,
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-          }}
-        >
-          <div
-            style={{
-              width: 52,
-              height: 52,
-              borderRadius: 12,
-              overflow: "hidden",
-              border: "1px solid rgba(148,163,184,0.18)",
-              background: "rgba(255,255,255,0.03)",
-              flexShrink: 0,
-            }}
-          >
-            {item.photo_url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={item.photo_url}
-                alt={item.title}
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-              />
-            ) : null}
-          </div>
-
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontWeight: 950, fontSize: 18, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {item.title}
-            </div>
-
-            <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <span style={pillStyle()}>Status: {item.status || "available"}</span>
-              {myInterest?.status ? <span style={pillStyle()}>Interest: {myInterest.status}</span> : null}
-              {otherProfile ? (
-                <span style={pillStyle()}>
-                  Talking with: {safeName(otherProfile)}
-                  <span style={{ opacity: 0.75 }}>• {otherProfile.user_role || "student"}</span>
-                </span>
-              ) : null}
+          <div className="brand">
+            <div className="brandName">ScholarSwap</div>
+            <div className="brandSub">
+              {otherProfile ? safeName(otherProfile) : "Conversation"}
+              {otherTyping ? <span className="typing"> • typing…</span> : null}
             </div>
           </div>
 
           <button
-            onClick={() => router.push(`/item/${item.id}`)}
-            style={{
-              background: "transparent",
-              border: "1px solid rgba(148,163,184,0.22)",
-              color: "white",
-              padding: "10px 12px",
-              borderRadius: 12,
-              cursor: "pointer",
-              fontWeight: 950,
-              whiteSpace: "nowrap",
+            className="miniBtn"
+            type="button"
+            onClick={() => {
+              loadReads(userId!);
+              loadTrade();
             }}
+            aria-label="Refresh"
+            title="Refresh"
           >
-            View item
+            ↻
           </button>
         </div>
-      )}
 
-      {/* fulfillment / deal status (low friction) */}
-      {!loading && item && (
-        <div
-          style={{
-            marginTop: 12,
-            border: "1px solid rgba(148,163,184,0.15)",
-            background: "rgba(255,255,255,0.03)",
-            borderRadius: 18,
-            padding: 12,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 10,
-            flexWrap: "wrap",
-          }}
-        >
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <div style={{ fontWeight: 950 }}>Deal status</div>
-            <div style={{ fontSize: 12, opacity: 0.8 }}>
-              {tradeLoading ? "Loading…" : dealLabel}
-            </div>
-          </div>
+        {err && <div className="err">{err}</div>}
 
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            {canProposeDeal && (
-              <button
-                type="button"
-                onClick={proposeTrade}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "none",
-                  background: "#16a34a",
-                  color: "white",
-                  fontWeight: 950,
-                  cursor: "pointer",
-                }}
-              >
-                Confirm pickup
-              </button>
-            )}
-
-            {canConfirmDeal && (
-              <button
-                type="button"
-                onClick={confirmTrade}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "none",
-                  background: "#16a34a",
-                  color: "white",
-                  fontWeight: 950,
-                  cursor: "pointer",
-                }}
-              >
-                Confirm
-              </button>
-            )}
-
-            {canCompleteDeal && (
-              <button
-                type="button"
-                onClick={markFulfilled}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "none",
-                  background: "#22c55e",
-                  color: "white",
-                  fontWeight: 950,
-                  cursor: "pointer",
-                }}
-              >
-                Mark completed
-              </button>
-            )}
-
-            {canCancelDeal && (
-              <button
-                type="button"
-                onClick={cancelTrade}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(148,163,184,0.25)",
-                  background: "transparent",
-                  color: "white",
-                  fontWeight: 950,
-                  cursor: "pointer",
-                }}
-              >
-                Cancel
-              </button>
-            )}
-          </div>
-
-          {tradeErr && (
-            <div style={{ width: "100%", color: "#f87171", fontSize: 12, marginTop: 6 }}>
-              {tradeErr}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* buyer confirm gate */}
-      {!loading && item && mustConfirmBeforeChat && (
-        <div
-          style={{
-            marginTop: 12,
-            borderRadius: 16,
-            border: "1px solid rgba(52,211,153,0.22)",
-            background: "rgba(16,185,129,0.10)",
-            padding: 12,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-          }}
-        >
-          <div style={{ fontWeight: 950 }}>
-            Seller accepted your request. <span style={{ opacity: 0.85 }}>Confirm pickup above to start chatting.</span>
-          </div>
-
-          <button
-            onClick={confirmPickupFromChat}
-            style={{
-              background: "rgba(20,83,45,1)",
-              border: "1px solid rgba(22,101,52,1)",
-              color: "white",
-              padding: "10px 12px",
-              borderRadius: 12,
-              cursor: "pointer",
-              fontWeight: 950,
-              whiteSpace: "nowrap",
-            }}
-          >
-            Confirm pickup ✅
-          </button>
-        </div>
-      )}
-
-      {/* messages list */}
-      <div
-        ref={listRef}
-        style={{
-          marginTop: 14,
-          height: "calc(100vh - 360px)",
-          overflowY: "auto",
-          paddingRight: 6,
-        }}
-      >
-        {hasMore && (
-          <button
-            onClick={loadOlder}
-            disabled={loadingMore}
-            style={{
-              width: "100%",
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid rgba(148,163,184,0.22)",
-              background: "rgba(255,255,255,0.03)",
-              color: "white",
-              cursor: loadingMore ? "not-allowed" : "pointer",
-              fontWeight: 900,
-              opacity: loadingMore ? 0.7 : 1,
-            }}
-          >
-            {loadingMore ? "Loading…" : "Load older"}
-          </button>
-        )}
-
-        {messages.map((m) => {
-          const mine = !!userId && m.sender_id === userId;
-          const time = new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-          const deleted = !!m.deleted_at;
-
-          const att = m.attachments || null;
-          const isTemp = String(m.id).startsWith("temp-");
-          const failed = m.edited_at === "FAILED";
-
-          const replyTarget = m.reply_to ? messages.find((x) => x.id === m.reply_to) : null;
-
-          return (
-            <div key={m.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginTop: 10 }}>
-              <div style={{ maxWidth: "min(680px, 82vw)" }}>
-                <div
-                  onClick={() => {
-                    if (failed && isTemp) retrySend(m);
-                  }}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 16,
-                    borderTopRightRadius: mine ? 6 : 16,
-                    borderTopLeftRadius: mine ? 16 : 6,
-                    background: mine ? "rgba(22,163,74,0.25)" : "rgba(255,255,255,0.04)",
-                    border: "1px solid rgba(148,163,184,0.18)",
-                    color: "white",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                    fontWeight: 650,
-                    cursor: failed ? "pointer" : "default",
-                    opacity: deleted ? 0.7 : 1,
-                  }}
-                >
-                  {replyTarget && !deleted && (
-                    <div
-                      style={{
-                        marginBottom: 8,
-                        padding: "8px 10px",
-                        borderRadius: 12,
-                        border: "1px solid rgba(148,163,184,0.18)",
-                        background: "rgba(0,0,0,0.25)",
-                        fontSize: 12,
-                        opacity: 0.9,
-                      }}
-                    >
-                      Replying to:{" "}
-                      <span style={{ fontWeight: 950 }}>
-                        {replyTarget.sender_id === userId ? "You" : safeName(otherProfile)}
-                      </span>{" "}
-                      — {replyTarget.deleted_at ? "Message deleted" : (replyTarget.body || "").slice(0, 80)}
-                    </div>
-                  )}
-
-                  {deleted ? (
-                    <span style={{ fontStyle: "italic" }}>Message deleted</span>
-                  ) : (
-                    <>
-                      {att?.type === "image" && att?.url ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={att.url}
-                          alt="attachment"
-                          style={{
-                            width: "100%",
-                            maxHeight: 360,
-                            objectFit: "cover",
-                            borderRadius: 14,
-                            marginBottom: m.body ? 10 : 0,
-                          }}
-                        />
-                      ) : null}
-
-                      {m.body ? <div style={{ opacity: 0.98 }}>{m.body}</div> : null}
-
-                      {failed ? <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>Send failed — tap to retry</div> : null}
-                    </>
-                  )}
-
-                  <div
-                    style={{
-                      opacity: 0.6,
-                      fontSize: 12,
-                      marginTop: 6,
-                      textAlign: "right",
-                      display: "flex",
-                      gap: 10,
-                      justifyContent: "flex-end",
-                    }}
-                  >
-                    <span>{time}</span>
-                    {m.edited_at && m.edited_at !== "FAILED" && !deleted ? <span>Edited</span> : null}
-                    {mine && lastMyMessage?.id === m.id && !deleted ? (
-                      <span style={{ opacity: 0.8, fontWeight: 900 }}>{lastMyMessageSeen ? "Seen" : "Sent"}</span>
-                    ) : null}
-                  </div>
-                </div>
-
-                {!deleted && (
-                  <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", justifyContent: mine ? "flex-end" : "flex-start" }}>
-                    {Object.entries(reactions[m.id] || {}).map(([emoji, count]) => {
-                      const active = !!myReactions?.[m.id]?.[emoji];
-                      return (
-                        <button
-                          key={emoji}
-                          onClick={() => toggleReaction(m.id, emoji)}
-                          style={{
-                            borderRadius: 999,
-                            padding: "6px 10px",
-                            border: active ? "1px solid rgba(52,211,153,0.45)" : "1px solid rgba(148,163,184,0.22)",
-                            background: active ? "rgba(16,185,129,0.14)" : "rgba(255,255,255,0.03)",
-                            color: "white",
-                            cursor: "pointer",
-                            fontWeight: 900,
-                            fontSize: 12,
-                          }}
-                        >
-                          {emoji} {count}
-                        </button>
-                      );
-                    })}
-
-                    <button
-                      onClick={() => toggleReaction(m.id, "👍")}
-                      style={{
-                        borderRadius: 999,
-                        padding: "6px 10px",
-                        border: "1px solid rgba(148,163,184,0.22)",
-                        background: "rgba(255,255,255,0.03)",
-                        color: "white",
-                        cursor: "pointer",
-                        fontWeight: 900,
-                        fontSize: 12,
-                      }}
-                    >
-                      👍
-                    </button>
-                    <button
-                      onClick={() => toggleReaction(m.id, "❤️")}
-                      style={{
-                        borderRadius: 999,
-                        padding: "6px 10px",
-                        border: "1px solid rgba(148,163,184,0.22)",
-                        background: "rgba(255,255,255,0.03)",
-                        color: "white",
-                        cursor: "pointer",
-                        fontWeight: 900,
-                        fontSize: 12,
-                      }}
-                    >
-                      ❤️
-                    </button>
-
-                    <button
-                      onClick={() => setReplyTo(m)}
-                      style={{
-                        borderRadius: 12,
-                        padding: "6px 10px",
-                        border: "1px solid rgba(148,163,184,0.22)",
-                        background: "rgba(255,255,255,0.03)",
-                        color: "white",
-                        cursor: "pointer",
-                        fontWeight: 900,
-                        fontSize: 12,
-                      }}
-                    >
-                      Reply
-                    </button>
-
-                    {m.sender_id === userId && !String(m.id).startsWith("temp-") ? (
-                      <>
-                        <button
-                          onClick={() => startEdit(m)}
-                          style={{
-                            borderRadius: 12,
-                            padding: "6px 10px",
-                            border: "1px solid rgba(148,163,184,0.22)",
-                            background: "rgba(255,255,255,0.03)",
-                            color: "white",
-                            cursor: "pointer",
-                            fontWeight: 900,
-                            fontSize: 12,
-                          }}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => deleteMessage(m.id)}
-                          style={{
-                            borderRadius: 12,
-                            padding: "6px 10px",
-                            border: "1px solid rgba(127,29,29,0.80)",
-                            background: "rgba(255,255,255,0.03)",
-                            color: "white",
-                            cursor: "pointer",
-                            fontWeight: 900,
-                            fontSize: 12,
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </>
-                    ) : null}
+        {!loading && item && (
+          <div className="meta">
+            <button className="itemCard" type="button" onClick={() => router.push(`/item/${item.id}`)}>
+              <div className="thumb">
+                {item.photo_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.photo_url} alt={item.title} />
+                ) : (
+                  <div className="noThumb" aria-hidden>
+                    📦
                   </div>
                 )}
               </div>
+
+              <div className="itemInfo">
+                <div className="itemTitle">{item.title}</div>
+                <div className="itemSub">
+                  <span className={`badge ${st.tone}`}>{st.label}</span>
+                  {myInterest?.status ? <span className="dotSep">•</span> : null}
+                  {myInterest?.status ? <span className="muted">Interest: {myInterest.status}</span> : null}
+                </div>
+              </div>
+
+              <div className="chev" aria-hidden>
+                ›
+              </div>
+            </button>
+
+            {/* Deal bar */}
+            <div className="dealBar">
+              <div className="dealLeft">
+                <div className="dealTitle">Deal</div>
+                <div className="dealSub">
+                  <span className={`dealPill ${dealTone}`}>{tradeLoading ? "Loading…" : dealLabel}</span>
+                  {unseenCount > 0 ? <span className="unseen">Unseen {unseenCount}</span> : null}
+                </div>
+              </div>
+
+              <div className="dealActions">
+                {canProposeDeal && (
+                  <button className="actionPrimary" type="button" onClick={proposeTrade}>
+                    Propose
+                  </button>
+                )}
+                {canConfirmDeal && (
+                  <button className="actionPrimary" type="button" onClick={confirmTrade}>
+                    Confirm
+                  </button>
+                )}
+                {canCompleteDeal && (
+                  <button className="actionGood" type="button" onClick={markFulfilled}>
+                    Complete
+                  </button>
+                )}
+                {canCancelDeal && (
+                  <button className="actionGhost" type="button" onClick={cancelTrade}>
+                    Cancel
+                  </button>
+                )}
+              </div>
+
+              {tradeErr && <div className="tradeErr">{tradeErr}</div>}
             </div>
-          );
-        })}
 
-        <div ref={bottomRef} />
-      </div>
-
-      {/* reply banner */}
-      {replyTo && (
-        <div
-          style={{
-            marginTop: 12,
-            borderRadius: 14,
-            border: "1px solid rgba(148,163,184,0.18)",
-            background: "rgba(255,255,255,0.03)",
-            padding: 10,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 10,
-          }}
-        >
-          <div style={{ fontSize: 13, fontWeight: 900, opacity: 0.9, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            Replying to: {replyTo.deleted_at ? "Message deleted" : (replyTo.body || "").slice(0, 80)}
+            {/* Buyer gate (clean, single CTA) */}
+            {mustConfirmBeforeChat && (
+              <div className="gate">
+                <div className="gateText">
+                  Seller accepted your request. <span className="muted">Confirm pickup to start chatting.</span>
+                </div>
+                <button className="gateBtn" type="button" onClick={confirmPickupFromChat}>
+                  Confirm pickup ✅
+                </button>
+              </div>
+            )}
           </div>
-          <button
-            onClick={() => setReplyTo(null)}
-            style={{
-              borderRadius: 12,
-              padding: "6px 10px",
-              border: "1px solid rgba(148,163,184,0.22)",
-              background: "transparent",
-              color: "white",
-              cursor: "pointer",
-              fontWeight: 950,
+        )}
+
+        {!loading && !item && (
+          <div className="meta">
+            <div className="emptyMeta">
+              <div className="emptyMetaTitle">Conversation</div>
+              <div className="emptyMetaSub">This thread has no item attached.</div>
+            </div>
+          </div>
+        )}
+      </header>
+
+      {/* Messages */}
+      <main className="main" onClick={(e) => e.stopPropagation()}>
+        <div ref={listRef} className="list">
+          {hasMore && (
+            <button className="loadMore" onClick={loadOlder} disabled={loadingMore} type="button">
+              {loadingMore ? "Loading…" : "Load older"}
+            </button>
+          )}
+
+          {loading && <div className="loading">Loading…</div>}
+
+          {!loading &&
+            grouped.map((x) => {
+              if (x.kind === "day") {
+                return (
+                  <div key={x.key} className="day">
+                    <span>{x.label}</span>
+                  </div>
+                );
+              }
+
+              const { msg: m, mine, time, deleted, isTemp, failed } = x;
+
+              const att = m.attachments || null;
+              const replyTarget = m.reply_to ? messages.find((z) => z.id === m.reply_to) : null;
+
+              return (
+                <div key={m.id} className={`row ${mine ? "mine" : "theirs"}`}>
+                  <div className={`bubble ${mine ? "bMine" : "bTheirs"} ${deleted ? "deleted" : ""}`}>
+                    {/* reply preview */}
+                    {replyTarget && !deleted && (
+                      <button
+                        className="replyPeek"
+                        type="button"
+                        onClick={() => {
+                          // simple: scroll to target by id if present
+                          const el = document.getElementById(`msg-${replyTarget.id}`);
+                          el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                        }}
+                      >
+                        <div className="replyPeekTop">
+                          Replying to{" "}
+                          <b>{replyTarget.sender_id === userId ? "you" : safeName(otherProfile)}</b>
+                        </div>
+                        <div className="replyPeekBody">
+                          {replyTarget.deleted_at ? "Message deleted" : (replyTarget.body || "").slice(0, 90)}
+                        </div>
+                      </button>
+                    )}
+
+                    {/* body */}
+                    <div id={`msg-${m.id}`} className="body">
+                      {deleted ? (
+                        <span className="deletedText">Message deleted</span>
+                      ) : (
+                        <>
+                          {att?.type === "image" && att?.url ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img className="img" src={att.url} alt="attachment" />
+                          ) : null}
+
+                          {m.body ? <div className="text">{m.body}</div> : null}
+
+                          {failed ? (
+                            <button
+                              className="fail"
+                              type="button"
+                              onClick={() => {
+                                if (failed && isTemp) retrySend(m);
+                              }}
+                            >
+                              Send failed — tap to retry
+                            </button>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+
+                    {/* footer */}
+                    <div className="metaRow">
+                      <span className="time">{time}</span>
+                      {m.edited_at && m.edited_at !== "FAILED" && !deleted ? <span className="metaTiny">Edited</span> : null}
+                      {mine && lastMyMessage?.id === m.id && !deleted ? (
+                        <span className="metaTiny">{lastMyMessageSeen ? "Seen" : "Sent"}</span>
+                      ) : null}
+
+                      {!deleted && (
+                        <button
+                          className="menuBtn"
+                          type="button"
+                          onClick={() => setOpenMenuFor(openMenuFor === m.id ? null : m.id)}
+                          aria-label="Message actions"
+                          title="Actions"
+                        >
+                          ⋯
+                        </button>
+                      )}
+                    </div>
+
+                    {/* quick actions row (minimal) */}
+                    {!deleted && (
+                      <div className="actions">
+                        <button className="rx" type="button" onClick={() => toggleReaction(m.id, "👍")}>
+                          👍
+                        </button>
+                        <button className="rx" type="button" onClick={() => toggleReaction(m.id, "❤️")}>
+                          ❤️
+                        </button>
+                        <button className="act" type="button" onClick={() => setReplyTo(m)}>
+                          Reply
+                        </button>
+
+                        {openMenuFor === m.id && (
+                          <div className={`menu ${mine ? "right" : "left"}`} onClick={(e) => e.stopPropagation()}>
+                            <div className="menuGrid">
+                              <button className="menuItem" type="button" onClick={() => navigator.clipboard.writeText(m.body || "")}>
+                                Copy
+                              </button>
+                              {mine && !String(m.id).startsWith("temp-") ? (
+                                <>
+                                  <button className="menuItem" type="button" onClick={() => startEdit(m)}>
+                                    Edit
+                                  </button>
+                                  <button className="menuItem danger" type="button" onClick={() => deleteMessage(m.id)}>
+                                    Delete
+                                  </button>
+                                </>
+                              ) : null}
+                              <button className="menuItem" type="button" onClick={() => setOpenMenuFor(null)}>
+                                Close
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* reaction chips */}
+                    {!deleted && Object.keys(reactions[m.id] || {}).length > 0 && (
+                      <div className={`chips ${mine ? "chipsMine" : "chipsTheirs"}`}>
+                        {Object.entries(reactions[m.id] || {}).map(([emoji, count]) => {
+                          const active = !!myReactions?.[m.id]?.[emoji];
+                          return (
+                            <button
+                              key={emoji}
+                              className={`chip ${active ? "on" : ""}`}
+                              type="button"
+                              onClick={() => toggleReaction(m.id, emoji)}
+                            >
+                              {emoji} {count}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+
+          <div ref={bottomRef} />
+        </div>
+
+        {!stickToBottom && (
+          <button className="toBottom" type="button" onClick={() => scrollToBottom(true)} aria-label="Scroll to latest">
+            ↓ New
+          </button>
+        )}
+      </main>
+
+      {/* Composer */}
+      <footer className="composerWrap" onClick={(e) => e.stopPropagation()}>
+        {replyTo && (
+          <div className="replyBanner">
+            <div className="replyText">
+              Replying to: {replyTo.deleted_at ? "Message deleted" : (replyTo.body || "").slice(0, 110)}
+            </div>
+            <button className="replyClose" type="button" onClick={() => setReplyTo(null)} aria-label="Cancel reply">
+              ✕
+            </button>
+          </div>
+        )}
+
+        {editingId && (
+          <div className="editBanner">
+            <input
+              value={editingText}
+              onChange={(e) => setEditingText(e.target.value)}
+              className="editInput"
+              placeholder="Edit message…"
+            />
+            <button className="editSave" type="button" onClick={saveEdit}>
+              Save
+            </button>
+            <button className="editCancel" type="button" onClick={() => setEditingId(null)}>
+              Cancel
+            </button>
+          </div>
+        )}
+
+        <div className={`composer ${mustConfirmBeforeChat ? "disabled" : ""}`}>
+          <label className="iconBtn" title="Upload image">
+            <span aria-hidden>📎</span>
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              onChange={onPickImage}
+              disabled={uploading || mustConfirmBeforeChat}
+              style={{ display: "none" }}
+            />
+          </label>
+
+          <input
+            value={text}
+            onChange={(e) => onTextChange(e.target.value)}
+            onFocus={() => userId && markSeenNow(userId)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage({ body: text, attachments: null });
+              }
             }}
+            disabled={mustConfirmBeforeChat}
+            placeholder={mustConfirmBeforeChat ? "Confirm pickup above to start chatting…" : "Message…"}
+            className="input"
+          />
+
+          <button
+            className="send"
+            type="button"
+            onClick={() => sendMessage({ body: text, attachments: null })}
+            disabled={mustConfirmBeforeChat || uploading || !text.trim()}
+            aria-label="Send"
+            title="Send"
           >
-            ✕
+            <span className="sendIcon" aria-hidden>
+              ➤
+            </span>
           </button>
         </div>
-      )}
+      </footer>
 
-      {/* edit bar */}
-      {editingId && (
-        <div
-          style={{
-            marginTop: 12,
-            borderRadius: 16,
-            border: "1px solid rgba(52,211,153,0.22)",
-            background: "rgba(16,185,129,0.10)",
-            padding: 12,
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-          }}
-        >
-          <input
-            value={editingText}
-            onChange={(e) => setEditingText(e.target.value)}
-            style={{
-              flex: 1,
-              height: 44,
-              borderRadius: 12,
-              border: "1px solid rgba(148,163,184,0.18)",
-              background: "rgba(255,255,255,0.04)",
-              color: "white",
-              padding: "0 12px",
-              outline: "none",
-            }}
-          />
-          <button
-            onClick={saveEdit}
-            style={{
-              height: 44,
-              padding: "0 14px",
-              borderRadius: 12,
-              border: "1px solid rgba(16,185,129,0.35)",
-              background: "rgba(16,185,129,0.18)",
-              color: "white",
-              cursor: "pointer",
-              fontWeight: 950,
-            }}
-          >
-            Save
-          </button>
-          <button
-            onClick={() => setEditingId(null)}
-            style={{
-              height: 44,
-              padding: "0 14px",
-              borderRadius: 12,
-              border: "1px solid rgba(148,163,184,0.22)",
-              background: "transparent",
-              color: "white",
-              cursor: "pointer",
-              fontWeight: 950,
-            }}
-          >
-            Cancel
-          </button>
-        </div>
-      )}
+      <style jsx>{`
+        .page {
+          min-height: 100vh;
+          background: #f7f7f8;
+          color: #0f172a;
+          padding-bottom: 110px;
+        }
 
-      {/* composer */}
-      <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center" }}>
-        <label
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius: 12,
-            border: "1px solid rgba(148,163,184,0.18)",
-            background: "rgba(255,255,255,0.04)",
-            display: "grid",
-            placeItems: "center",
-            cursor: uploading || mustConfirmBeforeChat ? "not-allowed" : "pointer",
-            opacity: uploading || mustConfirmBeforeChat ? 0.6 : 1,
-            fontWeight: 950,
-          }}
-          title="Upload image"
-        >
-          📷
-          <input
-            type="file"
-            accept="image/jpeg,image/png,image/webp"
-            onChange={onPickImage}
-            disabled={uploading || mustConfirmBeforeChat}
-            style={{ display: "none" }}
-          />
-        </label>
+        .top {
+          position: sticky;
+          top: 0;
+          z-index: 30;
+          background: rgba(247, 247, 248, 0.92);
+          backdrop-filter: blur(12px);
+          border-bottom: 1px solid #e5e7eb;
+        }
 
-        <input
-          value={text}
-          onChange={(e) => onTextChange(e.target.value)}
-          onFocus={() => userId && markSeenNow(userId)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              sendMessage({ body: text, attachments: null });
-            }
-          }}
-          disabled={mustConfirmBeforeChat}
-          placeholder={mustConfirmBeforeChat ? "Confirm pickup above to start chatting…" : "Message…"}
-          style={{
-            flex: 1,
-            height: 48,
-            borderRadius: 12,
-            border: "1px solid rgba(148,163,184,0.18)",
-            background: "rgba(255,255,255,0.04)",
-            color: "white",
-            padding: "0 12px",
-            outline: "none",
-            opacity: mustConfirmBeforeChat ? 0.7 : 1,
-          }}
-        />
+        .topRow {
+          display: grid;
+          grid-template-columns: 88px 1fr 44px;
+          align-items: center;
+          gap: 10px;
+          padding: 14px 14px 10px;
+        }
 
-        <button
-          onClick={() => sendMessage({ body: text, attachments: null })}
-          disabled={mustConfirmBeforeChat || uploading || !text.trim()}
-          style={{
-            height: 48,
-            padding: "0 16px",
-            borderRadius: 12,
-            border: "1px solid rgba(16,185,129,0.35)",
-            background: "rgba(16,185,129,0.18)",
-            color: "white",
-            cursor: mustConfirmBeforeChat || uploading || !text.trim() ? "not-allowed" : "pointer",
-            fontWeight: 950,
-            opacity: mustConfirmBeforeChat || uploading || !text.trim() ? 0.65 : 1,
-          }}
-        >
-          Send
-        </button>
-      </div>
+        .backBtn {
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          border-radius: 999px;
+          padding: 10px 12px;
+          cursor: pointer;
+          font-weight: 950;
+          color: #111827;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+        }
+
+        .brand {
+          min-width: 0;
+          text-align: center;
+        }
+
+        .brandName {
+          font-weight: 950;
+          letter-spacing: -0.4px;
+          font-size: 16px;
+          line-height: 1.1;
+        }
+
+        .brandSub {
+          font-size: 12px;
+          color: #6b7280;
+          font-weight: 900;
+          margin-top: 2px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .typing {
+          color: #065f46;
+          font-weight: 950;
+        }
+
+        .miniBtn {
+          width: 44px;
+          height: 44px;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          cursor: pointer;
+          font-weight: 950;
+          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+        }
+
+        .err {
+          padding: 0 14px 10px;
+          color: #b91c1c;
+          font-weight: 900;
+          font-size: 13px;
+        }
+
+        .meta {
+          padding: 0 14px 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .itemCard {
+          width: 100%;
+          text-align: left;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          border-radius: 18px;
+          padding: 12px;
+          display: grid;
+          grid-template-columns: 58px 1fr 16px;
+          align-items: center;
+          gap: 12px;
+          cursor: pointer;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
+        }
+
+        .thumb {
+          width: 58px;
+          height: 58px;
+          border-radius: 16px;
+          overflow: hidden;
+          border: 1px solid #e5e7eb;
+          background: #fbfbfc;
+        }
+
+        .thumb img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
+        }
+
+        .noThumb {
+          width: 100%;
+          height: 100%;
+          display: grid;
+          place-items: center;
+          color: #6b7280;
+          font-weight: 950;
+          font-size: 18px;
+        }
+
+        .itemInfo {
+          min-width: 0;
+        }
+
+        .itemTitle {
+          font-weight: 950;
+          color: #111827;
+          font-size: 15px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .itemSub {
+          margin-top: 6px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .badge {
+          font-size: 12px;
+          font-weight: 950;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid #e5e7eb;
+          background: #fbfbfc;
+          color: #6b7280;
+        }
+
+        .badge.good {
+          background: rgba(16, 185, 129, 0.12);
+          border-color: rgba(16, 185, 129, 0.25);
+          color: #065f46;
+        }
+
+        .badge.warn {
+          background: rgba(245, 158, 11, 0.12);
+          border-color: rgba(245, 158, 11, 0.25);
+          color: #92400e;
+        }
+
+        .badge.done {
+          background: rgba(59, 130, 246, 0.12);
+          border-color: rgba(59, 130, 246, 0.25);
+          color: #1e3a8a;
+        }
+
+        .muted {
+          color: #6b7280;
+          font-weight: 800;
+          font-size: 12px;
+        }
+
+        .dotSep {
+          color: #9ca3af;
+          font-weight: 900;
+          font-size: 12px;
+        }
+
+        .chev {
+          color: #9ca3af;
+          font-weight: 950;
+          font-size: 20px;
+          text-align: right;
+        }
+
+        .dealBar {
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          border-radius: 18px;
+          padding: 12px;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.05);
+          display: grid;
+          grid-template-columns: 1fr auto;
+          gap: 10px;
+          align-items: center;
+        }
+
+        .dealLeft {
+          min-width: 0;
+        }
+
+        .dealTitle {
+          font-weight: 950;
+          color: #111827;
+          font-size: 13px;
+        }
+
+        .dealSub {
+          margin-top: 6px;
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+
+        .dealPill {
+          font-size: 12px;
+          font-weight: 950;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid #e5e7eb;
+          background: #fbfbfc;
+          color: #6b7280;
+        }
+
+        .dealPill.good {
+          background: rgba(16, 185, 129, 0.12);
+          border-color: rgba(16, 185, 129, 0.25);
+          color: #065f46;
+        }
+        .dealPill.warn {
+          background: rgba(245, 158, 11, 0.12);
+          border-color: rgba(245, 158, 11, 0.25);
+          color: #92400e;
+        }
+        .dealPill.done {
+          background: rgba(59, 130, 246, 0.12);
+          border-color: rgba(59, 130, 246, 0.25);
+          color: #1e3a8a;
+        }
+
+        .unseen {
+          font-size: 12px;
+          font-weight: 950;
+          color: #b91c1c;
+          background: rgba(239, 68, 68, 0.1);
+          border: 1px solid rgba(239, 68, 68, 0.2);
+          padding: 6px 10px;
+          border-radius: 999px;
+        }
+
+        .dealActions {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+
+        .actionPrimary,
+        .actionGood,
+        .actionGhost {
+          height: 38px;
+          border-radius: 14px;
+          font-weight: 950;
+          cursor: pointer;
+          padding: 0 12px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          color: #111827;
+        }
+
+        .actionPrimary {
+          border-color: rgba(16, 185, 129, 0.25);
+          background: rgba(16, 185, 129, 0.12);
+          color: #065f46;
+        }
+
+        .actionGood {
+          border-color: rgba(34, 197, 94, 0.25);
+          background: rgba(34, 197, 94, 0.12);
+          color: #065f46;
+        }
+
+        .actionGhost {
+          background: #ffffff;
+          color: #111827;
+        }
+
+        .tradeErr {
+          grid-column: 1 / -1;
+          color: #b91c1c;
+          font-weight: 900;
+          font-size: 12px;
+          margin-top: 6px;
+        }
+
+        .gate {
+          border-radius: 18px;
+          border: 1px solid rgba(16, 185, 129, 0.25);
+          background: rgba(16, 185, 129, 0.12);
+          padding: 12px;
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          justify-content: space-between;
+        }
+
+        .gateText {
+          font-weight: 950;
+          color: #065f46;
+          font-size: 13px;
+          line-height: 1.2;
+        }
+
+        .gateBtn {
+          height: 38px;
+          border-radius: 14px;
+          border: 1px solid rgba(16, 185, 129, 0.25);
+          background: #065f46;
+          color: #ffffff;
+          font-weight: 950;
+          cursor: pointer;
+          padding: 0 12px;
+          white-space: nowrap;
+        }
+
+        .emptyMeta {
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          border-radius: 18px;
+          padding: 12px;
+        }
+
+        .emptyMetaTitle {
+          font-weight: 950;
+          color: #111827;
+        }
+
+        .emptyMetaSub {
+          margin-top: 6px;
+          color: #6b7280;
+          font-weight: 800;
+          font-size: 12px;
+        }
+
+        .main {
+          padding: 12px 14px 0;
+          max-width: 900px;
+          margin: 0 auto;
+        }
+
+        .list {
+          height: calc(100vh - 350px);
+          overflow-y: auto;
+          padding-bottom: 10px;
+        }
+
+        .loadMore {
+          width: 100%;
+          height: 42px;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          color: #111827;
+          font-weight: 950;
+          cursor: pointer;
+          margin-bottom: 10px;
+        }
+
+        .loading {
+          color: #6b7280;
+          font-weight: 900;
+          font-size: 13px;
+          padding: 10px 2px;
+        }
+
+        .day {
+          display: flex;
+          justify-content: center;
+          margin: 14px 0 10px;
+        }
+
+        .day span {
+          font-size: 12px;
+          font-weight: 950;
+          color: #6b7280;
+          border: 1px solid #e5e7eb;
+          background: rgba(255, 255, 255, 0.9);
+          padding: 6px 10px;
+          border-radius: 999px;
+        }
+
+        .row {
+          display: flex;
+          margin: 10px 0;
+        }
+
+        .row.mine {
+          justify-content: flex-end;
+        }
+
+        .row.theirs {
+          justify-content: flex-start;
+        }
+
+        .bubble {
+          max-width: min(720px, 88vw);
+          border-radius: 18px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.06);
+          overflow: visible;
+        }
+
+        .bMine {
+          background: rgba(16, 185, 129, 0.12);
+          border-color: rgba(16, 185, 129, 0.22);
+        }
+
+        .bTheirs {
+          background: #ffffff;
+        }
+
+        .deleted {
+          opacity: 0.7;
+        }
+
+        .replyPeek {
+          width: 100%;
+          text-align: left;
+          border: none;
+          background: rgba(15, 23, 42, 0.04);
+          border-bottom: 1px solid rgba(229, 231, 235, 0.9);
+          padding: 10px 12px;
+          cursor: pointer;
+        }
+
+        .replyPeekTop {
+          font-size: 11px;
+          font-weight: 950;
+          color: #6b7280;
+        }
+
+        .replyPeekBody {
+          margin-top: 4px;
+          font-size: 12px;
+          font-weight: 800;
+          color: #111827;
+          opacity: 0.9;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .body {
+          padding: 10px 12px;
+        }
+
+        .text {
+          white-space: pre-wrap;
+          word-break: break-word;
+          font-weight: 700;
+          color: #111827;
+          font-size: 14px;
+          line-height: 1.35;
+        }
+
+        .deletedText {
+          font-style: italic;
+          color: #6b7280;
+          font-weight: 800;
+        }
+
+        .img {
+          width: 100%;
+          max-height: 360px;
+          object-fit: cover;
+          border-radius: 14px;
+          border: 1px solid rgba(229, 231, 235, 0.9);
+          margin-bottom: 10px;
+          display: block;
+        }
+
+        .fail {
+          margin-top: 10px;
+          width: 100%;
+          height: 36px;
+          border-radius: 14px;
+          border: 1px solid rgba(239, 68, 68, 0.25);
+          background: rgba(239, 68, 68, 0.1);
+          color: #b91c1c;
+          font-weight: 950;
+          cursor: pointer;
+        }
+
+        .metaRow {
+          padding: 0 12px 10px;
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          justify-content: flex-end;
+        }
+
+        .time {
+          color: #6b7280;
+          font-weight: 900;
+          font-size: 12px;
+        }
+
+        .metaTiny {
+          color: #6b7280;
+          font-weight: 900;
+          font-size: 12px;
+        }
+
+        .menuBtn {
+          margin-left: auto;
+          width: 34px;
+          height: 28px;
+          border-radius: 12px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          cursor: pointer;
+          font-weight: 950;
+          color: #111827;
+        }
+
+        .actions {
+          padding: 0 12px 12px;
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          position: relative;
+        }
+
+        .rx {
+          height: 32px;
+          border-radius: 999px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          cursor: pointer;
+          font-weight: 950;
+          padding: 0 10px;
+        }
+
+        .act {
+          height: 32px;
+          border-radius: 12px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          cursor: pointer;
+          font-weight: 950;
+          padding: 0 10px;
+          color: #111827;
+        }
+
+        .menu {
+          position: absolute;
+          top: 40px;
+          z-index: 50;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          box-shadow: 0 18px 40px rgba(0, 0, 0, 0.12);
+          padding: 10px;
+          width: 220px;
+        }
+
+        .menu.right {
+          right: 12px;
+        }
+
+        .menu.left {
+          left: 12px;
+        }
+
+        .menuGrid {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 8px;
+        }
+
+        .menuItem {
+          height: 38px;
+          border-radius: 14px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          cursor: pointer;
+          font-weight: 950;
+          color: #111827;
+          text-align: left;
+          padding: 0 12px;
+        }
+
+        .menuItem.danger {
+          border-color: rgba(239, 68, 68, 0.25);
+          background: rgba(239, 68, 68, 0.08);
+          color: #b91c1c;
+        }
+
+        .chips {
+          display: flex;
+          gap: 8px;
+          padding: 0 12px 12px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+
+        .chip {
+          height: 30px;
+          border-radius: 999px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          cursor: pointer;
+          font-weight: 950;
+          padding: 0 10px;
+          color: #111827;
+          font-size: 12px;
+        }
+
+        .chip.on {
+          border-color: rgba(16, 185, 129, 0.25);
+          background: rgba(16, 185, 129, 0.12);
+          color: #065f46;
+        }
+
+        .toBottom {
+          position: fixed;
+          right: 14px;
+          bottom: 118px;
+          height: 44px;
+          border-radius: 999px;
+          border: 1px solid rgba(16, 185, 129, 0.25);
+          background: rgba(16, 185, 129, 0.12);
+          color: #065f46;
+          font-weight: 950;
+          cursor: pointer;
+          padding: 0 14px;
+          box-shadow: 0 18px 40px rgba(0, 0, 0, 0.12);
+        }
+
+        .composerWrap {
+          position: fixed;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          padding: 10px 14px 16px;
+          background: rgba(247, 247, 248, 0.92);
+          backdrop-filter: blur(12px);
+          border-top: 1px solid #e5e7eb;
+          z-index: 40;
+        }
+
+        .replyBanner {
+          border: 1px solid rgba(16, 185, 129, 0.25);
+          background: rgba(16, 185, 129, 0.12);
+          border-radius: 16px;
+          padding: 10px 12px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          margin-bottom: 10px;
+        }
+
+        .replyText {
+          font-weight: 900;
+          color: #065f46;
+          font-size: 12px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          flex: 1;
+        }
+
+        .replyClose {
+          width: 36px;
+          height: 36px;
+          border-radius: 14px;
+          border: 1px solid rgba(16, 185, 129, 0.25);
+          background: rgba(255, 255, 255, 0.7);
+          cursor: pointer;
+          font-weight: 950;
+          color: #065f46;
+        }
+
+        .editBanner {
+          border: 1px solid rgba(59, 130, 246, 0.25);
+          background: rgba(59, 130, 246, 0.1);
+          border-radius: 16px;
+          padding: 10px;
+          display: grid;
+          grid-template-columns: 1fr auto auto;
+          gap: 8px;
+          margin-bottom: 10px;
+        }
+
+        .editInput {
+          height: 42px;
+          border-radius: 14px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          padding: 0 12px;
+          outline: none;
+          font-weight: 800;
+          color: #111827;
+        }
+
+        .editSave,
+        .editCancel {
+          height: 42px;
+          border-radius: 14px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          cursor: pointer;
+          font-weight: 950;
+          padding: 0 12px;
+          color: #111827;
+        }
+
+        .composer {
+          display: grid;
+          grid-template-columns: 46px 1fr 46px;
+          gap: 10px;
+          align-items: center;
+        }
+
+        .composer.disabled {
+          opacity: 0.7;
+        }
+
+        .iconBtn {
+          width: 46px;
+          height: 46px;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          display: grid;
+          place-items: center;
+          cursor: pointer;
+          font-weight: 950;
+          color: #111827;
+          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+        }
+
+        .input {
+          height: 46px;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          padding: 0 12px;
+          outline: none;
+          font-weight: 800;
+          color: #111827;
+        }
+
+        .input::placeholder {
+          color: #9ca3af;
+          font-weight: 800;
+        }
+
+        .send {
+          width: 46px;
+          height: 46px;
+          border-radius: 16px;
+          border: 1px solid rgba(16, 185, 129, 0.25);
+          background: rgba(16, 185, 129, 0.12);
+          color: #065f46;
+          font-weight: 950;
+          cursor: pointer;
+          display: grid;
+          place-items: center;
+        }
+
+        .send:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .sendIcon {
+          font-size: 16px;
+          transform: translateX(1px);
+        }
+
+        @media (min-width: 900px) {
+          .topRow {
+            padding-left: 18px;
+            padding-right: 18px;
+          }
+          .meta {
+            padding-left: 18px;
+            padding-right: 18px;
+          }
+          .main {
+            padding-left: 18px;
+            padding-right: 18px;
+          }
+          .composerWrap {
+            padding-left: 18px;
+            padding-right: 18px;
+          }
+          .list {
+            height: calc(100vh - 330px);
+          }
+        }
+      `}</style>
     </div>
   );
 }
