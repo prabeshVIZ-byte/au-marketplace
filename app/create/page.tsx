@@ -60,12 +60,20 @@ function computeExpiry(choice: ExpireChoice) {
   return { untilCancel: false, expiresAt };
 }
 
+function uuidSafe() {
+  // some mobile browsers can be quirky; this avoids crashes
+  // @ts-ignore
+  if (typeof crypto !== "undefined" && crypto?.randomUUID) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+}
+
 export default function CreatePage() {
   const router = useRouter();
-  const formRef = useRef<HTMLFormElement | null>(null);
 
+  const formRef = useRef<HTMLFormElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // ---------- ALL HOOKS UP TOP (no hook-order crashes) ----------
   // auth
   const [authLoading, setAuthLoading] = useState(true);
   const [email, setEmail] = useState<string | null>(null);
@@ -93,7 +101,7 @@ export default function CreatePage() {
   const [requestTimeframe, setRequestTimeframe] = useState<RequestTimeframe>("today");
   const [requestLocation, setRequestLocation] = useState("");
 
-  // lightweight options (collapsed by default)
+  // options
   const [showOptions, setShowOptions] = useState(false);
   const [hideName, setHideName] = useState(false);
   const [expireChoice, setExpireChoice] = useState<ExpireChoice>("7");
@@ -101,6 +109,9 @@ export default function CreatePage() {
   // submit
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+
+  // UI-only
+  const [dragOver, setDragOver] = useState(false);
 
   const isAllowed = useMemo(() => {
     return !!email && email.toLowerCase().endsWith("@ashland.edu");
@@ -112,7 +123,7 @@ export default function CreatePage() {
     return d.length ? d : null;
   }, [description]);
 
-  // UX: if switching to request, reset photo state + tighten expiry choice
+  // UX: switching to request resets photo state + avoid never expiry on request
   useEffect(() => {
     if (postType === "request") {
       setFile(null);
@@ -122,7 +133,7 @@ export default function CreatePage() {
     setMsg(null);
   }, [postType]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // preview
+  // preview URL
   useEffect(() => {
     if (!file) {
       setPreviewUrl(null);
@@ -133,20 +144,43 @@ export default function CreatePage() {
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
-  // 1) auth
+  // ---------- AUTH (never stuck forever) ----------
   useEffect(() => {
     let mounted = true;
 
     async function syncAuth() {
-      const { data, error } = await supabase.auth.getSession();
-      if (!mounted) return;
+      try {
+        const timeoutMs = 6500;
 
-      if (error) console.log("getSession error:", error.message);
+        const sessionPromise = supabase.auth.getSession();
+        const raced = await Promise.race([
+          sessionPromise,
+          new Promise<{ data: any; error: any }>((resolve) =>
+            setTimeout(() => resolve({ data: { session: null }, error: new Error("Auth timeout") }), timeoutMs)
+          ),
+        ]);
 
-      const session = data.session;
-      setEmail(session?.user?.email ?? null);
-      setUserId(session?.user?.id ?? null);
-      setAuthLoading(false);
+        if (!mounted) return;
+
+        const { data, error } = raced as any;
+
+        if (error) {
+          console.log("getSession error:", error?.message ?? error);
+          setMsg((prev) => prev ?? "Auth is taking too long. Refresh, or check Supabase env vars on Vercel.");
+        }
+
+        const session = data?.session ?? null;
+        setEmail(session?.user?.email ?? null);
+        setUserId(session?.user?.id ?? null);
+      } catch (err: any) {
+        console.log("syncAuth unexpected error:", err?.message ?? err);
+        if (!mounted) return;
+        setEmail(null);
+        setUserId(null);
+        setMsg("Auth failed to load. Refresh or sign in again.");
+      } finally {
+        if (mounted) setAuthLoading(false);
+      }
     }
 
     syncAuth();
@@ -158,7 +192,7 @@ export default function CreatePage() {
     };
   }, []);
 
-  // 2) profile check
+  // ---------- PROFILE CHECK ----------
   useEffect(() => {
     let mounted = true;
 
@@ -171,26 +205,27 @@ export default function CreatePage() {
         return;
       }
 
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("full_name,user_role")
-        .eq("id", userId)
-        .maybeSingle();
+      try {
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("full_name,user_role")
+          .eq("id", userId)
+          .maybeSingle();
 
-      if (!mounted) return;
+        if (!mounted) return;
 
-      if (error) {
-        console.log("profile check error:", error.message);
-        setProfileComplete(false);
-        setProfileLoading(false);
-        return;
+        if (error) {
+          console.log("profile check error:", error.message);
+          setProfileComplete(false);
+          return;
+        }
+
+        const fullNameOk = (data?.full_name ?? "").trim().length > 0;
+        const roleOk = data?.user_role === "student" || data?.user_role === "faculty";
+        setProfileComplete(fullNameOk && roleOk);
+      } finally {
+        if (mounted) setProfileLoading(false);
       }
-
-      const fullNameOk = (data?.full_name ?? "").trim().length > 0;
-      const roleOk = data?.user_role === "student" || data?.user_role === "faculty";
-
-      setProfileComplete(fullNameOk && roleOk);
-      setProfileLoading(false);
     }
 
     checkProfile();
@@ -204,13 +239,12 @@ export default function CreatePage() {
     if (!profileComplete) return "Complete your profile first (name + student/faculty).";
     if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
 
-    // ✅ MAKE PHOTO COMPULSORY FOR GIVE
+    // photo required for give
     if (postType === "give" && !file) return "Photo is required for items. Please add a photo.";
     if (postType === "give" && file) {
       if (file.size > MAX_PHOTO_MB * 1024 * 1024) return `Photo too large (max ${MAX_PHOTO_MB}MB).`;
       if (!isAllowedImage(file)) return "Upload JPG, PNG, or WEBP (HEIC not supported yet).";
     }
-
     return null;
   }
 
@@ -219,16 +253,33 @@ export default function CreatePage() {
     if (!profileComplete) return false;
     if (cleanTitle.length < 3) return false;
 
-    // ✅ required photo for give
     if (postType === "give" && !file) return false;
-
     if (postType === "give" && file) {
       if (file.size > MAX_PHOTO_MB * 1024 * 1024) return false;
       if (!isAllowedImage(file)) return false;
     }
-
     return true;
   }, [isAllowed, userId, profileComplete, cleanTitle, postType, file]);
+
+  function handleFilePicked(f: File | null) {
+    setMsg(null);
+
+    if (!f) {
+      setFile(null);
+      return;
+    }
+    if (f.size > MAX_PHOTO_MB * 1024 * 1024) {
+      setFile(null);
+      setMsg(`Photo too large (max ${MAX_PHOTO_MB}MB).`);
+      return;
+    }
+    if (!isAllowedImage(f)) {
+      setFile(null);
+      setMsg("Upload JPG, PNG, or WEBP (HEIC not supported yet).");
+      return;
+    }
+    setFile(f);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -289,9 +340,9 @@ export default function CreatePage() {
         return;
       }
 
-      // Give: photo REQUIRED (validated already)
+      // Give: photo REQUIRED
       const ext = getExt(file!.name);
-      const path = `items/${userId}/${itemId}/${crypto.randomUUID()}.${ext}`;
+      const path = `items/${userId}/${itemId}/${uuidSafe()}.${ext}`;
 
       const { error: uploadErr } = await supabase.storage.from("item-photos").upload(path, file!, {
         cacheControl: "3600",
@@ -331,25 +382,22 @@ export default function CreatePage() {
     }
   }
 
-  // ---------- UI helpers ----------
+  // ---------- UI styles (ChatGPT-ish) ----------
   const ui = {
     page: {
       minHeight: "100vh",
-      background: "#f7f7f8", // ChatGPT-ish
+      background: "#f7f7f8",
       color: "#0f172a",
-      padding: 20,
+      padding: 18,
       paddingBottom: NAV_APPROX_HEIGHT + STICKY_BAR_HEIGHT + 24,
     } as React.CSSProperties,
-    shell: {
-      maxWidth: 740,
-      margin: "0 auto",
-    } as React.CSSProperties,
+    shell: { maxWidth: 760, margin: "0 auto" } as React.CSSProperties,
     topRow: {
       display: "flex",
       alignItems: "center",
       justifyContent: "space-between",
-      gap: 12,
-      marginBottom: 14,
+      gap: 10,
+      marginBottom: 12,
     } as React.CSSProperties,
     backBtn: {
       background: "white",
@@ -358,7 +406,7 @@ export default function CreatePage() {
       padding: "10px 12px",
       borderRadius: 999,
       cursor: "pointer",
-      fontWeight: 700,
+      fontWeight: 800,
       display: "inline-flex",
       alignItems: "center",
       gap: 8,
@@ -373,6 +421,9 @@ export default function CreatePage() {
       color: "#374151",
       boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
       whiteSpace: "nowrap",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      maxWidth: 260,
     } as React.CSSProperties,
     hero: {
       background: "white",
@@ -380,19 +431,18 @@ export default function CreatePage() {
       borderRadius: 20,
       padding: 16,
       boxShadow: "0 10px 30px rgba(0,0,0,0.05)",
-      overflow: "hidden",
       position: "relative",
+      overflow: "hidden",
     } as React.CSSProperties,
-    subtleGlow: {
+    glow: {
       position: "absolute",
-      inset: -80,
+      inset: -120,
       background:
-        "radial-gradient(closest-side at 30% 30%, rgba(16,185,129,0.18), transparent 55%), radial-gradient(closest-side at 80% 40%, rgba(59,130,246,0.12), transparent 55%)",
+        "radial-gradient(closest-side at 20% 25%, rgba(16,185,129,0.16), transparent 60%), radial-gradient(closest-side at 85% 40%, rgba(59,130,246,0.10), transparent 60%)",
       pointerEvents: "none",
     } as React.CSSProperties,
-    h1: { fontSize: 22, fontWeight: 900, margin: 0 } as React.CSSProperties,
-    sub: { margin: "6px 0 0", color: "#4b5563", lineHeight: 1.35 } as React.CSSProperties,
-
+    h1: { fontSize: 22, fontWeight: 950, margin: 0, position: "relative" } as React.CSSProperties,
+    sub: { margin: "6px 0 0", color: "#4b5563", lineHeight: 1.35, position: "relative" } as React.CSSProperties,
     segmentWrap: {
       display: "flex",
       gap: 8,
@@ -402,6 +452,7 @@ export default function CreatePage() {
       borderRadius: 999,
       padding: 6,
       width: "fit-content",
+      position: "relative",
     } as React.CSSProperties,
     segBtn: (active: boolean) =>
       ({
@@ -409,29 +460,19 @@ export default function CreatePage() {
         borderRadius: 999,
         border: "none",
         cursor: "pointer",
-        fontWeight: 850,
+        fontWeight: 900,
         background: active ? "white" : "transparent",
         color: "#111827",
         boxShadow: active ? "0 6px 16px rgba(0,0,0,0.08)" : "none",
       }) as React.CSSProperties,
 
-    convo: {
-      marginTop: 14,
-      display: "flex",
-      flexDirection: "column",
-      gap: 12,
-    } as React.CSSProperties,
-
-    bubbleRow: (side: "left" | "right") =>
-      ({
-        display: "flex",
-        justifyContent: side === "left" ? "flex-start" : "flex-end",
-      }) as React.CSSProperties,
-
+    convo: { marginTop: 14, display: "flex", flexDirection: "column", gap: 12 } as React.CSSProperties,
+    row: (side: "left" | "right") =>
+      ({ display: "flex", justifyContent: side === "left" ? "flex-start" : "flex-end" }) as React.CSSProperties,
     bubble: (side: "left" | "right") =>
       ({
-        maxWidth: 640,
         width: "100%",
+        maxWidth: 640,
         background: side === "left" ? "white" : "#111827",
         color: side === "left" ? "#111827" : "white",
         border: side === "left" ? "1px solid #e5e7eb" : "1px solid #111827",
@@ -439,9 +480,7 @@ export default function CreatePage() {
         padding: 14,
         boxShadow: side === "left" ? "0 10px 24px rgba(0,0,0,0.06)" : "0 10px 24px rgba(0,0,0,0.12)",
       }) as React.CSSProperties,
-
-    miniTitle: { fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 8 } as React.CSSProperties,
-
+    mini: { fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 8 } as React.CSSProperties,
     input: {
       width: "100%",
       padding: "12px 12px",
@@ -452,7 +491,6 @@ export default function CreatePage() {
       fontSize: 14,
       color: "#111827",
     } as React.CSSProperties,
-
     textarea: {
       width: "100%",
       padding: "12px 12px",
@@ -465,13 +503,7 @@ export default function CreatePage() {
       resize: "vertical",
       lineHeight: 1.35,
     } as React.CSSProperties,
-
-    row2: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 10,
-    } as React.CSSProperties,
-
+    grid2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 } as React.CSSProperties,
     select: {
       width: "100%",
       padding: "12px 12px",
@@ -496,7 +528,6 @@ export default function CreatePage() {
         justifyContent: "space-between",
         transition: "all 150ms ease",
       }) as React.CSSProperties,
-
     ghostBtn: {
       background: "white",
       border: "1px solid #e5e7eb",
@@ -504,10 +535,9 @@ export default function CreatePage() {
       padding: "10px 12px",
       borderRadius: 14,
       cursor: "pointer",
-      fontWeight: 850,
+      fontWeight: 900,
       boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
     } as React.CSSProperties,
-
     dangerBtn: {
       background: "white",
       border: "1px solid #fecaca",
@@ -515,10 +545,10 @@ export default function CreatePage() {
       padding: "10px 12px",
       borderRadius: 14,
       cursor: "pointer",
-      fontWeight: 900,
+      fontWeight: 950,
     } as React.CSSProperties,
 
-    optionsBtn: {
+    drawerBtn: {
       width: "100%",
       background: "white",
       border: "1px solid #e5e7eb",
@@ -528,12 +558,11 @@ export default function CreatePage() {
       alignItems: "center",
       justifyContent: "space-between",
       cursor: "pointer",
-      fontWeight: 900,
+      fontWeight: 950,
       color: "#111827",
       boxShadow: "0 10px 24px rgba(0,0,0,0.05)",
     } as React.CSSProperties,
-
-    optionsPanel: {
+    drawer: {
       marginTop: 10,
       background: "white",
       border: "1px solid #e5e7eb",
@@ -546,13 +575,12 @@ export default function CreatePage() {
     } as React.CSSProperties,
 
     msg: {
-      marginTop: 8,
       background: "#fff1f2",
       border: "1px solid #fecdd3",
       color: "#9f1239",
       padding: "10px 12px",
       borderRadius: 14,
-      fontWeight: 800,
+      fontWeight: 850,
     } as React.CSSProperties,
 
     sticky: {
@@ -561,7 +589,7 @@ export default function CreatePage() {
       right: 0,
       bottom: NAV_APPROX_HEIGHT,
       height: STICKY_BAR_HEIGHT,
-      background: "rgba(247,247,248,0.85)",
+      background: "rgba(247,247,248,0.86)",
       borderTop: "1px solid #e5e7eb",
       backdropFilter: "blur(10px)",
       zIndex: 50,
@@ -570,17 +598,14 @@ export default function CreatePage() {
       justifyContent: "center",
       padding: "10px 16px",
     } as React.CSSProperties,
-
     stickyInner: {
       width: "100%",
-      maxWidth: 740,
+      maxWidth: 760,
       display: "flex",
       alignItems: "center",
       gap: 12,
     } as React.CSSProperties,
-
     hint: { flex: 1, fontSize: 12, color: "#6b7280" } as React.CSSProperties,
-
     primary: (disabled: boolean) =>
       ({
         border: "none",
@@ -593,64 +618,58 @@ export default function CreatePage() {
         color: "white",
         background: disabled ? "#94a3b8" : "#10b981",
         boxShadow: disabled ? "none" : "0 14px 30px rgba(16,185,129,0.25)",
-        transform: disabled ? "none" : "translateY(0px)",
         transition: "transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease",
       }) as React.CSSProperties,
   };
 
-  function handleFilePicked(f: File | null) {
-    setMsg(null);
-    if (!f) {
-      setFile(null);
-      return;
-    }
-    if (f.size > MAX_PHOTO_MB * 1024 * 1024) {
-      setFile(null);
-      setMsg(`Photo too large (max ${MAX_PHOTO_MB}MB).`);
-      return;
-    }
-    if (!isAllowedImage(f)) {
-      setFile(null);
-      setMsg("Upload JPG, PNG, or WEBP (HEIC not supported yet).");
-      return;
-    }
-    setFile(f);
-  }
+  // ---------- Derived UI text ----------
+  const helperText =
+    postType === "give"
+      ? "Start with a clear title + a photo. Everything else is quick choices."
+      : "Ask clearly. The right person will message you.";
+  const stickyHint =
+    cleanTitle.length < 3
+      ? "Add a clear title (3+ characters)."
+      : postType === "give"
+        ? file
+          ? "Looks good — ready to post."
+          : "Photo is required for Give posts."
+        : "Ready to post.";
 
-  // Loading
+  const primaryButton = postType === "give" ? "Post item" : "Post request";
+
+  // ---------- RENDER STATES ----------
   if (authLoading || profileLoading) {
     return (
-      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#111827", padding: 24 }}>
-        <div style={{ maxWidth: 740, margin: "0 auto" }}>
-          <div
-            style={{
-              background: "white",
-              border: "1px solid #e5e7eb",
-              borderRadius: 18,
-              padding: 16,
-              boxShadow: "0 10px 24px rgba(0,0,0,0.05)",
-              fontWeight: 900,
-            }}
-          >
-            Loading…
+      <div style={ui.page}>
+        <div style={ui.shell}>
+          <div style={ui.hero}>
+            <div style={ui.glow} />
+            <div style={{ position: "relative" }}>
+              <div style={{ fontWeight: 950 }}>Loading your account…</div>
+              <div style={{ marginTop: 8, fontSize: 13, color: "#6b7280" }}>
+                If this takes more than a few seconds, your Supabase env vars on Vercel may be missing.
+              </div>
+              {msg && <div style={{ marginTop: 12, ...ui.msg }}>{msg}</div>}
+            </div>
           </div>
         </div>
       </div>
     );
   }
 
-  // Not allowed
   if (!isAllowed || !userId) {
     return (
-      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#111827", padding: 24 }}>
-        <div style={{ maxWidth: 740, margin: "0 auto" }}>
-          <div style={{ ...ui.hero }}>
-            <div style={ui.subtleGlow} />
+      <div style={ui.page}>
+        <div style={ui.shell}>
+          <div style={ui.hero}>
+            <div style={ui.glow} />
             <div style={{ position: "relative" }}>
               <h1 style={{ fontSize: 24, fontWeight: 950, margin: 0 }}>Post on ScholarSwap</h1>
               <p style={{ color: "#4b5563", marginTop: 8, marginBottom: 0 }}>
                 You must log in with your <b>@ashland.edu</b> email to post.
               </p>
+              {msg && <div style={{ marginTop: 12, ...ui.msg }}>{msg}</div>}
               <button onClick={() => router.push("/me")} style={{ ...ui.ghostBtn, marginTop: 14 }}>
                 Go to Account
               </button>
@@ -661,18 +680,18 @@ export default function CreatePage() {
     );
   }
 
-  // Profile incomplete
   if (!profileComplete) {
     return (
-      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#111827", padding: 24 }}>
-        <div style={{ maxWidth: 740, margin: "0 auto" }}>
-          <div style={{ ...ui.hero }}>
-            <div style={ui.subtleGlow} />
+      <div style={ui.page}>
+        <div style={ui.shell}>
+          <div style={ui.hero}>
+            <div style={ui.glow} />
             <div style={{ position: "relative" }}>
               <h1 style={{ fontSize: 26, fontWeight: 950, margin: 0 }}>Complete Profile</h1>
               <p style={{ color: "#4b5563", marginTop: 8, marginBottom: 0 }}>
                 Before posting, add your <b>full name</b> and choose <b>Student/Faculty</b>.
               </p>
+              {msg && <div style={{ marginTop: 12, ...ui.msg }}>{msg}</div>}
               <button
                 onClick={() => router.push("/me")}
                 style={{
@@ -696,30 +715,7 @@ export default function CreatePage() {
     );
   }
 
-  const pageTitle = postType === "give" ? "Create a post" : "Create a post";
-  const helperText =
-    postType === "give"
-      ? "Make it feel effortless: title + photo first. Everything else is optional."
-      : "Be specific. The right person will find you in the feed and message you.";
-  const primaryButton = postType === "give" ? "Post item" : "Post request";
-
-  const stickyHint =
-    cleanTitle.length < 3
-      ? "Add a clear title (3+ characters)."
-      : postType === "give"
-        ? file
-          ? "Looks good — you’re ready to post."
-          : "Photo required for Give posts."
-        : "Ready to post.";
-
-  // “creative” part: feels like a guided conversation, not a rigid form.
-  const leftPrompt1 = postType === "give" ? "What are you giving away?" : "What do you need?";
-  const leftPrompt2 = postType === "give" ? "Any details someone should know?" : "Add context so people can help fast.";
-  const leftPrompt3 = postType === "give" ? "Add a photo (required for Give)." : "Pick the type + timeframe (helps matching).";
-
-  // photo drag state (UI only)
-  const [dragOver, setDragOver] = useState(false);
-
+  // ---------- MAIN PAGE ----------
   return (
     <div style={ui.page}>
       <div style={ui.shell}>
@@ -733,9 +729,9 @@ export default function CreatePage() {
         </div>
 
         <div style={ui.hero}>
-          <div style={ui.subtleGlow} />
+          <div style={ui.glow} />
           <div style={{ position: "relative" }}>
-            <h1 style={ui.h1}>{pageTitle}</h1>
+            <h1 style={ui.h1}>Create a post</h1>
             <p style={ui.sub}>{helperText}</p>
 
             <div style={ui.segmentWrap}>
@@ -750,18 +746,20 @@ export default function CreatePage() {
         </div>
 
         <form ref={formRef} onSubmit={handleSubmit} style={ui.convo}>
-          {/* “assistant” prompt: Title */}
-          <div style={ui.bubbleRow("left")}>
+          {/* Title bubble */}
+          <div style={ui.row("left")}>
             <div style={ui.bubble("left")}>
-              <div style={ui.miniTitle}>ScholarSwap</div>
-              <div style={{ fontWeight: 900 }}>{leftPrompt1}</div>
+              <div style={ui.mini}>ScholarSwap</div>
+              <div style={{ fontWeight: 950 }}>
+                {postType === "give" ? "What are you giving away?" : "What do you need?"}
+              </div>
               <div style={{ marginTop: 10 }}>
                 <input
                   type="text"
                   placeholder={
                     postType === "give"
                       ? 'Example: "Bedford Handbook (good condition)"'
-                      : 'Example: "Need a ride Friday 6am to CLE"'
+                      : 'Example: "Need a ride Friday 6am"'
                   }
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
@@ -769,16 +767,18 @@ export default function CreatePage() {
                 />
               </div>
               <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
-                Tip: lead with the noun + condition + key detail (size/edition/compatibility).
+                Tip: lead with the noun + condition + key detail.
               </div>
             </div>
           </div>
 
-          {/* “assistant” prompt: Details */}
-          <div style={ui.bubbleRow("left")}>
+          {/* Details bubble */}
+          <div style={ui.row("left")}>
             <div style={ui.bubble("left")}>
-              <div style={ui.miniTitle}>ScholarSwap</div>
-              <div style={{ fontWeight: 900 }}>{leftPrompt2}</div>
+              <div style={ui.mini}>ScholarSwap</div>
+              <div style={{ fontWeight: 950 }}>
+                {postType === "give" ? "Any details someone should know?" : "Add context so people can help fast."}
+              </div>
               <div style={{ marginTop: 10 }}>
                 <textarea
                   placeholder={postType === "give" ? "What’s included? any flaws?" : "Where/when/how urgent? Keep it simple."}
@@ -791,12 +791,12 @@ export default function CreatePage() {
             </div>
           </div>
 
-          {/* Give: photo REQUIRED (creative drop zone + preview) */}
+          {/* Give: photo bubble */}
           {postType === "give" && (
-            <div style={ui.bubbleRow("left")}>
+            <div style={ui.row("left")}>
               <div style={ui.bubble("left")}>
-                <div style={ui.miniTitle}>ScholarSwap</div>
-                <div style={{ fontWeight: 900 }}>{leftPrompt3}</div>
+                <div style={ui.mini}>ScholarSwap</div>
+                <div style={{ fontWeight: 950 }}>Add a photo (required)</div>
 
                 <div
                   style={{ marginTop: 10 }}
@@ -891,16 +891,16 @@ export default function CreatePage() {
             </div>
           )}
 
-          {/* Essentials: presented like “quick choices”, not “form sections” */}
+          {/* Essentials bubble */}
           {postType === "give" && (
-            <div style={ui.bubbleRow("left")}>
+            <div style={ui.row("left")}>
               <div style={ui.bubble("left")}>
-                <div style={ui.miniTitle}>ScholarSwap</div>
-                <div style={{ fontWeight: 900 }}>Quick choices (helps people find it)</div>
+                <div style={ui.mini}>ScholarSwap</div>
+                <div style={{ fontWeight: 950 }}>Quick choices (helps discovery)</div>
 
-                <div style={{ marginTop: 10, ...ui.row2 }}>
+                <div style={{ marginTop: 10, ...ui.grid2 }}>
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Category</div>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Category</div>
                     <select
                       value={giveCategory}
                       onChange={(e) => setGiveCategory(e.target.value as GiveCategory)}
@@ -924,7 +924,7 @@ export default function CreatePage() {
                   </div>
 
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Pickup spot</div>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Pickup spot</div>
                     <select
                       value={pickupLocation}
                       onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
@@ -941,14 +941,14 @@ export default function CreatePage() {
           )}
 
           {postType === "request" && (
-            <div style={ui.bubbleRow("left")}>
+            <div style={ui.row("left")}>
               <div style={ui.bubble("left")}>
-                <div style={ui.miniTitle}>ScholarSwap</div>
-                <div style={{ fontWeight: 900 }}>{leftPrompt3}</div>
+                <div style={ui.mini}>ScholarSwap</div>
+                <div style={{ fontWeight: 950 }}>Pick a type + timeframe</div>
 
-                <div style={{ marginTop: 10, ...ui.row2 }}>
+                <div style={{ marginTop: 10, ...ui.grid2 }}>
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Request type</div>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Request type</div>
                     <select
                       value={requestGroup}
                       onChange={(e) => setRequestGroup(e.target.value as RequestGroup)}
@@ -962,7 +962,7 @@ export default function CreatePage() {
                   </div>
 
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Timeframe</div>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Timeframe</div>
                     <select
                       value={requestTimeframe}
                       onChange={(e) => setRequestTimeframe(e.target.value as RequestTimeframe)}
@@ -976,7 +976,7 @@ export default function CreatePage() {
                 </div>
 
                 <div style={{ marginTop: 10 }}>
-                  <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Location (optional)</div>
+                  <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Location (optional)</div>
                   <input
                     type="text"
                     placeholder='Example: "Dorm A" or "Near dining hall"'
@@ -989,23 +989,18 @@ export default function CreatePage() {
             </div>
           )}
 
-          {/* More options as a “drawer-like” card */}
+          {/* Options drawer */}
           <div>
-            <button
-              type="button"
-              onClick={() => setShowOptions((v) => !v)}
-              style={ui.optionsBtn}
-              aria-expanded={showOptions}
-            >
+            <button type="button" onClick={() => setShowOptions((v) => !v)} style={ui.drawerBtn} aria-expanded={showOptions}>
               <span>More options</span>
               <span style={{ color: "#6b7280" }}>{showOptions ? "—" : "+"}</span>
             </button>
 
             {showOptions && (
-              <div style={ui.optionsPanel}>
-                <div style={ui.row2}>
+              <div style={ui.drawer}>
+                <div style={ui.grid2}>
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Hide my name</div>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Hide my name</div>
                     <button
                       type="button"
                       onClick={() => setHideName((v) => !v)}
@@ -1028,7 +1023,7 @@ export default function CreatePage() {
                   </div>
 
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
                       Automatically close after
                     </div>
                     <select
@@ -1067,7 +1062,6 @@ export default function CreatePage() {
             disabled={saving || !canSubmit}
             style={ui.primary(saving || !canSubmit)}
             onMouseDown={(e) => {
-              // tiny “press” feel without changing logic
               if (saving || !canSubmit) return;
               (e.currentTarget as HTMLButtonElement).style.transform = "translateY(1px)";
               (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 10px 22px rgba(16,185,129,0.20)";
