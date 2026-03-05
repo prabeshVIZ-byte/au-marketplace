@@ -6,49 +6,20 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 /**
- * ✅ ZERO-BUG CREATE PAGE (Give / Request / Event)
+ * CREATE PAGE (Give / Request / Event) — rewritten to fix:
+ * ✅ Post button not clickable (bottom nav overlay) via:
+ *   - Real form submit button: <button type="submit" form="create-form" />
+ *   - Sticky bar z-index 9999
+ *   - Uses CSS var --bottom-nav-height (fallback 86px) so we DON'T guess
+ * ✅ Cleaner auth + profile gating
+ * ✅ Strict validation matching your rules
+ * ✅ Safe datetime-local parsing (Safari-safe)
+ * ✅ Storage upload + public URL update
  *
- * REQUIRED RULES (your rules):
- * GIVE:
- *  - Title
- *  - Description
- *  - Photo
- *  - Category
- *  - Pickup spot
- *
- * REQUEST:
- *  - Title
- *  - Description
- *  - Request type (request_group)
- *  - Timeframe (request_timeframe)
- *
- * EVENT:
- *  - Title
- *  - Description
- *  - Location
- *  - Host organization
- *  - Start time
- *  - Category
- * Optional:
- *  - End time
- *  - Link (must start with http/https)
- *  - Flyer image
- *
- * ✅ IMPORTANT: Events schema (matches your Feed code)
- *  - events.created_by (uuid)
- *  - events.link_url (text, nullable)
- *  - events.photo_url (text, nullable)   <-- flyer image goes here
- *  - events.host_org, category, location, starts_at, ends_at, is_anonymous
- *
- * ✅ Storage buckets assumed:
- *  - item-photos
- *  - event-flyers
- *
- * ✅ Navigation:
- *  - if auth/profile missing -> /me
- *  - after post:
- *      - give/request -> /item/[id]
- *      - event -> /feed
+ * IMPORTANT:
+ * - Set your bottom nav container id="bottom-nav" AND update CSS variable:
+ *   document.documentElement.style.setProperty("--bottom-nav-height", `${el.offsetHeight}px`)
+ *   (code snippet included below in comments)
  */
 
 type Mode = "give" | "request" | "event";
@@ -75,7 +46,16 @@ type PickupLocation = "College Quad" | "Safety Service Office" | "Dining Hall";
 type RequestGroup = "logistics" | "services" | "urgent" | "collaboration";
 type RequestTimeframe = "today" | "this_week" | "flexible";
 
-type EventCategory = "career" | "club" | "sports" | "music" | "arts" | "volunteering" | "academic" | "social" | "other";
+type EventCategory =
+  | "career"
+  | "club"
+  | "sports"
+  | "music"
+  | "arts"
+  | "volunteering"
+  | "academic"
+  | "social"
+  | "other";
 
 type ExpireChoice = "7" | "14" | "30" | "never" | "urgent24";
 
@@ -89,26 +69,28 @@ const EVENT_FLYERS_BUCKET = "event-flyers";
 const MAX_ITEM_PHOTO_MB = 6;
 const MAX_EVENT_FLYER_MB = 8;
 
-// bottom nav spacing
-const NAV_APPROX_HEIGHT = 86;
+// sticky bar height
 const STICKY_BAR_HEIGHT = 74;
 
-// routes
+// route
 const EVENT_SUCCESS_ROUTE = "/feed";
 
+// ---------------- utils ----------------
 function isAllowedImage(file: File) {
   return ["image/jpeg", "image/png", "image/webp"].includes(file.type);
 }
 
 function getExt(name: string) {
-  const p = name.split(".");
-  return p.length > 1 ? (p.pop() || "jpg").toLowerCase() : "jpg";
+  const parts = name.split(".");
+  return parts.length > 1 ? (parts.pop() || "jpg").toLowerCase() : "jpg";
 }
 
 function uuidSafe() {
   // @ts-ignore
   if (typeof crypto !== "undefined" && crypto?.randomUUID) return crypto.randomUUID();
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random()
+    .toString(16)
+    .slice(2)}`;
 }
 
 function addDaysISO(days: number) {
@@ -117,7 +99,7 @@ function addDaysISO(days: number) {
 
 function computeExpiry(choice: ExpireChoice) {
   if (choice === "urgent24") return { untilCancel: false, expiresAt: addDaysISO(1) };
-  if (choice === "never") return { untilCancel: true, expiresAt: null };
+  if (choice === "never") return { untilCancel: true, expiresAt: null as string | null };
   return { untilCancel: false, expiresAt: addDaysISO(Number(choice)) };
 }
 
@@ -128,33 +110,37 @@ function isValidHttpUrlMaybeEmpty(raw: string) {
 }
 
 /**
- * Safer datetime-local -> ISO (Safari-safe, avoids Date("YYYY-MM-DDTHH:mm") edge cases)
+ * Safari-safe datetime-local -> ISO
  */
 function localDateTimeToISO(localValue: string) {
-  // "YYYY-MM-DDTHH:mm"
   if (!localValue) return null;
   const m = localValue.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
   if (!m) return null;
+
   const y = Number(m[1]);
   const mo = Number(m[2]);
   const d = Number(m[3]);
   const hh = Number(m[4]);
   const mm = Number(m[5]);
-  const dt = new Date(y, mo - 1, d, hh, mm, 0, 0); // local time
+
+  const dt = new Date(y, mo - 1, d, hh, mm, 0, 0);
   if (Number.isNaN(dt.getTime())) return null;
   return dt.toISOString();
 }
 
+// ---------------- main ----------------
 export default function CreatePage() {
   const router = useRouter();
-  const formRef = useRef<HTMLFormElement | null>(null);
 
+  // form + file inputs
+  const formRef = useRef<HTMLFormElement | null>(null);
   const itemFileInputRef = useRef<HTMLInputElement | null>(null);
   const eventFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // auth/profile
+  // auth + profile
   const [authLoading, setAuthLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(true);
+
   const [email, setEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [profileComplete, setProfileComplete] = useState(false);
@@ -162,7 +148,7 @@ export default function CreatePage() {
   // mode
   const [mode, setMode] = useState<Mode>("give");
 
-  // shared
+  // shared fields
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
@@ -192,10 +178,11 @@ export default function CreatePage() {
   const [hideName, setHideName] = useState(false);
   const [expireChoice, setExpireChoice] = useState<ExpireChoice>("7");
 
-  // submit state
+  // submit
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
+  // derived
   const cleanTitle = useMemo(() => title.trim(), [title]);
   const cleanDesc = useMemo(() => description.trim(), [description]);
 
@@ -205,14 +192,12 @@ export default function CreatePage() {
   const isAshland = useMemo(() => !!email && email.toLowerCase().endsWith("@ashland.edu"), [email]);
   const isLoggedIn = !!userId && !!email && isAshland;
 
-  // keep expiry sane when switching
+  // clear messages when switching mode
   useEffect(() => {
     setMsg(null);
-    // optional: you earlier forced request not to allow "never"; leaving this off causes fewer surprises.
-    // if you want to force it: if (mode === "request" && expireChoice === "never") setExpireChoice("7");
-  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mode]);
 
-  // previews
+  // preview URLs
   useEffect(() => {
     if (!itemFile) {
       setItemPreviewUrl(null);
@@ -233,23 +218,36 @@ export default function CreatePage() {
     return () => URL.revokeObjectURL(url);
   }, [eventFile]);
 
-  // AUTH
+  // set bottom nav height css variable (fallback if bottom nav exists)
+  useEffect(() => {
+    const update = () => {
+      const el = document.getElementById("bottom-nav");
+      if (!el) return;
+      document.documentElement.style.setProperty("--bottom-nav-height", `${el.offsetHeight}px`);
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  // auth
   useEffect(() => {
     let mounted = true;
 
     async function syncAuth() {
       setAuthLoading(true);
       try {
-        // hard timeout so it never hangs
         const timeoutMs = 6500;
         const raced = await Promise.race([
           supabase.auth.getSession(),
-          new Promise<any>((resolve) => setTimeout(() => resolve({ data: { session: null }, error: { message: "Auth timeout" } }), timeoutMs)),
+          new Promise<any>((resolve) =>
+            setTimeout(() => resolve({ data: { session: null }, error: { message: "Auth timeout" } }), timeoutMs)
+          ),
         ]);
 
         if (!mounted) return;
-
         const { data, error } = raced;
+
         if (error) console.log("getSession:", error?.message ?? error);
 
         const session = data?.session ?? null;
@@ -274,7 +272,7 @@ export default function CreatePage() {
     };
   }, []);
 
-  // PROFILE CHECK
+  // profile check
   useEffect(() => {
     let mounted = true;
 
@@ -288,7 +286,11 @@ export default function CreatePage() {
       }
 
       try {
-        const { data, error } = await supabase.from("profiles").select("full_name,user_role").eq("id", userId).maybeSingle();
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("full_name,user_role")
+          .eq("id", userId)
+          .maybeSingle();
 
         if (!mounted) return;
 
@@ -312,7 +314,7 @@ export default function CreatePage() {
     };
   }, [userId]);
 
-  // file handlers
+  // file pickers
   function pickItemFile(f: File | null) {
     setMsg(null);
     if (!f) return setItemFile(null);
@@ -355,7 +357,8 @@ export default function CreatePage() {
     if (!eventLocation.trim()) return "Location is required.";
     if (!startIso) return "Start time is required.";
     if (!isValidHttpUrlMaybeEmpty(eventLink)) return "Link must start with http:// or https:// (or leave it empty).";
-    if (endIso && startIso && new Date(endIso).getTime() < new Date(startIso).getTime()) return "End time cannot be before start time.";
+    if (endIso && startIso && new Date(endIso).getTime() < new Date(startIso).getTime())
+      return "End time cannot be before start time.";
     return null;
   }
 
@@ -386,10 +389,12 @@ export default function CreatePage() {
     if (!eventLocation.trim()) return false;
     if (!startIso) return false;
     if (!isValidHttpUrlMaybeEmpty(eventLink)) return false;
+
     if (eventFile) {
       if (!isAllowedImage(eventFile)) return false;
       if (eventFile.size > MAX_EVENT_FLYER_MB * 1024 * 1024) return false;
     }
+
     if (endIso && startIso && new Date(endIso).getTime() < new Date(startIso).getTime()) return false;
     return true;
   }, [
@@ -428,7 +433,6 @@ export default function CreatePage() {
     try {
       // ===================== EVENT =====================
       if (mode === "event") {
-        // 1) create row (MATCHES YOUR FEED SCHEMA)
         const insertRow: any = {
           created_by: userId,
           title: cleanTitle,
@@ -439,15 +443,22 @@ export default function CreatePage() {
           starts_at: startIso,
           ends_at: endIso ?? null,
           link_url: eventLink.trim() ? eventLink.trim() : null,
-          photo_url: null, // flyer goes here
+          photo_url: null,
           is_anonymous: hideName,
         };
 
-        const { data: created, error: createErr } = await supabase.from(EVENTS_TABLE).insert([insertRow]).select("id").single();
-        if (createErr || !created?.id) throw new Error(createErr?.message || "Failed to create event (RLS or schema mismatch).");
+        const { data: created, error: createErr } = await supabase
+          .from(EVENTS_TABLE)
+          .insert([insertRow])
+          .select("id")
+          .single();
+
+        if (createErr || !created?.id)
+          throw new Error(createErr?.message || "Failed to create event (RLS or schema mismatch).");
+
         const eventId = String(created.id);
 
-        // 2) optional flyer upload -> update photo_url
+        // optional flyer upload
         if (eventFile) {
           const ext = getExt(eventFile.name);
           const path = `events/${userId}/${eventId}/${uuidSafe()}.${ext}`;
@@ -459,7 +470,6 @@ export default function CreatePage() {
           });
 
           if (upErr) {
-            // event exists; flyer failed
             setMsg(`Event posted, but flyer upload failed: ${upErr.message}`);
             router.push(EVENT_SUCCESS_ROUTE);
             router.refresh();
@@ -469,7 +479,11 @@ export default function CreatePage() {
           const { data: pub } = supabase.storage.from(EVENT_FLYERS_BUCKET).getPublicUrl(path);
           const flyerPublicUrl = pub.publicUrl;
 
-          const { error: updErr } = await supabase.from(EVENTS_TABLE).update({ photo_url: flyerPublicUrl }).eq("id", eventId);
+          const { error: updErr } = await supabase
+            .from(EVENTS_TABLE)
+            .update({ photo_url: flyerPublicUrl })
+            .eq("id", eventId);
+
           if (updErr) setMsg(`Flyer uploaded, but photo_url update failed: ${updErr.message}`);
         }
 
@@ -508,11 +522,18 @@ export default function CreatePage() {
         itemInsert.request_location = requestLocation.trim() ? requestLocation.trim() : null;
       }
 
-      const { data: createdItem, error: createItemErr } = await supabase.from(ITEMS_TABLE).insert([itemInsert]).select("id").single();
-      if (createItemErr || !createdItem?.id) throw new Error(createItemErr?.message || "Failed to create post (RLS or schema mismatch).");
+      const { data: createdItem, error: createItemErr } = await supabase
+        .from(ITEMS_TABLE)
+        .insert([itemInsert])
+        .select("id")
+        .single();
+
+      if (createItemErr || !createdItem?.id)
+        throw new Error(createItemErr?.message || "Failed to create post (RLS or schema mismatch).");
+
       const itemId = String(createdItem.id);
 
-      // request: no photo
+      // request: no photo required
       if (postType === "request") {
         router.push(`/item/${itemId}`);
         router.refresh();
@@ -540,6 +561,7 @@ export default function CreatePage() {
       const publicUrl = pub.publicUrl;
 
       const { error: updateErr } = await supabase.from(ITEMS_TABLE).update({ photo_url: publicUrl }).eq("id", itemId);
+
       if (updateErr) {
         setMsg(`Photo uploaded, but photo_url update failed: ${updateErr.message}`);
         router.push(`/item/${itemId}`);
@@ -548,7 +570,9 @@ export default function CreatePage() {
       }
 
       // optional history table
-      const { error: photoErr } = await supabase.from(ITEM_PHOTOS_TABLE).insert([{ item_id: itemId, photo_url: publicUrl, storage_path: path }]);
+      const { error: photoErr } = await supabase
+        .from(ITEM_PHOTOS_TABLE)
+        .insert([{ item_id: itemId, photo_url: publicUrl, storage_path: path }]);
       if (photoErr) console.log("item_photos insert failed:", photoErr.message);
 
       router.push(`/item/${itemId}`);
@@ -560,13 +584,14 @@ export default function CreatePage() {
     }
   }
 
-  // ---------- UI (simple + safe) ----------
+  // ---------------- UI styles ----------------
   const pageStyle: React.CSSProperties = {
     minHeight: "100vh",
     background: "#f7f7f8",
     color: "#0f172a",
     padding: 18,
-    paddingBottom: NAV_APPROX_HEIGHT + STICKY_BAR_HEIGHT + 24,
+    // ✅ no guessing: uses CSS var (fallback 86px) + safe area
+    paddingBottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px) + 74px + 24px)",
   };
 
   const shell: React.CSSProperties = { maxWidth: 760, margin: "0 auto" };
@@ -607,20 +632,22 @@ export default function CreatePage() {
 
   const danger: React.CSSProperties = { ...button, borderColor: "#fecaca", color: "#b91c1c" };
 
+  // ✅ sticky ALWAYS above nav
   const sticky: React.CSSProperties = {
     position: "fixed",
     left: 0,
     right: 0,
-    bottom: NAV_APPROX_HEIGHT,
+    bottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px))",
     height: STICKY_BAR_HEIGHT,
     background: "rgba(247,247,248,0.90)",
     borderTop: "1px solid #e5e7eb",
     backdropFilter: "blur(10px)",
-    zIndex: 50,
+    zIndex: 9999,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     padding: "10px 16px",
+    pointerEvents: "auto",
   };
 
   const stickyInner: React.CSSProperties = {
@@ -658,11 +685,13 @@ export default function CreatePage() {
     if (!profileComplete) return "Finish profile setup in Account.";
     if (cleanTitle.length < 3) return "Add a clear title (3+).";
     if (cleanDesc.length < 3) return "Add a description.";
+
     if (mode === "give") {
       if (!itemFile) return "Give posts require a photo.";
       return "Ready to post Give.";
     }
     if (mode === "request") return "Ready to post Request.";
+
     if (!hostOrg.trim()) return "Add Host Club/Organisation.";
     if (!eventLocation.trim()) return "Add event location.";
     if (!startIso) return "Pick a start time.";
@@ -670,7 +699,7 @@ export default function CreatePage() {
     return "Ready to post Event.";
   }, [isLoggedIn, profileComplete, cleanTitle, cleanDesc, mode, itemFile, hostOrg, eventLocation, startIso, eventLink]);
 
-  // loading / gating
+  // ---------------- gated screens ----------------
   if (authLoading || profileLoading) {
     return (
       <div style={pageStyle}>
@@ -678,9 +707,23 @@ export default function CreatePage() {
           <div style={card}>
             <div style={{ fontWeight: 950 }}>Loading your account…</div>
             <div style={{ marginTop: 8, fontSize: 13, color: "#6b7280" }}>
-              If this hangs, check Supabase env vars on Vercel and that auth is working.
+              If this hangs, check Supabase env vars and auth settings.
             </div>
-            {msg && <div style={{ marginTop: 12, padding: 10, borderRadius: 14, border: "1px solid #fecdd3", background: "#fff1f2", color: "#9f1239", fontWeight: 850 }}>{msg}</div>}
+            {msg && (
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: 10,
+                  borderRadius: 14,
+                  border: "1px solid #fecdd3",
+                  background: "#fff1f2",
+                  color: "#9f1239",
+                  fontWeight: 850,
+                }}
+              >
+                {msg}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -696,7 +739,21 @@ export default function CreatePage() {
             <p style={{ color: "#4b5563" }}>
               You must log in with your <b>@ashland.edu</b> email.
             </p>
-            {msg && <div style={{ marginTop: 12, padding: 10, borderRadius: 14, border: "1px solid #fecdd3", background: "#fff1f2", color: "#9f1239", fontWeight: 850 }}>{msg}</div>}
+            {msg && (
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: 10,
+                  borderRadius: 14,
+                  border: "1px solid #fecdd3",
+                  background: "#fff1f2",
+                  color: "#9f1239",
+                  fontWeight: 850,
+                }}
+              >
+                {msg}
+              </div>
+            )}
             <button onClick={() => router.push("/me")} style={{ ...button, marginTop: 12 }}>
               Go to Account
             </button>
@@ -722,6 +779,7 @@ export default function CreatePage() {
     );
   }
 
+  // ---------------- main render ----------------
   return (
     <div style={pageStyle}>
       <div style={shell}>
@@ -729,7 +787,16 @@ export default function CreatePage() {
           <button onClick={() => router.push("/feed")} style={{ ...button, borderRadius: 999 }}>
             ← Back
           </button>
-          <div style={{ fontSize: 12, color: "#374151", border: "1px solid #e5e7eb", background: "white", padding: "8px 10px", borderRadius: 999 }}>
+          <div
+            style={{
+              fontSize: 12,
+              color: "#374151",
+              border: "1px solid #e5e7eb",
+              background: "white",
+              padding: "8px 10px",
+              borderRadius: 999,
+            }}
+          >
             Posting as <b>{email}</b>
           </div>
         </div>
@@ -739,19 +806,52 @@ export default function CreatePage() {
           <div style={{ marginTop: 6, color: "#4b5563" }}>{helperText}</div>
 
           <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button type="button" onClick={() => setMode("give")} style={{ ...button, borderRadius: 999, background: mode === "give" ? "#111827" : "white", color: mode === "give" ? "white" : "#111827" }}>
+            <button
+              type="button"
+              onClick={() => setMode("give")}
+              style={{
+                ...button,
+                borderRadius: 999,
+                background: mode === "give" ? "#111827" : "white",
+                color: mode === "give" ? "white" : "#111827",
+              }}
+            >
               Give
             </button>
-            <button type="button" onClick={() => setMode("request")} style={{ ...button, borderRadius: 999, background: mode === "request" ? "#111827" : "white", color: mode === "request" ? "white" : "#111827" }}>
+            <button
+              type="button"
+              onClick={() => setMode("request")}
+              style={{
+                ...button,
+                borderRadius: 999,
+                background: mode === "request" ? "#111827" : "white",
+                color: mode === "request" ? "white" : "#111827",
+              }}
+            >
               Request
             </button>
-            <button type="button" onClick={() => setMode("event")} style={{ ...button, borderRadius: 999, background: mode === "event" ? "#111827" : "white", color: mode === "event" ? "white" : "#111827" }}>
+            <button
+              type="button"
+              onClick={() => setMode("event")}
+              style={{
+                ...button,
+                borderRadius: 999,
+                background: mode === "event" ? "#111827" : "white",
+                color: mode === "event" ? "white" : "#111827",
+              }}
+            >
               Event
             </button>
           </div>
         </div>
 
-        <form ref={formRef} onSubmit={handleSubmit} style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+        {/* ✅ REAL FORM SUBMIT */}
+        <form
+          id="create-form"
+          ref={formRef}
+          onSubmit={handleSubmit}
+          style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}
+        >
           {/* TITLE */}
           <div style={card}>
             <div style={{ fontWeight: 950 }}>
@@ -766,7 +866,13 @@ export default function CreatePage() {
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 style={input}
-                placeholder={mode === "give" ? `Example: "Bedford Handbook (good condition)"` : mode === "request" ? `Example: "Need a ride Friday 6am"` : `Example: "Finance Club Guest Speaker Night"`}
+                placeholder={
+                  mode === "give"
+                    ? `Example: "Bedford Handbook (good condition)"`
+                    : mode === "request"
+                    ? `Example: "Need a ride Friday 6am"`
+                    : `Example: "Finance Club Guest Speaker Night"`
+                }
               />
             </div>
           </div>
@@ -774,7 +880,11 @@ export default function CreatePage() {
           {/* DESCRIPTION */}
           <div style={card}>
             <div style={{ fontWeight: 950 }}>
-              {mode === "give" ? "Any details someone should know? (required)" : mode === "request" ? "Add context so people can help fast. (required)" : "Short description (required)"}
+              {mode === "give"
+                ? "Any details someone should know? (required)"
+                : mode === "request"
+                ? "Add context so people can help fast. (required)"
+                : "Short description (required)"}
             </div>
             <div style={{ marginTop: 10 }}>
               <textarea
@@ -782,7 +892,13 @@ export default function CreatePage() {
                 onChange={(e) => setDescription(e.target.value)}
                 style={textarea}
                 rows={4}
-                placeholder={mode === "give" ? "Condition, what's included, any flaws." : mode === "request" ? "Where/when/how urgent? Keep it simple." : "What is it? Who is it for? Any key details."}
+                placeholder={
+                  mode === "give"
+                    ? "Condition, what's included, any flaws."
+                    : mode === "request"
+                    ? "Where/when/how urgent? Keep it simple."
+                    : "What is it? Who is it for? Any key details."
+                }
               />
             </div>
           </div>
@@ -794,7 +910,9 @@ export default function CreatePage() {
                 <div style={{ fontWeight: 950 }}>Add a photo (required)</div>
 
                 <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  <div style={{ fontSize: 13, color: "#6b7280" }}>JPG / PNG / WEBP • max {MAX_ITEM_PHOTO_MB}MB</div>
+                  <div style={{ fontSize: 13, color: "#6b7280" }}>
+                    JPG / PNG / WEBP • max {MAX_ITEM_PHOTO_MB}MB
+                  </div>
 
                   <div style={{ display: "flex", gap: 10 }}>
                     <input
@@ -818,7 +936,17 @@ export default function CreatePage() {
                 {itemPreviewUrl && (
                   <div style={{ marginTop: 12 }}>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={itemPreviewUrl} alt="Item preview" style={{ width: "100%", height: 260, objectFit: "cover", borderRadius: 16, border: "1px solid #e5e7eb" }} />
+                    <img
+                      src={itemPreviewUrl}
+                      alt="Item preview"
+                      style={{
+                        width: "100%",
+                        height: 260,
+                        objectFit: "cover",
+                        borderRadius: 16,
+                        border: "1px solid #e5e7eb",
+                      }}
+                    />
                   </div>
                 )}
               </div>
@@ -888,7 +1016,12 @@ export default function CreatePage() {
 
               <div style={{ marginTop: 10 }}>
                 <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Location (optional)</div>
-                <input value={requestLocation} onChange={(e) => setRequestLocation(e.target.value)} style={input} placeholder={`Example: "Dorm A" or "Near dining hall"`} />
+                <input
+                  value={requestLocation}
+                  onChange={(e) => setRequestLocation(e.target.value)}
+                  style={input}
+                  placeholder={`Example: "Dorm A" or "Near dining hall"`}
+                />
               </div>
             </div>
           )}
@@ -950,7 +1083,9 @@ export default function CreatePage() {
                 <div style={{ fontWeight: 950 }}>Flyer / poster (optional)</div>
 
                 <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  <div style={{ fontSize: 13, color: "#6b7280" }}>JPG / PNG / WEBP • max {MAX_EVENT_FLYER_MB}MB</div>
+                  <div style={{ fontSize: 13, color: "#6b7280" }}>
+                    JPG / PNG / WEBP • max {MAX_EVENT_FLYER_MB}MB
+                  </div>
 
                   <div style={{ display: "flex", gap: 10 }}>
                     <input
@@ -974,7 +1109,17 @@ export default function CreatePage() {
                 {eventPreviewUrl && (
                   <div style={{ marginTop: 12 }}>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={eventPreviewUrl} alt="Flyer preview" style={{ width: "100%", height: 260, objectFit: "cover", borderRadius: 16, border: "1px solid #e5e7eb" }} />
+                    <img
+                      src={eventPreviewUrl}
+                      alt="Flyer preview"
+                      style={{
+                        width: "100%",
+                        height: 260,
+                        objectFit: "cover",
+                        borderRadius: 16,
+                        border: "1px solid #e5e7eb",
+                      }}
+                    />
                   </div>
                 )}
               </div>
@@ -983,7 +1128,17 @@ export default function CreatePage() {
 
           {/* OPTIONS */}
           <div style={card}>
-            <button type="button" onClick={() => setShowOptions((v) => !v)} style={{ ...button, width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <button
+              type="button"
+              onClick={() => setShowOptions((v) => !v)}
+              style={{
+                ...button,
+                width: "100%",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
               <span>More options</span>
               <span style={{ color: "#6b7280" }}>{showOptions ? "—" : "+"}</span>
             </button>
@@ -1009,7 +1164,12 @@ export default function CreatePage() {
 
                   <div style={{ opacity: mode === "event" ? 0.5 : 1 }}>
                     <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Automatically close after</div>
-                    <select value={expireChoice} onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)} style={select} disabled={mode === "event"}>
+                    <select
+                      value={expireChoice}
+                      onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
+                      style={select}
+                      disabled={mode === "event"}
+                    >
                       <option value="urgent24">Urgent (24 hours)</option>
                       <option value="7">7 days</option>
                       <option value="14">14 days</option>
@@ -1031,11 +1191,17 @@ export default function CreatePage() {
         </form>
       </div>
 
-      {/* Sticky submit */}
+      {/* ✅ Sticky submit (REAL SUBMIT BUTTON) */}
       <div style={sticky}>
         <div style={stickyInner}>
           <div style={{ flex: 1, fontSize: 12, color: "#6b7280" }}>{stickyHint}</div>
-          <button onClick={() => formRef.current?.requestSubmit()} disabled={saving || !canSubmit} style={primary(saving || !canSubmit)}>
+
+          <button
+            type="submit"
+            form="create-form"
+            disabled={saving || !canSubmit}
+            style={primary(saving || !canSubmit)}
+          >
             {saving ? "Posting…" : primaryLabel}
           </button>
         </div>
@@ -1043,3 +1209,20 @@ export default function CreatePage() {
     </div>
   );
 }
+
+/**
+ * ⚠️ REQUIRED: Add this to your BottomNav component (so the sticky bar never gets covered):
+ *
+ * <div id="bottom-nav" style={{ position:"fixed", bottom:0, left:0, right:0, zIndex:1000 }}>
+ *   ...
+ * </div>
+ *
+ * useEffect(() => {
+ *   const el = document.getElementById("bottom-nav");
+ *   if (!el) return;
+ *   const update = () => document.documentElement.style.setProperty("--bottom-nav-height", `${el.offsetHeight}px`);
+ *   update();
+ *   window.addEventListener("resize", update);
+ *   return () => window.removeEventListener("resize", update);
+ * }, []);
+ */
