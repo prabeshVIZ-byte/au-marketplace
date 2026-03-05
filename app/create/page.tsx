@@ -5,7 +5,33 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-type PostType = "give" | "request";
+/**
+ * ✅ Create page now supports:
+ * - Give (items + required photo)
+ * - Request (items, no photo)
+ * - Event (events table, optional flyer upload)
+ *
+ * Assumptions (match your earlier DB plan):
+ * public.events columns:
+ * - id uuid
+ * - created_by uuid
+ * - title text
+ * - host_org text
+ * - category text
+ * - location text
+ * - description text
+ * - starts_at timestamptz
+ * - ends_at timestamptz null
+ * - link_url text null
+ * - photo_url text null
+ * - is_anonymous boolean
+ *
+ * Storage bucket:
+ * - item-photos (already)
+ * - event-photos (NEW, public bucket recommended)
+ */
+
+type PostType = "give" | "request" | "event";
 
 type GiveCategory =
   | "clothing"
@@ -29,9 +55,21 @@ type RequestTimeframe = "today" | "this_week" | "flexible";
 type PickupLocation = "College Quad" | "Safety Service Office" | "Dining Hall";
 type ExpireChoice = "7" | "14" | "30" | "never" | "urgent24";
 
+type EventCategory =
+  | "club"
+  | "sports"
+  | "party"
+  | "career"
+  | "volunteering"
+  | "workshop"
+  | "campus"
+  | "other";
+
 const NAV_APPROX_HEIGHT = 86;
 const STICKY_BAR_HEIGHT = 74;
-const MAX_PHOTO_MB = 6;
+
+const MAX_PHOTO_MB = 6; // items
+const MAX_FLYER_MB = 8; // events
 
 function getExt(filename: string) {
   const parts = filename.split(".");
@@ -61,19 +99,42 @@ function computeExpiry(choice: ExpireChoice) {
 }
 
 function uuidSafe() {
-  // some mobile browsers can be quirky; this avoids crashes
   // @ts-ignore
   if (typeof crypto !== "undefined" && crypto?.randomUUID) return crypto.randomUUID();
   return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+}
+
+function toLocalInputValue(d: Date) {
+  // "YYYY-MM-DDTHH:mm" in local time for <input type="datetime-local" />
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
+function parseLocalDatetimeToISO(v: string) {
+  // v like "2026-03-04T16:30" interpreted as local time
+  // new Date(v) is parsed as local by most browsers for this format.
+  const dt = new Date(v);
+  if (Number.isNaN(dt.getTime())) return null;
+  return dt.toISOString();
 }
 
 export default function CreatePage() {
   const router = useRouter();
 
   const formRef = useRef<HTMLFormElement | null>(null);
+
+  // item photo refs
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // ---------- ALL HOOKS UP TOP (no hook-order crashes) ----------
+  // event flyer refs
+  const flyerInputRef = useRef<HTMLInputElement | null>(null);
+
+  // ---------- ALL HOOKS UP TOP ----------
   // auth
   const [authLoading, setAuthLoading] = useState(true);
   const [email, setEmail] = useState<string | null>(null);
@@ -86,7 +147,7 @@ export default function CreatePage() {
   // post type
   const [postType, setPostType] = useState<PostType>("give");
 
-  // shared
+  // shared (for items)
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
@@ -101,9 +162,34 @@ export default function CreatePage() {
   const [requestTimeframe, setRequestTimeframe] = useState<RequestTimeframe>("today");
   const [requestLocation, setRequestLocation] = useState("");
 
+  // event-only
+  const [eventTitle, setEventTitle] = useState("");
+  const [eventHostOrg, setEventHostOrg] = useState("");
+  const [eventCategory, setEventCategory] = useState<EventCategory>("club");
+  const [eventLocation, setEventLocation] = useState("");
+  const [eventDescription, setEventDescription] = useState("");
+  const [eventLinkUrl, setEventLinkUrl] = useState("");
+  const [eventStartLocal, setEventStartLocal] = useState<string>(() => {
+    // default: next full hour
+    const d = new Date();
+    d.setMinutes(0, 0, 0);
+    d.setHours(d.getHours() + 1);
+    return toLocalInputValue(d);
+  });
+  const [eventHasEnd, setEventHasEnd] = useState(false);
+  const [eventEndLocal, setEventEndLocal] = useState<string>(() => {
+    const d = new Date();
+    d.setMinutes(0, 0, 0);
+    d.setHours(d.getHours() + 2);
+    return toLocalInputValue(d);
+  });
+
+  const [flyerFile, setFlyerFile] = useState<File | null>(null);
+  const [flyerPreviewUrl, setFlyerPreviewUrl] = useState<string | null>(null);
+
   // options
   const [showOptions, setShowOptions] = useState(false);
-  const [hideName, setHideName] = useState(false);
+  const [hideName, setHideName] = useState(false); // applies to items and events
   const [expireChoice, setExpireChoice] = useState<ExpireChoice>("7");
 
   // submit
@@ -112,28 +198,53 @@ export default function CreatePage() {
 
   // UI-only
   const [dragOver, setDragOver] = useState(false);
+  const [flyerDragOver, setFlyerDragOver] = useState(false);
 
   const isAllowed = useMemo(() => {
     return !!email && email.toLowerCase().endsWith("@ashland.edu");
   }, [email]);
 
+  // clean item fields
   const cleanTitle = useMemo(() => title.trim(), [title]);
   const cleanDesc = useMemo(() => {
     const d = description.trim();
     return d.length ? d : null;
   }, [description]);
 
-  // UX: switching to request resets photo state + avoid never expiry on request
+  // clean event fields
+  const cleanEventTitle = useMemo(() => eventTitle.trim(), [eventTitle]);
+  const cleanEventHost = useMemo(() => eventHostOrg.trim(), [eventHostOrg]);
+  const cleanEventLoc = useMemo(() => eventLocation.trim(), [eventLocation]);
+  const cleanEventDesc = useMemo(() => eventDescription.trim(), [eventDescription]);
+  const cleanEventLink = useMemo(() => {
+    const v = eventLinkUrl.trim();
+    return v.length ? v : null;
+  }, [eventLinkUrl]);
+
+  // switching tabs: reset error + tab-specific safety resets
   useEffect(() => {
-    if (postType === "request") {
+    setMsg(null);
+
+    // if leaving give, clear item photo states
+    if (postType !== "give") {
       setFile(null);
       setPreviewUrl(null);
-      if (expireChoice === "never") setExpireChoice("7");
+      setDragOver(false);
     }
-    setMsg(null);
-  }, [postType]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // preview URL
+    // request can't be never expiry
+    if (postType === "request" && expireChoice === "never") setExpireChoice("7");
+
+    // leaving event: keep inputs (user-friendly) but reset flyer drag state
+    if (postType !== "event") {
+      setFlyerDragOver(false);
+      setFlyerFile(null);
+      setFlyerPreviewUrl(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [postType]);
+
+  // item preview URL
   useEffect(() => {
     if (!file) {
       setPreviewUrl(null);
@@ -144,7 +255,18 @@ export default function CreatePage() {
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
-  // ---------- AUTH (never stuck forever) ----------
+  // flyer preview URL
+  useEffect(() => {
+    if (!flyerFile) {
+      setFlyerPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(flyerFile);
+    setFlyerPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [flyerFile]);
+
+  // ---------- AUTH ----------
   useEffect(() => {
     let mounted = true;
 
@@ -234,34 +356,7 @@ export default function CreatePage() {
     };
   }, [userId]);
 
-  function validate(): string | null {
-    if (!isAllowed || !userId) return "Log in with your @ashland.edu email to post.";
-    if (!profileComplete) return "Complete your profile first (name + student/faculty).";
-    if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
-
-    // photo required for give
-    if (postType === "give" && !file) return "Photo is required for items. Please add a photo.";
-    if (postType === "give" && file) {
-      if (file.size > MAX_PHOTO_MB * 1024 * 1024) return `Photo too large (max ${MAX_PHOTO_MB}MB).`;
-      if (!isAllowedImage(file)) return "Upload JPG, PNG, or WEBP (HEIC not supported yet).";
-    }
-    return null;
-  }
-
-  const canSubmit = useMemo(() => {
-    if (!isAllowed || !userId) return false;
-    if (!profileComplete) return false;
-    if (cleanTitle.length < 3) return false;
-
-    if (postType === "give" && !file) return false;
-    if (postType === "give" && file) {
-      if (file.size > MAX_PHOTO_MB * 1024 * 1024) return false;
-      if (!isAllowedImage(file)) return false;
-    }
-    return true;
-  }, [isAllowed, userId, profileComplete, cleanTitle, postType, file]);
-
-  function handleFilePicked(f: File | null) {
+  function handleItemFilePicked(f: File | null) {
     setMsg(null);
 
     if (!f) {
@@ -281,6 +376,130 @@ export default function CreatePage() {
     setFile(f);
   }
 
+  function handleFlyerPicked(f: File | null) {
+    setMsg(null);
+
+    if (!f) {
+      setFlyerFile(null);
+      return;
+    }
+    if (f.size > MAX_FLYER_MB * 1024 * 1024) {
+      setFlyerFile(null);
+      setMsg(`Flyer too large (max ${MAX_FLYER_MB}MB).`);
+      return;
+    }
+    if (!isAllowedImage(f)) {
+      setFlyerFile(null);
+      setMsg("Flyer must be JPG, PNG, or WEBP.");
+      return;
+    }
+    setFlyerFile(f);
+  }
+
+  function validate(): string | null {
+    if (!isAllowed || !userId) return "Log in with your @ashland.edu email to post.";
+    if (!profileComplete) return "Complete your profile first (name + student/faculty).";
+
+    if (postType === "event") {
+      if (cleanEventTitle.length < 3) return "Event title must be at least 3 characters.";
+      if (cleanEventHost.length < 2) return "Host Club/Organisation is required.";
+      if (cleanEventLoc.length < 2) return "Location is required.";
+      if (cleanEventDesc.length < 5) return "Description is required (at least a few words).";
+
+      const startISO = parseLocalDatetimeToISO(eventStartLocal);
+      if (!startISO) return "Start time is required.";
+
+      if (eventHasEnd) {
+        const endISO = parseLocalDatetimeToISO(eventEndLocal);
+        if (!endISO) return "End time is invalid.";
+        if (new Date(endISO).getTime() <= new Date(startISO).getTime()) return "End time must be after start time.";
+      }
+
+      if (flyerFile) {
+        if (flyerFile.size > MAX_FLYER_MB * 1024 * 1024) return `Flyer too large (max ${MAX_FLYER_MB}MB).`;
+        if (!isAllowedImage(flyerFile)) return "Flyer must be JPG, PNG, or WEBP.";
+      }
+
+      // optional link validation (light)
+      if (cleanEventLink) {
+        const ok = /^https?:\/\//i.test(cleanEventLink);
+        if (!ok) return 'Link must start with "http://" or "https://".';
+      }
+
+      return null;
+    }
+
+    // items (give/request)
+    if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
+
+    if (postType === "give" && !file) return "Photo is required for items. Please add a photo.";
+    if (postType === "give" && file) {
+      if (file.size > MAX_PHOTO_MB * 1024 * 1024) return `Photo too large (max ${MAX_PHOTO_MB}MB).`;
+      if (!isAllowedImage(file)) return "Upload JPG, PNG, or WEBP (HEIC not supported yet).";
+    }
+
+    return null;
+  }
+
+  const canSubmit = useMemo(() => {
+    if (!isAllowed || !userId) return false;
+    if (!profileComplete) return false;
+
+    if (postType === "event") {
+      if (cleanEventTitle.length < 3) return false;
+      if (cleanEventHost.length < 2) return false;
+      if (cleanEventLoc.length < 2) return false;
+      if (cleanEventDesc.length < 5) return false;
+
+      const startISO = parseLocalDatetimeToISO(eventStartLocal);
+      if (!startISO) return false;
+
+      if (eventHasEnd) {
+        const endISO = parseLocalDatetimeToISO(eventEndLocal);
+        if (!endISO) return false;
+        if (new Date(endISO).getTime() <= new Date(startISO).getTime()) return false;
+      }
+
+      if (flyerFile) {
+        if (flyerFile.size > MAX_FLYER_MB * 1024 * 1024) return false;
+        if (!isAllowedImage(flyerFile)) return false;
+      }
+
+      if (cleanEventLink) {
+        const ok = /^https?:\/\//i.test(cleanEventLink);
+        if (!ok) return false;
+      }
+
+      return true;
+    }
+
+    // items
+    if (cleanTitle.length < 3) return false;
+
+    if (postType === "give" && !file) return false;
+    if (postType === "give" && file) {
+      if (file.size > MAX_PHOTO_MB * 1024 * 1024) return false;
+      if (!isAllowedImage(file)) return false;
+    }
+    return true;
+  }, [
+    isAllowed,
+    userId,
+    profileComplete,
+    postType,
+    cleanTitle,
+    file,
+    cleanEventTitle,
+    cleanEventHost,
+    cleanEventLoc,
+    cleanEventDesc,
+    cleanEventLink,
+    eventStartLocal,
+    eventHasEnd,
+    eventEndLocal,
+    flyerFile,
+  ]);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setMsg(null);
@@ -295,6 +514,82 @@ export default function CreatePage() {
     setSaving(true);
 
     try {
+      // ==========================
+      // EVENT SUBMIT
+      // ==========================
+      if (postType === "event") {
+        const starts_at = parseLocalDatetimeToISO(eventStartLocal);
+        const ends_at = eventHasEnd ? parseLocalDatetimeToISO(eventEndLocal) : null;
+
+        if (!starts_at) throw new Error("Invalid start time.");
+
+        const baseEvent: any = {
+          created_by: userId,
+          title: cleanEventTitle,
+          host_org: cleanEventHost,
+          category: eventCategory,
+          location: cleanEventLoc,
+          description: cleanEventDesc,
+          starts_at,
+          ends_at,
+          link_url: cleanEventLink,
+          photo_url: null,
+          is_anonymous: hideName,
+        };
+
+        const { data: created, error: createErr } = await supabase
+          .from("events")
+          .insert([baseEvent])
+          .select("id")
+          .single();
+
+        if (createErr || !created?.id) throw new Error(createErr?.message || "Failed to create event.");
+
+        const eventId = String(created.id);
+
+        // Flyer optional
+        if (!flyerFile) {
+          router.push(`/events`); // build later; change to /feed if you want
+          router.refresh();
+          return;
+        }
+
+        const ext = getExt(flyerFile.name);
+        const path = `events/${userId}/${eventId}/${uuidSafe()}.${ext}`;
+
+        const { error: uploadErr } = await supabase.storage.from("event-photos").upload(path, flyerFile, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: flyerFile.type || undefined,
+        });
+
+        if (uploadErr) {
+          setMsg(`Event posted, but flyer upload failed: ${uploadErr.message}`);
+          router.push(`/events`);
+          router.refresh();
+          return;
+        }
+
+        const { data: pub } = supabase.storage.from("event-photos").getPublicUrl(path);
+        const publicUrl = pub.publicUrl;
+
+        const { error: updateErr } = await supabase.from("events").update({ photo_url: publicUrl }).eq("id", eventId);
+
+        if (updateErr) {
+          setMsg(`Flyer uploaded, but photo_url update failed: ${updateErr.message}`);
+          router.push(`/events`);
+          router.refresh();
+          return;
+        }
+
+        router.push(`/events`);
+        router.refresh();
+        return;
+      }
+
+      // ==========================
+      // ITEMS SUBMIT (Give/Request)
+      // ==========================
       const { untilCancel, expiresAt } = computeExpiry(expireChoice);
 
       const baseInsert: any = {
@@ -323,11 +618,7 @@ export default function CreatePage() {
         baseInsert.request_location = requestLocation.trim().length ? requestLocation.trim() : null;
       }
 
-      const { data: created, error: createErr } = await supabase
-        .from("items")
-        .insert([baseInsert])
-        .select("id")
-        .single();
+      const { data: created, error: createErr } = await supabase.from("items").insert([baseInsert]).select("id").single();
 
       if (createErr || !created?.id) throw new Error(createErr?.message || "Failed to create post.");
 
@@ -382,7 +673,7 @@ export default function CreatePage() {
     }
   }
 
-  // ---------- UI styles (ChatGPT-ish) ----------
+  // ---------- UI styles ----------
   const ui = {
     page: {
       minHeight: "100vh",
@@ -453,6 +744,7 @@ export default function CreatePage() {
       padding: 6,
       width: "fit-content",
       position: "relative",
+      flexWrap: "wrap",
     } as React.CSSProperties,
     segBtn: (active: boolean) =>
       ({
@@ -626,17 +918,29 @@ export default function CreatePage() {
   const helperText =
     postType === "give"
       ? "Start with a clear title + a photo. Everything else is quick choices."
-      : "Ask clearly. The right person will message you.";
-  const stickyHint =
-    cleanTitle.length < 3
+      : postType === "request"
+      ? "Ask clearly. The right person will message you."
+      : "Post a campus event so students don’t miss it.";
+
+  const stickyHint = useMemo(() => {
+    if (postType === "event") {
+      if (cleanEventTitle.length < 3) return "Add an event title (3+ characters).";
+      if (cleanEventHost.length < 2) return "Host Club/Organisation is required.";
+      if (cleanEventLoc.length < 2) return "Location is required.";
+      if (cleanEventDesc.length < 5) return "Add a short description.";
+      return "Looks good — ready to post.";
+    }
+
+    return cleanTitle.length < 3
       ? "Add a clear title (3+ characters)."
       : postType === "give"
-        ? file
-          ? "Looks good — ready to post."
-          : "Photo is required for Give posts."
-        : "Ready to post.";
+      ? file
+        ? "Looks good — ready to post."
+        : "Photo is required for Give posts."
+      : "Ready to post.";
+  }, [postType, cleanTitle, file, cleanEventTitle, cleanEventHost, cleanEventLoc, cleanEventDesc]);
 
-  const primaryButton = postType === "give" ? "Post item" : "Post request";
+  const primaryButton = postType === "give" ? "Post item" : postType === "request" ? "Post request" : "Post event";
 
   // ---------- RENDER STATES ----------
   if (authLoading || profileLoading) {
@@ -731,7 +1035,7 @@ export default function CreatePage() {
         <div style={ui.hero}>
           <div style={ui.glow} />
           <div style={{ position: "relative" }}>
-            <h1 style={ui.h1}>Create a post</h1>
+            <h1 style={ui.h1}>Create</h1>
             <p style={ui.sub}>{helperText}</p>
 
             <div style={ui.segmentWrap}>
@@ -741,255 +1045,533 @@ export default function CreatePage() {
               <button type="button" onClick={() => setPostType("request")} style={ui.segBtn(postType === "request")}>
                 Request
               </button>
+              <button type="button" onClick={() => setPostType("event")} style={ui.segBtn(postType === "event")}>
+                Event
+              </button>
             </div>
           </div>
         </div>
 
         <form ref={formRef} onSubmit={handleSubmit} style={ui.convo}>
-          {/* Title bubble */}
-          <div style={ui.row("left")}>
-            <div style={ui.bubble("left")}>
-              <div style={ui.mini}>ScholarSwap</div>
-              <div style={{ fontWeight: 950 }}>
-                {postType === "give" ? "What are you giving away?" : "What do you need?"}
+          {/* ===================== EVENT FORM ===================== */}
+          {postType === "event" && (
+            <>
+              {/* Event title bubble */}
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap • Events</div>
+                  <div style={{ fontWeight: 950 }}>What’s the event called?</div>
+                  <div style={{ marginTop: 10 }}>
+                    <input
+                      type="text"
+                      placeholder='Example: "Finance Club: Everence Panel"'
+                      value={eventTitle}
+                      onChange={(e) => setEventTitle(e.target.value)}
+                      style={ui.input}
+                    />
+                  </div>
+                  <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>Tip: short + clear + specific.</div>
+                </div>
               </div>
-              <div style={{ marginTop: 10 }}>
-                <input
-                  type="text"
-                  placeholder={
-                    postType === "give"
-                      ? 'Example: "Bedford Handbook (good condition)"'
-                      : 'Example: "Need a ride Friday 6am"'
-                  }
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  style={ui.input}
-                />
-              </div>
-              <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
-                Tip: lead with the noun + condition + key detail.
-              </div>
-            </div>
-          </div>
 
-          {/* Details bubble */}
-          <div style={ui.row("left")}>
-            <div style={ui.bubble("left")}>
-              <div style={ui.mini}>ScholarSwap</div>
-              <div style={{ fontWeight: 950 }}>
-                {postType === "give" ? "Any details someone should know?" : "Add context so people can help fast."}
-              </div>
-              <div style={{ marginTop: 10 }}>
-                <textarea
-                  placeholder={postType === "give" ? "What’s included? any flaws?" : "Where/when/how urgent? Keep it simple."}
-                  rows={4}
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  style={ui.textarea}
-                />
-              </div>
-            </div>
-          </div>
+              {/* Host/Location bubble */}
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap • Events</div>
+                  <div style={{ fontWeight: 950 }}>Host + location</div>
 
-          {/* Give: photo bubble */}
-          {postType === "give" && (
-            <div style={ui.row("left")}>
-              <div style={ui.bubble("left")}>
-                <div style={ui.mini}>ScholarSwap</div>
-                <div style={{ fontWeight: 950 }}>Add a photo (required)</div>
-
-                <div
-                  style={{ marginTop: 10 }}
-                  onDragEnter={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setDragOver(true);
-                  }}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setDragOver(true);
-                  }}
-                  onDragLeave={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setDragOver(false);
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setDragOver(false);
-                    const dropped = e.dataTransfer.files?.[0] ?? null;
-                    if (dropped) handleFilePicked(dropped);
-                  }}
-                >
-                  <div style={ui.drop(dragOver, !!previewUrl)}>
-                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                      <div
-                        style={{
-                          width: 42,
-                          height: 42,
-                          borderRadius: 14,
-                          background: "rgba(16,185,129,0.12)",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontWeight: 950,
-                          color: "#065f46",
-                        }}
-                      >
-                        ⬆
+                  <div style={{ marginTop: 10, ...ui.grid2 }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
+                        Host Club/Organisation <span style={{ color: "#b91c1c" }}>*</span>
                       </div>
-                      <div>
-                        <div style={{ fontWeight: 950 }}>
-                          {previewUrl ? "Photo attached" : dragOver ? "Drop it here" : "Drag & drop a photo"}
-                        </div>
-                        <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
-                          JPG / PNG / WEBP • max {MAX_PHOTO_MB}MB
-                        </div>
-                      </div>
+                      <input
+                        type="text"
+                        placeholder='Example: "Finance Club"'
+                        value={eventHostOrg}
+                        onChange={(e) => setEventHostOrg(e.target.value)}
+                        style={ui.input}
+                      />
                     </div>
 
-                    <div style={{ display: "flex", gap: 10 }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
+                        Location <span style={{ color: "#b91c1c" }}>*</span>
+                      </div>
                       <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        onChange={(e) => handleFilePicked(e.target.files?.[0] ?? null)}
-                        style={{ display: "none" }}
+                        type="text"
+                        placeholder='Example: "Dauch 209"'
+                        value={eventLocation}
+                        onChange={(e) => setEventLocation(e.target.value)}
+                        style={ui.input}
                       />
-                      <button type="button" style={ui.ghostBtn} onClick={() => fileInputRef.current?.click()}>
-                        {previewUrl ? "Change" : "Choose"}
-                      </button>
-                      {file && (
-                        <button type="button" style={ui.dangerBtn} onClick={() => setFile(null)}>
-                          Remove
-                        </button>
-                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Category + time bubble */}
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap • Events</div>
+                  <div style={{ fontWeight: 950 }}>Category + time</div>
+
+                  <div style={{ marginTop: 10, ...ui.grid2 }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Category</div>
+                      <select
+                        value={eventCategory}
+                        onChange={(e) => setEventCategory(e.target.value as EventCategory)}
+                        style={ui.select}
+                      >
+                        <option value="club">Club</option>
+                        <option value="sports">Sports</option>
+                        <option value="party">Party</option>
+                        <option value="career">Career</option>
+                        <option value="volunteering">Volunteering</option>
+                        <option value="workshop">Workshop</option>
+                        <option value="campus">Campus</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
+                        Start time <span style={{ color: "#b91c1c" }}>*</span>
+                      </div>
+                      <input
+                        type="datetime-local"
+                        value={eventStartLocal}
+                        onChange={(e) => setEventStartLocal(e.target.value)}
+                        style={ui.input}
+                      />
                     </div>
                   </div>
 
-                  {previewUrl && (
-                    <div style={{ marginTop: 12 }}>
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={previewUrl}
-                        alt="Preview"
-                        style={{
-                          width: "100%",
-                          height: 260,
-                          objectFit: "cover",
-                          borderRadius: 18,
-                          border: "1px solid #e5e7eb",
-                          boxShadow: "0 16px 40px rgba(0,0,0,0.08)",
-                        }}
+                  <div style={{ marginTop: 10 }}>
+                    <button
+                      type="button"
+                      style={{
+                        ...ui.ghostBtn,
+                        width: "100%",
+                        borderRadius: 14,
+                        background: eventHasEnd ? "rgba(16,185,129,0.10)" : "white",
+                        borderColor: eventHasEnd ? "rgba(16,185,129,0.35)" : "#e5e7eb",
+                        color: eventHasEnd ? "#065f46" : "#111827",
+                        fontWeight: 950,
+                      }}
+                      onClick={() => setEventHasEnd((v) => !v)}
+                    >
+                      {eventHasEnd ? "End time: ON" : "Add optional end time"}
+                    </button>
+                  </div>
+
+                  {eventHasEnd && (
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>End time</div>
+                      <input
+                        type="datetime-local"
+                        value={eventEndLocal}
+                        onChange={(e) => setEventEndLocal(e.target.value)}
+                        style={ui.input}
                       />
                     </div>
                   )}
                 </div>
               </div>
-            </div>
-          )}
 
-          {/* Essentials bubble */}
-          {postType === "give" && (
-            <div style={ui.row("left")}>
-              <div style={ui.bubble("left")}>
-                <div style={ui.mini}>ScholarSwap</div>
-                <div style={{ fontWeight: 950 }}>Quick choices (helps discovery)</div>
-
-                <div style={{ marginTop: 10, ...ui.grid2 }}>
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Category</div>
-                    <select
-                      value={giveCategory}
-                      onChange={(e) => setGiveCategory(e.target.value as GiveCategory)}
-                      style={ui.select}
-                    >
-                      <option value="books">Books</option>
-                      <option value="notes">Notes</option>
-                      <option value="electronics">Electronics</option>
-                      <option value="furniture">Furniture</option>
-                      <option value="clothing">Clothing</option>
-                      <option value="sport equipment">Sport equipment</option>
-                      <option value="stationary item">Stationary item</option>
-                      <option value="health & beauty">Health & Beauty</option>
-                      <option value="home & kitchen">Home & Kitchen</option>
-                      <option value="musical instruments">Musical Instruments</option>
-                      <option value="jeweleries">Jeweleries</option>
-                      <option value="art pieces">Art pieces</option>
-                      <option value="ride">Ride</option>
-                      <option value="others">Others</option>
-                    </select>
+              {/* Description bubble */}
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap • Events</div>
+                  <div style={{ fontWeight: 950 }}>
+                    Description <span style={{ color: "#b91c1c" }}>*</span>
                   </div>
-
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Pickup spot</div>
-                    <select
-                      value={pickupLocation}
-                      onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
-                      style={ui.select}
-                    >
-                      <option value="College Quad">College Quad</option>
-                      <option value="Safety Service Office">Safety Service Office</option>
-                      <option value="Dining Hall">Dining Hall</option>
-                    </select>
+                  <div style={{ marginTop: 10 }}>
+                    <textarea
+                      placeholder='Example: "Interactive Q&A with Everence team. Giveaways + networking."'
+                      rows={4}
+                      value={eventDescription}
+                      onChange={(e) => setEventDescription(e.target.value)}
+                      style={ui.textarea}
+                    />
                   </div>
                 </div>
               </div>
-            </div>
-          )}
 
-          {postType === "request" && (
-            <div style={ui.row("left")}>
-              <div style={ui.bubble("left")}>
-                <div style={ui.mini}>ScholarSwap</div>
-                <div style={{ fontWeight: 950 }}>Pick a type + timeframe</div>
-
-                <div style={{ marginTop: 10, ...ui.grid2 }}>
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Request type</div>
-                    <select
-                      value={requestGroup}
-                      onChange={(e) => setRequestGroup(e.target.value as RequestGroup)}
-                      style={ui.select}
-                    >
-                      <option value="logistics">Logistics (ride / moving / borrow)</option>
-                      <option value="services">Services (tutoring / tech help / haircut)</option>
-                      <option value="urgent">Urgent (charger / calculator / meds)</option>
-                      <option value="collaboration">Collaboration (club / hackathon / project)</option>
-                    </select>
+              {/* Link bubble */}
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap • Events</div>
+                  <div style={{ fontWeight: 950 }}>Optional link</div>
+                  <div style={{ marginTop: 10 }}>
+                    <input
+                      type="text"
+                      placeholder='Example: "https://instagram.com/p/..."'
+                      value={eventLinkUrl}
+                      onChange={(e) => setEventLinkUrl(e.target.value)}
+                      style={ui.input}
+                    />
                   </div>
-
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Timeframe</div>
-                    <select
-                      value={requestTimeframe}
-                      onChange={(e) => setRequestTimeframe(e.target.value as RequestTimeframe)}
-                      style={ui.select}
-                    >
-                      <option value="today">Today</option>
-                      <option value="this_week">This week</option>
-                      <option value="flexible">Flexible</option>
-                    </select>
+                  <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
+                    Link must start with http:// or https://
                   </div>
-                </div>
-
-                <div style={{ marginTop: 10 }}>
-                  <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Location (optional)</div>
-                  <input
-                    type="text"
-                    placeholder='Example: "Dorm A" or "Near dining hall"'
-                    value={requestLocation}
-                    onChange={(e) => setRequestLocation(e.target.value)}
-                    style={ui.input}
-                  />
                 </div>
               </div>
-            </div>
+
+              {/* Flyer upload bubble (optional) */}
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap • Events</div>
+                  <div style={{ fontWeight: 950 }}>Flyer / poster (optional)</div>
+
+                  <div
+                    style={{ marginTop: 10 }}
+                    onDragEnter={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setFlyerDragOver(true);
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setFlyerDragOver(true);
+                    }}
+                    onDragLeave={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setFlyerDragOver(false);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setFlyerDragOver(false);
+                      const dropped = e.dataTransfer.files?.[0] ?? null;
+                      if (dropped) handleFlyerPicked(dropped);
+                    }}
+                  >
+                    <div style={ui.drop(flyerDragOver, !!flyerPreviewUrl)}>
+                      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                        <div
+                          style={{
+                            width: 42,
+                            height: 42,
+                            borderRadius: 14,
+                            background: "rgba(16,185,129,0.12)",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontWeight: 950,
+                            color: "#065f46",
+                          }}
+                        >
+                          ⬆
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 950 }}>
+                            {flyerPreviewUrl ? "Flyer attached" : flyerDragOver ? "Drop it here" : "Drag & drop a flyer"}
+                          </div>
+                          <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+                            JPG / PNG / WEBP • max {MAX_FLYER_MB}MB
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <input
+                          ref={flyerInputRef}
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          onChange={(e) => handleFlyerPicked(e.target.files?.[0] ?? null)}
+                          style={{ display: "none" }}
+                        />
+                        <button type="button" style={ui.ghostBtn} onClick={() => flyerInputRef.current?.click()}>
+                          {flyerPreviewUrl ? "Change" : "Choose"}
+                        </button>
+                        {flyerFile && (
+                          <button type="button" style={ui.dangerBtn} onClick={() => setFlyerFile(null)}>
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {flyerPreviewUrl && (
+                      <div style={{ marginTop: 12 }}>
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={flyerPreviewUrl}
+                          alt="Flyer preview"
+                          style={{
+                            width: "100%",
+                            height: 260,
+                            objectFit: "cover",
+                            borderRadius: 18,
+                            border: "1px solid #e5e7eb",
+                            boxShadow: "0 16px 40px rgba(0,0,0,0.08)",
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </>
           )}
 
-          {/* Options drawer */}
+          {/* ===================== ITEM FORM (Give/Request) ===================== */}
+          {postType !== "event" && (
+            <>
+              {/* Title bubble */}
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap</div>
+                  <div style={{ fontWeight: 950 }}>
+                    {postType === "give" ? "What are you giving away?" : "What do you need?"}
+                  </div>
+                  <div style={{ marginTop: 10 }}>
+                    <input
+                      type="text"
+                      placeholder={
+                        postType === "give"
+                          ? 'Example: "Bedford Handbook (good condition)"'
+                          : 'Example: "Need a ride Friday 6am"'
+                      }
+                      value={title}
+                      onChange={(e) => setTitle(e.target.value)}
+                      style={ui.input}
+                    />
+                  </div>
+                  <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
+                    Tip: lead with the noun + condition + key detail.
+                  </div>
+                </div>
+              </div>
+
+              {/* Details bubble */}
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap</div>
+                  <div style={{ fontWeight: 950 }}>
+                    {postType === "give" ? "Any details someone should know?" : "Add context so people can help fast."}
+                  </div>
+                  <div style={{ marginTop: 10 }}>
+                    <textarea
+                      placeholder={postType === "give" ? "What’s included? any flaws?" : "Where/when/how urgent? Keep it simple."}
+                      rows={4}
+                      value={description}
+                      onChange={(e) => setDescription(e.target.value)}
+                      style={ui.textarea}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Give: photo bubble */}
+              {postType === "give" && (
+                <div style={ui.row("left")}>
+                  <div style={ui.bubble("left")}>
+                    <div style={ui.mini}>ScholarSwap</div>
+                    <div style={{ fontWeight: 950 }}>Add a photo (required)</div>
+
+                    <div
+                      style={{ marginTop: 10 }}
+                      onDragEnter={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDragOver(true);
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDragOver(true);
+                      }}
+                      onDragLeave={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDragOver(false);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDragOver(false);
+                        const dropped = e.dataTransfer.files?.[0] ?? null;
+                        if (dropped) handleItemFilePicked(dropped);
+                      }}
+                    >
+                      <div style={ui.drop(dragOver, !!previewUrl)}>
+                        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                          <div
+                            style={{
+                              width: 42,
+                              height: 42,
+                              borderRadius: 14,
+                              background: "rgba(16,185,129,0.12)",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              fontWeight: 950,
+                              color: "#065f46",
+                            }}
+                          >
+                            ⬆
+                          </div>
+                          <div>
+                            <div style={{ fontWeight: 950 }}>
+                              {previewUrl ? "Photo attached" : dragOver ? "Drop it here" : "Drag & drop a photo"}
+                            </div>
+                            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+                              JPG / PNG / WEBP • max {MAX_PHOTO_MB}MB
+                            </div>
+                          </div>
+                        </div>
+
+                        <div style={{ display: "flex", gap: 10 }}>
+                          <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept="image/jpeg,image/png,image/webp"
+                            onChange={(e) => handleItemFilePicked(e.target.files?.[0] ?? null)}
+                            style={{ display: "none" }}
+                          />
+                          <button type="button" style={ui.ghostBtn} onClick={() => fileInputRef.current?.click()}>
+                            {previewUrl ? "Change" : "Choose"}
+                          </button>
+                          {file && (
+                            <button type="button" style={ui.dangerBtn} onClick={() => setFile(null)}>
+                              Remove
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {previewUrl && (
+                        <div style={{ marginTop: 12 }}>
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={previewUrl}
+                            alt="Preview"
+                            style={{
+                              width: "100%",
+                              height: 260,
+                              objectFit: "cover",
+                              borderRadius: 18,
+                              border: "1px solid #e5e7eb",
+                              boxShadow: "0 16px 40px rgba(0,0,0,0.08)",
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Essentials bubble */}
+              {postType === "give" && (
+                <div style={ui.row("left")}>
+                  <div style={ui.bubble("left")}>
+                    <div style={ui.mini}>ScholarSwap</div>
+                    <div style={{ fontWeight: 950 }}>Quick choices (helps discovery)</div>
+
+                    <div style={{ marginTop: 10, ...ui.grid2 }}>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Category</div>
+                        <select
+                          value={giveCategory}
+                          onChange={(e) => setGiveCategory(e.target.value as GiveCategory)}
+                          style={ui.select}
+                        >
+                          <option value="books">Books</option>
+                          <option value="notes">Notes</option>
+                          <option value="electronics">Electronics</option>
+                          <option value="furniture">Furniture</option>
+                          <option value="clothing">Clothing</option>
+                          <option value="sport equipment">Sport equipment</option>
+                          <option value="stationary item">Stationary item</option>
+                          <option value="health & beauty">Health & Beauty</option>
+                          <option value="home & kitchen">Home & Kitchen</option>
+                          <option value="musical instruments">Musical Instruments</option>
+                          <option value="jeweleries">Jeweleries</option>
+                          <option value="art pieces">Art pieces</option>
+                          <option value="ride">Ride</option>
+                          <option value="others">Others</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Pickup spot</div>
+                        <select
+                          value={pickupLocation}
+                          onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
+                          style={ui.select}
+                        >
+                          <option value="College Quad">College Quad</option>
+                          <option value="Safety Service Office">Safety Service Office</option>
+                          <option value="Dining Hall">Dining Hall</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {postType === "request" && (
+                <div style={ui.row("left")}>
+                  <div style={ui.bubble("left")}>
+                    <div style={ui.mini}>ScholarSwap</div>
+                    <div style={{ fontWeight: 950 }}>Pick a type + timeframe</div>
+
+                    <div style={{ marginTop: 10, ...ui.grid2 }}>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
+                          Request type
+                        </div>
+                        <select
+                          value={requestGroup}
+                          onChange={(e) => setRequestGroup(e.target.value as RequestGroup)}
+                          style={ui.select}
+                        >
+                          <option value="logistics">Logistics (ride / moving / borrow)</option>
+                          <option value="services">Services (tutoring / tech help / haircut)</option>
+                          <option value="urgent">Urgent (charger / calculator / meds)</option>
+                          <option value="collaboration">Collaboration (club / hackathon / project)</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Timeframe</div>
+                        <select
+                          value={requestTimeframe}
+                          onChange={(e) => setRequestTimeframe(e.target.value as RequestTimeframe)}
+                          style={ui.select}
+                        >
+                          <option value="today">Today</option>
+                          <option value="this_week">This week</option>
+                          <option value="flexible">Flexible</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
+                        Location (optional)
+                      </div>
+                      <input
+                        type="text"
+                        placeholder='Example: "Dorm A" or "Near dining hall"'
+                        value={requestLocation}
+                        onChange={(e) => setRequestLocation(e.target.value)}
+                        style={ui.input}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Options drawer (shared) */}
           <div>
             <button type="button" onClick={() => setShowOptions((v) => !v)} style={ui.drawerBtn} aria-expanded={showOptions}>
               <span>More options</span>
@@ -1000,7 +1582,9 @@ export default function CreatePage() {
               <div style={ui.drawer}>
                 <div style={ui.grid2}>
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Hide my name</div>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
+                      Hide my name
+                    </div>
                     <button
                       type="button"
                       onClick={() => setHideName((v) => !v)}
@@ -1018,31 +1602,43 @@ export default function CreatePage() {
                       {hideName ? "Hidden: ON" : "Hidden: OFF"}
                     </button>
                     <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
-                      When ON, your name won’t show on the feed.
+                      When ON, your name won’t show publicly.
                     </div>
                   </div>
 
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
-                      Automatically close after
-                    </div>
-                    <select
-                      value={expireChoice}
-                      onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
-                      style={ui.select}
-                    >
-                      {postType === "request" && <option value="urgent24">Urgent (24 hours)</option>}
-                      <option value="7">7 days</option>
-                      <option value="14">14 days</option>
-                      <option value="30">30 days</option>
-                      <option value="never">Until I cancel</option>
-                    </select>
-                    {postType === "request" && expireChoice === "urgent24" && (
-                      <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
-                        Urgent requests expire in 24 hours unless you repost.
+                  {/* Expiry only applies to item requests/gives */}
+                  {postType !== "event" ? (
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
+                        Automatically close after
                       </div>
-                    )}
-                  </div>
+                      <select
+                        value={expireChoice}
+                        onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
+                        style={ui.select}
+                      >
+                        {postType === "request" && <option value="urgent24">Urgent (24 hours)</option>}
+                        <option value="7">7 days</option>
+                        <option value="14">14 days</option>
+                        <option value="30">30 days</option>
+                        <option value="never">Until I cancel</option>
+                      </select>
+                      {postType === "request" && expireChoice === "urgent24" && (
+                        <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
+                          Urgent requests expire in 24 hours unless you repost.
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
+                        Posting policy
+                      </div>
+                      <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.35 }}>
+                        Events stay visible until the start time (you’ll hide expired events on the Events feed later).
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
