@@ -27,11 +27,6 @@ type FeedRowFromView = {
   expires_at: string | null;
   interest_count: number;
   owner_role?: OwnerRole;
-
-  post_type?: PostType;
-  request_group?: string | null;
-  request_timeframe?: string | null;
-  request_location?: string | null;
 };
 
 type ItemMeta = {
@@ -49,12 +44,60 @@ type FeedRow = FeedRowFromView & {
   owner_id?: string | null;
   is_claimed?: boolean | null;
   post_type?: PostType;
+  request_group?: string | null;
+  request_timeframe?: string | null;
+  request_location?: string | null;
 };
+
+type EventCategory =
+  | "club"
+  | "sports"
+  | "party"
+  | "career"
+  | "volunteering"
+  | "workshop"
+  | "campus"
+  | "other"
+  | string;
+
+type EventRow = {
+  id: string;
+  title: string;
+  description: string;
+  host_org: string;
+  category: EventCategory;
+  location: string;
+  starts_at: string;
+  ends_at: string | null;
+  link_url: string | null;
+  photo_url: string | null;
+  is_anonymous: boolean | null;
+  created_by: string | null;
+  created_at?: string | null;
+};
+
+const NAV_APPROX_HEIGHT = 86; // your bottom nav
+const PAGE_BOTTOM_PAD = NAV_APPROX_HEIGHT + 28;
 
 function formatShortDate(d: string) {
   const dt = new Date(d);
   if (Number.isNaN(dt.getTime())) return "";
   return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function formatTimeRange(startsAtISO: string, endsAtISO: string | null) {
+  const s = new Date(startsAtISO);
+  if (Number.isNaN(s.getTime())) return "";
+  const sameDay = endsAtISO ? new Date(endsAtISO).toDateString() === s.toDateString() : true;
+  const day = s.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  const st = s.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  if (!endsAtISO) return `${day} • ${st}`;
+  const e = new Date(endsAtISO);
+  if (Number.isNaN(e.getTime())) return `${day} • ${st}`;
+  const et = e.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  if (sameDay) return `${day} • ${st}–${et}`;
+  const endDay = e.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  return `${day} ${st} → ${endDay} ${et}`;
 }
 
 function normStatus(s: string | null | undefined) {
@@ -94,25 +137,48 @@ function requestTimeframeLabel(t: string | null | undefined) {
   return "";
 }
 
+/**
+ * ✅ Attendance table assumed:
+ * table: event_attendees
+ * columns: event_id (uuid), user_id (uuid)
+ *
+ * If yours is named differently, change BOTH places:
+ * - loadMyAttendanceMap()
+ * - onAttendToggle()
+ */
+const ATTEND_TABLE = "event_attendees";
+
 export default function FeedPage() {
   const router = useRouter();
 
+  // items/requests
   const [items, setItems] = useState<FeedRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
+  const [loadingItems, setLoadingItems] = useState(true);
+  const [errItems, setErrItems] = useState<string | null>(null);
 
+  // events
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [loadingEvents, setLoadingEvents] = useState(true);
+  const [errEvents, setErrEvents] = useState<string | null>(null);
+
+  // auth
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
+  // item interests
   const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
 
-  // image modal
+  // event attendance
+  const [myAttending, setMyAttending] = useState<Record<string, boolean>>({});
+  const [savingAttendId, setSavingAttendId] = useState<string | null>(null);
+
+  // image modal (items + events)
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState<string>("");
 
   // UI state
-  const [tab, setTab] = useState<"items" | "requests">("items");
+  const [tab, setTab] = useState<"items" | "requests" | "events">("items");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"newest" | "popular">("newest");
   const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
@@ -139,17 +205,27 @@ export default function FeedPage() {
 
   async function loadMyInterestMap(uid: string, itemIds: string[]) {
     if (itemIds.length === 0) return;
-    const { data, error } = await supabase
-      .from("interests")
-      .select("item_id")
-      .eq("user_id", uid)
-      .in("item_id", itemIds);
-
+    const { data, error } = await supabase.from("interests").select("item_id").eq("user_id", uid).in("item_id", itemIds);
     if (error) return;
 
     const map: Record<string, boolean> = {};
     for (const r of (data as any[]) || []) map[String(r.item_id)] = true;
     setMyInterested(map);
+  }
+
+  async function loadMyAttendanceMap(uid: string, eventIds: string[]) {
+    if (eventIds.length === 0) return;
+    const { data, error } = await supabase
+      .from(ATTEND_TABLE)
+      .select("event_id")
+      .eq("user_id", uid)
+      .in("event_id", eventIds);
+
+    if (error) return;
+
+    const map: Record<string, boolean> = {};
+    for (const r of (data as any[]) || []) map[String(r.event_id)] = true;
+    setMyAttending(map);
   }
 
   async function loadOwnerMeta(itemIds: string[]) {
@@ -166,9 +242,9 @@ export default function FeedPage() {
     return m;
   }
 
-  async function loadFeed() {
-    setLoading(true);
-    setErr(null);
+  async function loadFeedItems() {
+    setLoadingItems(true);
+    setErrItems(null);
 
     const { data, error } = await supabase
       .from("v_feed_items")
@@ -178,8 +254,8 @@ export default function FeedPage() {
     if (error) {
       setItems([]);
       setMyInterested({});
-      setErr(error.message || "Error loading feed.");
-      setLoading(false);
+      setErrItems(error.message || "Error loading feed.");
+      setLoadingItems(false);
       return;
     }
 
@@ -193,15 +269,15 @@ export default function FeedPage() {
         ...x,
         owner_id: m?.owner_id ?? null,
         is_claimed: m?.is_claimed ?? null,
-        post_type: (m?.post_type ?? x.post_type ?? "give") as PostType,
-        request_group: m?.request_group ?? x.request_group ?? null,
-        request_timeframe: m?.request_timeframe ?? x.request_timeframe ?? null,
-        request_location: m?.request_location ?? x.request_location ?? null,
+        post_type: (m?.post_type ?? "give") as PostType,
+        request_group: m?.request_group ?? null,
+        request_timeframe: m?.request_timeframe ?? null,
+        request_location: m?.request_location ?? null,
         status: (m?.status ?? x.status ?? "available") as any,
       };
     });
 
-    // Hide ONLY completed/claimed
+    // Hide ONLY claimed
     const visible = merged.filter((x) => {
       const st = normStatus(x.status);
       const claimed = !!x.is_claimed || st === "claimed";
@@ -214,7 +290,41 @@ export default function FeedPage() {
     if (isLoggedIn && userId) await loadMyInterestMap(userId, giveIds);
     else setMyInterested({});
 
-    setLoading(false);
+    setLoadingItems(false);
+  }
+
+  async function loadFeedEvents() {
+    setLoadingEvents(true);
+    setErrEvents(null);
+
+    // show events from now onward (and a small buffer into past so "today" isn't lost)
+    const nowMinus6h = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+
+    const { data, error } = await supabase
+      .from("events")
+      .select("id,title,description,host_org,category,location,starts_at,ends_at,link_url,photo_url,is_anonymous,created_by,created_at")
+      .gte("starts_at", nowMinus6h)
+      .order("starts_at", { ascending: true });
+
+    if (error) {
+      setEvents([]);
+      setMyAttending({});
+      setErrEvents(error.message || "Error loading events.");
+      setLoadingEvents(false);
+      return;
+    }
+
+    const rows = (data as EventRow[]) || [];
+    setEvents(rows);
+
+    if (isLoggedIn && userId) {
+      const ids = rows.map((e) => e.id);
+      await loadMyAttendanceMap(userId, ids);
+    } else {
+      setMyAttending({});
+    }
+
+    setLoadingEvents(false);
   }
 
   async function onPrimaryAction(item: FeedRow) {
@@ -264,6 +374,42 @@ export default function FeedPage() {
     setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
   }
 
+  async function onAttendToggle(ev: EventRow) {
+    if (!isLoggedIn || !userId) {
+      router.push("/me");
+      return;
+    }
+
+    const isMine = !!ev.created_by && ev.created_by === userId;
+    if (isMine) return;
+
+    const already = myAttending[ev.id] === true;
+    setSavingAttendId(ev.id);
+
+    if (already) {
+      const { error } = await supabase.from(ATTEND_TABLE).delete().eq("event_id", ev.id).eq("user_id", userId);
+      setSavingAttendId(null);
+      if (error) return alert(error.message);
+
+      setMyAttending((p) => ({ ...p, [ev.id]: false }));
+      return;
+    }
+
+    const { error } = await supabase.from(ATTEND_TABLE).insert([{ event_id: ev.id, user_id: userId }]);
+    setSavingAttendId(null);
+
+    if (error) {
+      const msg = error.message.toLowerCase();
+      if (msg.includes("duplicate") || msg.includes("unique")) {
+        setMyAttending((p) => ({ ...p, [ev.id]: true }));
+        return;
+      }
+      return alert(error.message);
+    }
+
+    setMyAttending((p) => ({ ...p, [ev.id]: true }));
+  }
+
   // micro-delight pulse while typing
   useEffect(() => {
     if (!query) return;
@@ -272,7 +418,7 @@ export default function FeedPage() {
     return () => clearTimeout(t);
   }, [query]);
 
-  // when switching tabs, reset item-only filters so Requests doesn't feel "behind"
+  // when switching tabs, reset tab-specific filters
   useEffect(() => {
     setQuery("");
     setCategoryFilter("all");
@@ -282,12 +428,13 @@ export default function FeedPage() {
   useEffect(() => {
     (async () => {
       await syncAuth();
-      await loadFeed();
+      await Promise.all([loadFeedItems(), loadFeedEvents()]);
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
       syncAuth();
-      loadFeed();
+      loadFeedItems();
+      loadFeedEvents();
     });
 
     return () => sub.subscription.unsubscribe();
@@ -364,17 +511,20 @@ export default function FeedPage() {
     return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
   }, [items]);
 
-  const tabbed = useMemo(() => {
+  // items/request list filtered by tab
+  const tabbedItems = useMemo(() => {
     return items.filter((x) => {
       const pt = (x.post_type ?? "give") as PostType;
-      return tab === "items" ? pt !== "request" : pt === "request";
+      if (tab === "items") return pt !== "request";
+      if (tab === "requests") return pt === "request";
+      return false;
     });
   }, [items, tab]);
 
-  const filtered = useMemo(() => {
+  const filteredItems = useMemo(() => {
     const q = query.trim().toLowerCase();
 
-    let list = tabbed.filter((x) => {
+    let list = tabbedItems.filter((x) => {
       const pt = (x.post_type ?? "give") as PostType;
 
       if (roleFilter !== "all") {
@@ -413,11 +563,37 @@ export default function FeedPage() {
     }
 
     return list;
-  }, [tabbed, query, sort, roleFilter, categoryFilter, tab]);
+  }, [tabbedItems, query, sort, roleFilter, categoryFilter, tab]);
+
+  // events filtered
+  const filteredEvents = useMemo(() => {
+    if (tab !== "events") return [];
+    const q = query.trim().toLowerCase();
+    let list = [...events];
+
+    if (q) {
+      list = list.filter((e) => {
+        const blob = [e.title, e.description, e.host_org, e.category ?? "", e.location, e.link_url ?? ""]
+          .join(" ")
+          .toLowerCase();
+        return blob.includes(q);
+      });
+    }
+
+    // sort for events: "newest" means soonest? We'll interpret:
+    // - newest: soonest upcoming first (chronological)
+    // - popular: keep soonest as well (until you add counts)
+    list = list.sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
+    return list;
+  }, [tab, events, query]);
+
+  const showingCount = tab === "events" ? filteredEvents.length : filteredItems.length;
+  const loading = tab === "events" ? loadingEvents : loadingItems;
+  const err = tab === "events" ? errEvents : errItems;
 
   return (
     <div className={`${brandFont.className} page`}>
-      {/* CLEAN LIGHT HEADER (Create-like) */}
+      {/* HEADER */}
       <header className="topbar">
         {/* Row 1 */}
         <div className="row brandRow">
@@ -444,7 +620,7 @@ export default function FeedPage() {
 
         {/* Row 2 */}
         <div className="row tabsRow">
-          <div className="seg" role="tablist" aria-label="Feed tabs">
+          <div className="seg3" role="tablist" aria-label="Feed tabs">
             <button className={`segBtn ${tab === "items" ? "active" : ""}`} onClick={() => setTab("items")} type="button">
               Items
             </button>
@@ -455,7 +631,17 @@ export default function FeedPage() {
             >
               Requests
             </button>
-            <span className={`segIndicator ${tab === "items" ? "left" : "right"}`} aria-hidden="true" />
+            <button
+              className={`segBtn ${tab === "events" ? "active" : ""}`}
+              onClick={() => setTab("events")}
+              type="button"
+            >
+              Events
+            </button>
+            <span
+              className={`segIndicator3 ${tab === "items" ? "pos0" : tab === "requests" ? "pos1" : "pos2"}`}
+              aria-hidden="true"
+            />
           </div>
 
           <button
@@ -488,7 +674,7 @@ export default function FeedPage() {
               onChange={(e) => setQuery(e.target.value)}
               onFocus={() => setSearchFocused(true)}
               onBlur={() => setSearchFocused(false)}
-              placeholder={tab === "items" ? "Search items, categories…" : "Search requests, locations…"}
+              placeholder={tab === "events" ? "Search events, hosts, locations…" : tab === "items" ? "Search items, categories…" : "Search requests, locations…"}
               autoCorrect="off"
               autoCapitalize="none"
               spellCheck={false}
@@ -521,9 +707,11 @@ export default function FeedPage() {
         </div>
 
         <div className="subline">
-          <div className="subTitle">{tab === "items" ? "Public Items" : "Public Requests"}</div>
+          <div className="subTitle">
+            {tab === "items" ? "Public Items" : tab === "requests" ? "Public Requests" : "Campus Events"}
+          </div>
           <div className="count">
-            Showing <b>{filtered.length}</b>
+            Showing <b>{showingCount}</b>
           </div>
         </div>
 
@@ -547,7 +735,7 @@ export default function FeedPage() {
                 <div className="sheetLabel">Sort</div>
                 <div className="togRow">
                   <button className={`tog ${sort === "newest" ? "togOn" : ""}`} onClick={() => setSort("newest")} type="button">
-                    ↕️ Newest
+                    ↕️ {tab === "events" ? "Soonest" : "Newest"}
                   </button>
                   <button className={`tog ${sort === "popular" ? "togOn" : ""}`} onClick={() => setSort("popular")} type="button">
                     🔥 Popular
@@ -555,28 +743,31 @@ export default function FeedPage() {
                 </div>
               </div>
 
-              <div className="sheetBlock">
-                <div className="sheetLabel">Lister</div>
-                <div className="togRow">
-                  <button className={`tog ${roleFilter === "all" ? "togOn" : ""}`} onClick={() => setRoleFilter("all")} type="button">
-                    👤 All
-                  </button>
-                  <button
-                    className={`tog ${roleFilter === "student" ? "togOn" : ""}`}
-                    onClick={() => setRoleFilter("student")}
-                    type="button"
-                  >
-                    🎓 Student
-                  </button>
-                  <button
-                    className={`tog ${roleFilter === "faculty" ? "togOn" : ""}`}
-                    onClick={() => setRoleFilter("faculty")}
-                    type="button"
-                  >
-                    🧑‍🏫 Faculty
-                  </button>
+              {/* Lister filter applies to items/requests only (events don’t have owner_role in this page) */}
+              {tab !== "events" && (
+                <div className="sheetBlock">
+                  <div className="sheetLabel">Lister</div>
+                  <div className="togRow">
+                    <button className={`tog ${roleFilter === "all" ? "togOn" : ""}`} onClick={() => setRoleFilter("all")} type="button">
+                      👤 All
+                    </button>
+                    <button
+                      className={`tog ${roleFilter === "student" ? "togOn" : ""}`}
+                      onClick={() => setRoleFilter("student")}
+                      type="button"
+                    >
+                      🎓 Student
+                    </button>
+                    <button
+                      className={`tog ${roleFilter === "faculty" ? "togOn" : ""}`}
+                      onClick={() => setRoleFilter("faculty")}
+                      type="button"
+                    >
+                      🧑‍🏫 Faculty
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="sheetActions">
                 <button
@@ -603,106 +794,197 @@ export default function FeedPage() {
       {/* GRID */}
       <main className="main">
         <div className="grid">
-          {filtered.map((item) => {
-            const postType = (item.post_type ?? "give") as PostType;
-            const isMine = !!userId && !!item.owner_id && item.owner_id === userId;
-            const interested = myInterested[item.id] === true;
+          {/* EVENTS */}
+          {tab === "events" &&
+            filteredEvents.map((ev) => {
+              const isMine = !!userId && !!ev.created_by && ev.created_by === userId;
+              const attending = myAttending[ev.id] === true;
 
-            const group = requestGroupLabel(item.request_group);
-            const tf = requestTimeframeLabel(item.request_timeframe);
-            const loc = (item.request_location ?? "").trim();
-
-            return (
-              <article key={item.id} className={`card ${postType === "request" ? "cardRequest" : ""}`}>
-                {postType === "request" ? (
-                  <div className="reqHero">
-                    <div className="badge badgeRequest">{statusLabel(item.status, postType)}</div>
-                    <div className="reqMeta">
-                      {group}
-                      {tf ? ` • ${tf}` : ""}
-                      {loc ? ` • ${loc}` : ""}
-                    </div>
-                    <div className="title clamp2">{item.title}</div>
-                  </div>
-                ) : (
+              return (
+                <article key={ev.id} className="card cardEvent">
                   <div className="media">
-                    <div className="badge badgeItem">{statusLabel(item.status, postType)}</div>
+                    <div className="badge badgeEvent">EVENT</div>
 
-                    {item.photo_url ? (
+                    {ev.photo_url ? (
                       <button
                         className="mediaBtn"
                         onClick={() => {
-                          setOpenImg(item.photo_url!);
-                          setOpenTitle(item.title);
+                          setOpenImg(ev.photo_url!);
+                          setOpenTitle(ev.title);
                         }}
-                        aria-label="Open photo"
+                        aria-label="Open flyer"
                         type="button"
                       >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={item.photo_url} alt={item.title} loading="lazy" className="mediaImg" />
+                        <img src={ev.photo_url} alt={ev.title} loading="lazy" className="mediaImg" />
                       </button>
                     ) : (
-                      <div className="noPhoto">No photo</div>
+                      <div className="noPhoto">No flyer</div>
                     )}
                   </div>
-                )}
 
-                <div className="body">
-                  <div className="metaRow">
-                    <span className="meta">
-                      {postType === "request"
-                        ? `Type: ${group}`
-                        : item.category
-                        ? `Category: ${item.category}`
-                        : "Category: —"}
-                    </span>
-                    {item.owner_role ? <span className="meta">• {item.owner_role}</span> : null}
-                    {isMine ? <span className="mine">Yours</span> : null}
+                  <div className="body">
+                    <div className="metaRow">
+                      <span className="meta">Host: {ev.is_anonymous ? "Anonymous" : ev.host_org}</span>
+                      <span className="meta">• {String(ev.category || "other")}</span>
+                      {isMine ? <span className="mine">Yours</span> : null}
+                    </div>
+
+                    <div className="title">{ev.title}</div>
+
+                    <div className="hint">
+                      {formatTimeRange(ev.starts_at, ev.ends_at)} • {ev.location}
+                    </div>
+
+                    <div className="desc clamp2">{ev.description}</div>
+
+                    <div className="footerRow">
+                      {ev.link_url ? (
+                        <span className="small">
+                          Link included
+                        </span>
+                      ) : (
+                        <span className="small">No link</span>
+                      )}
+                      <span className="small">Starts: {formatShortDate(ev.starts_at)}</span>
+                    </div>
+
+                    <div className="actions">
+                      <button className="btn btnGhost" onClick={() => router.push(`/event/${ev.id}`)} type="button">
+                        View
+                      </button>
+
+                      <button
+                        className={`btn btnPrimary ${isMine ? "btnDisabled" : attending ? "btnOn" : ""}`}
+                        onClick={() => onAttendToggle(ev)}
+                        disabled={savingAttendId === ev.id || isMine}
+                        type="button"
+                      >
+                        {isMine
+                          ? "Yours"
+                          : savingAttendId === ev.id
+                          ? "Saving…"
+                          : isLoggedIn
+                          ? attending
+                            ? "Attending"
+                            : "Attend"
+                          : "Attend (login)"}
+                      </button>
+                    </div>
                   </div>
+                </article>
+              );
+            })}
 
-                  {postType !== "request" ? <div className="title">{item.title}</div> : null}
+          {/* ITEMS + REQUESTS */}
+          {tab !== "events" &&
+            filteredItems.map((item) => {
+              const postType = (item.post_type ?? "give") as PostType;
+              const isMine = !!userId && !!item.owner_id && item.owner_id === userId;
+              const interested = myInterested[item.id] === true;
 
-                  {postType !== "request" && statusHint(item.status, postType) ? (
-                    <div className="hint">{statusHint(item.status, postType)}</div>
-                  ) : null}
+              const group = requestGroupLabel(item.request_group);
+              const tf = requestTimeframeLabel(item.request_timeframe);
+              const loc = (item.request_location ?? "").trim();
 
-                  <div className="desc clamp2">{item.description || "—"}</div>
+              return (
+                <article key={item.id} className={`card ${postType === "request" ? "cardRequest" : ""}`}>
+                  {postType === "request" ? (
+                    <div className="reqHero">
+                      <div className="badge badgeRequest">{statusLabel(item.status, postType)}</div>
+                      <div className="reqMeta">
+                        {group}
+                        {tf ? ` • ${tf}` : ""}
+                        {loc ? ` • ${loc}` : ""}
+                      </div>
+                      <div className="title clamp2">{item.title}</div>
+                    </div>
+                  ) : (
+                    <div className="media">
+                      <div className="badge badgeItem">{statusLabel(item.status, postType)}</div>
 
-                  <div className="footerRow">
-                    {postType === "request" ? <span className="small">Tap to offer help</span> : <span className="small">{item.interest_count || 0} requests</span>}
-                    {item.expires_at ? <span className="small">Ends: {formatShortDate(item.expires_at)}</span> : null}
+                      {item.photo_url ? (
+                        <button
+                          className="mediaBtn"
+                          onClick={() => {
+                            setOpenImg(item.photo_url!);
+                            setOpenTitle(item.title);
+                          }}
+                          aria-label="Open photo"
+                          type="button"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={item.photo_url} alt={item.title} loading="lazy" className="mediaImg" />
+                        </button>
+                      ) : (
+                        <div className="noPhoto">No photo</div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="body">
+                    <div className="metaRow">
+                      <span className="meta">
+                        {postType === "request"
+                          ? `Type: ${group}`
+                          : item.category
+                          ? `Category: ${item.category}`
+                          : "Category: —"}
+                      </span>
+                      {item.owner_role ? <span className="meta">• {item.owner_role}</span> : null}
+                      {isMine ? <span className="mine">Yours</span> : null}
+                    </div>
+
+                    {postType !== "request" ? <div className="title">{item.title}</div> : null}
+
+                    {postType !== "request" && statusHint(item.status, postType) ? (
+                      <div className="hint">{statusHint(item.status, postType)}</div>
+                    ) : null}
+
+                    <div className="desc clamp2">{item.description || "—"}</div>
+
+                    <div className="footerRow">
+                      {postType === "request" ? (
+                        <span className="small">Tap to offer help</span>
+                      ) : (
+                        <span className="small">{item.interest_count || 0} requests</span>
+                      )}
+                      {item.expires_at ? <span className="small">Ends: {formatShortDate(item.expires_at)}</span> : null}
+                    </div>
+
+                    {/* ✅ BOTH BUTTONS: View + Primary */}
+                    <div className="actions">
+                      <button className="btn btnGhost" onClick={() => router.push(`/item/${item.id}`)} type="button">
+                        View
+                      </button>
+
+                      <button
+                        className={`btn btnPrimary ${isMine ? "btnDisabled" : ""} ${
+                          postType !== "request" && interested ? "btnOn" : ""
+                        }`}
+                        onClick={() => onPrimaryAction(item)}
+                        disabled={savingId === item.id || isMine}
+                        type="button"
+                      >
+                        {isMine
+                          ? "Yours"
+                          : savingId === item.id
+                          ? "Saving…"
+                          : postType === "request"
+                          ? isLoggedIn
+                            ? "Offer help"
+                            : "Offer (login)"
+                          : isLoggedIn
+                          ? interested
+                            ? "Requested"
+                            : "Request"
+                          : "Request (login)"}
+                      </button>
+                    </div>
                   </div>
-
-                  <div className="actions">
-                    <button className="btn btnGhost" onClick={() => router.push(`/item/${item.id}`)} type="button">
-                      View
-                    </button>
-
-                    <button
-                      className={`btn btnPrimary ${isMine ? "btnDisabled" : ""}`}
-                      onClick={() => onPrimaryAction(item)}
-                      disabled={savingId === item.id || isMine}
-                      type="button"
-                    >
-                      {isMine
-                        ? "Yours"
-                        : savingId === item.id
-                        ? "Saving…"
-                        : postType === "request"
-                        ? isLoggedIn
-                          ? "Offer help"
-                          : "Offer (login)"
-                        : isLoggedIn
-                        ? interested
-                          ? "Requested"
-                          : "Request"
-                        : "Request (login)"}
-                    </button>
-                  </div>
-                </div>
-              </article>
-            );
-          })}
+                </article>
+              );
+            })}
         </div>
       </main>
 
@@ -722,7 +1004,6 @@ export default function FeedPage() {
         </div>
       )}
 
-      {/* ✅ Light, Create-like styles */}
       <style jsx>{`
         .page {
           min-height: 100vh;
@@ -730,7 +1011,7 @@ export default function FeedPage() {
           color: #0f172a;
         }
 
-        /* ====== TOPBAR (3 rows) ====== */
+        /* ====== TOPBAR ====== */
         .topbar {
           position: sticky;
           top: 0;
@@ -824,14 +1105,14 @@ export default function FeedPage() {
           padding-bottom: 6px;
         }
 
-        .seg {
+        .seg3 {
           position: relative;
           height: 44px;
           border-radius: 999px;
           border: 1px solid #e5e7eb;
           background: #f3f4f6;
           display: grid;
-          grid-template-columns: 1fr 1fr;
+          grid-template-columns: 1fr 1fr 1fr;
           overflow: hidden;
         }
 
@@ -849,11 +1130,11 @@ export default function FeedPage() {
           color: #111827;
         }
 
-        .segIndicator {
+        .segIndicator3 {
           position: absolute;
           top: 3px;
           bottom: 3px;
-          width: calc(50% - 6px);
+          width: calc(33.333% - 6px);
           border-radius: 999px;
           background: #ffffff;
           border: 1px solid #e5e7eb;
@@ -862,12 +1143,14 @@ export default function FeedPage() {
           z-index: 1;
         }
 
-        .segIndicator.left {
+        .segIndicator3.pos0 {
           transform: translateX(3px);
         }
-
-        .segIndicator.right {
+        .segIndicator3.pos1 {
           transform: translateX(calc(100% + 3px));
+        }
+        .segIndicator3.pos2 {
+          transform: translateX(calc(200% + 3px));
         }
 
         .ctrlBtn {
@@ -1183,7 +1466,7 @@ export default function FeedPage() {
 
         /* ====== GRID ====== */
         .main {
-          padding: 14px 12px 96px;
+          padding: 14px 12px ${PAGE_BOTTOM_PAD}px;
         }
 
         .grid {
@@ -1194,7 +1477,7 @@ export default function FeedPage() {
 
         @media (min-width: 720px) {
           .main {
-            padding: 16px 16px 96px;
+            padding: 16px 16px ${PAGE_BOTTOM_PAD}px;
             max-width: 1100px;
             margin: 0 auto;
           }
@@ -1214,6 +1497,10 @@ export default function FeedPage() {
 
         .cardRequest {
           border: 1px solid rgba(16, 185, 129, 0.25);
+        }
+
+        .cardEvent {
+          border: 1px solid rgba(59, 130, 246, 0.18);
         }
 
         .media {
@@ -1276,6 +1563,12 @@ export default function FeedPage() {
           border-color: rgba(16, 185, 129, 0.25);
           background: rgba(16, 185, 129, 0.12);
           color: #065f46;
+        }
+
+        .badgeEvent {
+          border-color: rgba(59, 130, 246, 0.25);
+          background: rgba(59, 130, 246, 0.12);
+          color: #1e3a8a;
         }
 
         .reqMeta {
@@ -1358,7 +1651,7 @@ export default function FeedPage() {
           cursor: pointer;
           font-weight: 950;
           border: 1px solid #e5e7eb;
-          transition: transform 0.12s ease, box-shadow 0.12s ease;
+          transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.15s ease;
         }
 
         .btn:active {
@@ -1376,6 +1669,13 @@ export default function FeedPage() {
           background: #10b981;
           color: #ffffff;
           box-shadow: 0 14px 30px rgba(16, 185, 129, 0.2);
+        }
+
+        .btnOn {
+          background: rgba(16, 185, 129, 0.14);
+          color: #065f46;
+          border: 1px solid rgba(16, 185, 129, 0.35);
+          box-shadow: 0 10px 22px rgba(16, 185, 129, 0.14);
         }
 
         .btnDisabled {
