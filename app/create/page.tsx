@@ -6,33 +6,49 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 /**
- * ✅ Create page now supports:
- * - Give (items + required photo)
- * - Request (items, no photo)
- * - Event (events table, optional flyer upload)
+ * ✅ What this version fixes (based on your rules):
  *
- * Assumptions (match your earlier DB plan):
- * public.events columns:
- * - id uuid
- * - created_by uuid
- * - title text
- * - host_org text
- * - category text
- * - location text
- * - description text
- * - starts_at timestamptz
- * - ends_at timestamptz null
- * - link_url text null
- * - photo_url text null
- * - is_anonymous boolean
+ * GIVE (items.post_type = "give") REQUIRED:
+ *  - Title
+ *  - Description
+ *  - Photo
+ *  - Category
+ *  - Pickup spot
  *
- * Storage bucket:
- * - item-photos (already)
- * - event-photos (NEW, public bucket recommended)
+ * REQUEST (items.post_type = "request") REQUIRED:
+ *  - Title
+ *  - Description
+ *  - Request type (request_group)
+ *  - Timeframe (request_timeframe)
+ *
+ * EVENT (events table) REQUIRED:
+ *  - Title
+ *  - Description
+ *  - Location
+ *  - Host Club/Organisation
+ *  - Start time
+ *  - Category
+ * Optional:
+ *  - End time
+ *  - Link
+ *  - Flyer upload
+ *  - Hide creator name (public)
+ *
+ * ✅ Routing behavior:
+ *  - If not logged in / not Ashland / profile incomplete -> send to /me
+ *  - After posting Give/Request -> /item/[id]
+ *  - After posting Event -> /feed   (change EVENT_SUCCESS_ROUTE if you have /events)
+ *
+ * ⚠️ IMPORTANT:
+ *  - ITEMS bucket assumed: "item-photos" (your current code)
+ *  - EVENTS bucket assumed: "event-flyers"  (create it in Supabase Storage or change below)
+ *  - EVENTS table columns must match the insert keys. If your column names differ, edit EVENT_INSERT below.
  */
 
-type PostType = "give" | "request" | "event";
+type Mode = "give" | "request" | "event";
+type PostType = "give" | "request";
 
+// ---------- Items enums (keep your existing) ----------
 type GiveCategory =
   | "clothing"
   | "sport equipment"
@@ -55,21 +71,35 @@ type RequestTimeframe = "today" | "this_week" | "flexible";
 type PickupLocation = "College Quad" | "Safety Service Office" | "Dining Hall";
 type ExpireChoice = "7" | "14" | "30" | "never" | "urgent24";
 
+// ---------- Events enums (simple) ----------
 type EventCategory =
+  | "career"
   | "club"
   | "sports"
-  | "party"
-  | "career"
+  | "music"
+  | "arts"
   | "volunteering"
-  | "workshop"
-  | "campus"
+  | "academic"
+  | "social"
   | "other";
 
 const NAV_APPROX_HEIGHT = 86;
 const STICKY_BAR_HEIGHT = 74;
 
-const MAX_PHOTO_MB = 6; // items
-const MAX_FLYER_MB = 8; // events
+// Give photo max
+const MAX_ITEM_PHOTO_MB = 6;
+// Event flyer max
+const MAX_EVENT_FLYER_MB = 8;
+
+const ITEM_PHOTOS_BUCKET = "item-photos";
+const EVENT_FLYERS_BUCKET = "event-flyers"; // change if your bucket name differs
+
+const EVENT_TABLE = "events";
+const ITEMS_TABLE = "items";
+const ITEM_PHOTOS_TABLE = "item_photos";
+
+// change if you have a dedicated events page
+const EVENT_SUCCESS_ROUTE = "/feed";
 
 function getExt(filename: string) {
   const parts = filename.split(".");
@@ -78,6 +108,12 @@ function getExt(filename: string) {
 
 function isAllowedImage(file: File) {
   return ["image/jpeg", "image/png", "image/webp"].includes(file.type);
+}
+
+function uuidSafe() {
+  // @ts-ignore
+  if (typeof crypto !== "undefined" && crypto?.randomUUID) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
 }
 
 function addDaysISO(days: number) {
@@ -98,27 +134,16 @@ function computeExpiry(choice: ExpireChoice) {
   return { untilCancel: false, expiresAt };
 }
 
-function uuidSafe() {
-  // @ts-ignore
-  if (typeof crypto !== "undefined" && crypto?.randomUUID) return crypto.randomUUID();
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+function isValidHttpUrlMaybeEmpty(raw: string) {
+  const v = raw.trim();
+  if (!v) return true; // optional => empty ok
+  return /^https?:\/\//i.test(v);
 }
 
-function toLocalInputValue(d: Date) {
-  // "YYYY-MM-DDTHH:mm" in local time for <input type="datetime-local" />
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  const mm = pad(d.getMonth() + 1);
-  const dd = pad(d.getDate());
-  const hh = pad(d.getHours());
-  const mi = pad(d.getMinutes());
-  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
-}
-
-function parseLocalDatetimeToISO(v: string) {
-  // v like "2026-03-04T16:30" interpreted as local time
-  // new Date(v) is parsed as local by most browsers for this format.
-  const dt = new Date(v);
+function toIsoFromLocalInput(localValue: string) {
+  // input type="datetime-local" gives "YYYY-MM-DDTHH:mm"
+  // Convert to Date in local tz then ISO.
+  const dt = new Date(localValue);
   if (Number.isNaN(dt.getTime())) return null;
   return dt.toISOString();
 }
@@ -128,143 +153,94 @@ export default function CreatePage() {
 
   const formRef = useRef<HTMLFormElement | null>(null);
 
-  // item photo refs
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const itemFileInputRef = useRef<HTMLInputElement | null>(null);
+  const eventFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // event flyer refs
-  const flyerInputRef = useRef<HTMLInputElement | null>(null);
-
-  // ---------- ALL HOOKS UP TOP ----------
-  // auth
+  // ---------- Auth ----------
   const [authLoading, setAuthLoading] = useState(true);
   const [email, setEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
 
-  // profile
+  // ---------- Profile ----------
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileComplete, setProfileComplete] = useState(false);
 
-  // post type
-  const [postType, setPostType] = useState<PostType>("give");
+  // ---------- Mode ----------
+  const [mode, setMode] = useState<Mode>("give");
 
-  // shared (for items)
+  // ---------- Shared fields ----------
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
-  // give-only
+  // ---------- Give (items) ----------
   const [giveCategory, setGiveCategory] = useState<GiveCategory>("books");
   const [pickupLocation, setPickupLocation] = useState<PickupLocation>("College Quad");
-  const [file, setFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [itemFile, setItemFile] = useState<File | null>(null);
+  const [itemPreviewUrl, setItemPreviewUrl] = useState<string | null>(null);
 
-  // request-only
+  // ---------- Request (items) ----------
   const [requestGroup, setRequestGroup] = useState<RequestGroup>("logistics");
   const [requestTimeframe, setRequestTimeframe] = useState<RequestTimeframe>("today");
   const [requestLocation, setRequestLocation] = useState("");
 
-  // event-only
-  const [eventTitle, setEventTitle] = useState("");
-  const [eventHostOrg, setEventHostOrg] = useState("");
+  // ---------- Event (events) ----------
   const [eventCategory, setEventCategory] = useState<EventCategory>("club");
   const [eventLocation, setEventLocation] = useState("");
-  const [eventDescription, setEventDescription] = useState("");
-  const [eventLinkUrl, setEventLinkUrl] = useState("");
-  const [eventStartLocal, setEventStartLocal] = useState<string>(() => {
-    // default: next full hour
-    const d = new Date();
-    d.setMinutes(0, 0, 0);
-    d.setHours(d.getHours() + 1);
-    return toLocalInputValue(d);
-  });
-  const [eventHasEnd, setEventHasEnd] = useState(false);
-  const [eventEndLocal, setEventEndLocal] = useState<string>(() => {
-    const d = new Date();
-    d.setMinutes(0, 0, 0);
-    d.setHours(d.getHours() + 2);
-    return toLocalInputValue(d);
-  });
+  const [hostOrg, setHostOrg] = useState("");
+  const [eventLink, setEventLink] = useState("");
+  const [startLocal, setStartLocal] = useState(""); // datetime-local string
+  const [endLocal, setEndLocal] = useState(""); // optional
+  const [eventFile, setEventFile] = useState<File | null>(null);
+  const [eventPreviewUrl, setEventPreviewUrl] = useState<string | null>(null);
 
-  const [flyerFile, setFlyerFile] = useState<File | null>(null);
-  const [flyerPreviewUrl, setFlyerPreviewUrl] = useState<string | null>(null);
-
-  // options
+  // ---------- Options ----------
   const [showOptions, setShowOptions] = useState(false);
-  const [hideName, setHideName] = useState(false); // applies to items and events
+  const [hideName, setHideName] = useState(false);
   const [expireChoice, setExpireChoice] = useState<ExpireChoice>("7");
 
-  // submit
+  // ---------- Submit state ----------
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
-  // UI-only
-  const [dragOver, setDragOver] = useState(false);
-  const [flyerDragOver, setFlyerDragOver] = useState(false);
+  // ---------- Helpers ----------
+  const isAllowed = useMemo(() => !!email && email.toLowerCase().endsWith("@ashland.edu"), [email]);
 
-  const isAllowed = useMemo(() => {
-    return !!email && email.toLowerCase().endsWith("@ashland.edu");
-  }, [email]);
-
-  // clean item fields
   const cleanTitle = useMemo(() => title.trim(), [title]);
-  const cleanDesc = useMemo(() => {
-    const d = description.trim();
-    return d.length ? d : null;
-  }, [description]);
+  const cleanDesc = useMemo(() => description.trim(), [description]);
 
-  // clean event fields
-  const cleanEventTitle = useMemo(() => eventTitle.trim(), [eventTitle]);
-  const cleanEventHost = useMemo(() => eventHostOrg.trim(), [eventHostOrg]);
-  const cleanEventLoc = useMemo(() => eventLocation.trim(), [eventLocation]);
-  const cleanEventDesc = useMemo(() => eventDescription.trim(), [eventDescription]);
-  const cleanEventLink = useMemo(() => {
-    const v = eventLinkUrl.trim();
-    return v.length ? v : null;
-  }, [eventLinkUrl]);
+  const startIso = useMemo(() => (startLocal ? toIsoFromLocalInput(startLocal) : null), [startLocal]);
+  const endIso = useMemo(() => (endLocal ? toIsoFromLocalInput(endLocal) : null), [endLocal]);
 
-  // switching tabs: reset error + tab-specific safety resets
+  // When switching modes, clear mode-specific messages + enforce expiry rules
   useEffect(() => {
     setMsg(null);
 
-    // if leaving give, clear item photo states
-    if (postType !== "give") {
-      setFile(null);
-      setPreviewUrl(null);
-      setDragOver(false);
-    }
+    // if you switch away from give, keep the item photo but it's fine either way.
+    // if you switch to request, "never" expiry is allowed but you wanted old behavior; keep your previous rule:
+    if (mode === "request" && expireChoice === "never") setExpireChoice("7");
+  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // request can't be never expiry
-    if (postType === "request" && expireChoice === "never") setExpireChoice("7");
-
-    // leaving event: keep inputs (user-friendly) but reset flyer drag state
-    if (postType !== "event") {
-      setFlyerDragOver(false);
-      setFlyerFile(null);
-      setFlyerPreviewUrl(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [postType]);
-
-  // item preview URL
+  // Preview URLs (item photo)
   useEffect(() => {
-    if (!file) {
-      setPreviewUrl(null);
+    if (!itemFile) {
+      setItemPreviewUrl(null);
       return;
     }
-    const url = URL.createObjectURL(file);
-    setPreviewUrl(url);
+    const url = URL.createObjectURL(itemFile);
+    setItemPreviewUrl(url);
     return () => URL.revokeObjectURL(url);
-  }, [file]);
+  }, [itemFile]);
 
-  // flyer preview URL
+  // Preview URLs (event flyer)
   useEffect(() => {
-    if (!flyerFile) {
-      setFlyerPreviewUrl(null);
+    if (!eventFile) {
+      setEventPreviewUrl(null);
       return;
     }
-    const url = URL.createObjectURL(flyerFile);
-    setFlyerPreviewUrl(url);
+    const url = URL.createObjectURL(eventFile);
+    setEventPreviewUrl(url);
     return () => URL.revokeObjectURL(url);
-  }, [flyerFile]);
+  }, [eventFile]);
 
   // ---------- AUTH ----------
   useEffect(() => {
@@ -285,7 +261,6 @@ export default function CreatePage() {
         if (!mounted) return;
 
         const { data, error } = raced as any;
-
         if (error) {
           console.log("getSession error:", error?.message ?? error);
           setMsg((prev) => prev ?? "Auth is taking too long. Refresh, or check Supabase env vars on Vercel.");
@@ -356,88 +331,83 @@ export default function CreatePage() {
     };
   }, [userId]);
 
+  // ---------- File handlers ----------
   function handleItemFilePicked(f: File | null) {
     setMsg(null);
-
     if (!f) {
-      setFile(null);
-      return;
-    }
-    if (f.size > MAX_PHOTO_MB * 1024 * 1024) {
-      setFile(null);
-      setMsg(`Photo too large (max ${MAX_PHOTO_MB}MB).`);
+      setItemFile(null);
       return;
     }
     if (!isAllowedImage(f)) {
-      setFile(null);
+      setItemFile(null);
       setMsg("Upload JPG, PNG, or WEBP (HEIC not supported yet).");
       return;
     }
-    setFile(f);
-  }
-
-  function handleFlyerPicked(f: File | null) {
-    setMsg(null);
-
-    if (!f) {
-      setFlyerFile(null);
+    if (f.size > MAX_ITEM_PHOTO_MB * 1024 * 1024) {
+      setItemFile(null);
+      setMsg(`Photo too large (max ${MAX_ITEM_PHOTO_MB}MB).`);
       return;
     }
-    if (f.size > MAX_FLYER_MB * 1024 * 1024) {
-      setFlyerFile(null);
-      setMsg(`Flyer too large (max ${MAX_FLYER_MB}MB).`);
+    setItemFile(f);
+  }
+
+  function handleEventFilePicked(f: File | null) {
+    setMsg(null);
+    if (!f) {
+      setEventFile(null);
       return;
     }
     if (!isAllowedImage(f)) {
-      setFlyerFile(null);
+      setEventFile(null);
       setMsg("Flyer must be JPG, PNG, or WEBP.");
       return;
     }
-    setFlyerFile(f);
+    if (f.size > MAX_EVENT_FLYER_MB * 1024 * 1024) {
+      setEventFile(null);
+      setMsg(`Flyer too large (max ${MAX_EVENT_FLYER_MB}MB).`);
+      return;
+    }
+    setEventFile(f);
   }
 
+  // ---------- VALIDATION (the key fix) ----------
   function validate(): string | null {
     if (!isAllowed || !userId) return "Log in with your @ashland.edu email to post.";
     if (!profileComplete) return "Complete your profile first (name + student/faculty).";
 
-    if (postType === "event") {
-      if (cleanEventTitle.length < 3) return "Event title must be at least 3 characters.";
-      if (cleanEventHost.length < 2) return "Host Club/Organisation is required.";
-      if (cleanEventLoc.length < 2) return "Location is required.";
-      if (cleanEventDesc.length < 5) return "Description is required (at least a few words).";
+    // title always required for all 3
+    if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
 
-      const startISO = parseLocalDatetimeToISO(eventStartLocal);
-      if (!startISO) return "Start time is required.";
+    // description required for all 3 (per your instruction)
+    if (cleanDesc.length < 3) return "Description is required (add at least a short sentence).";
 
-      if (eventHasEnd) {
-        const endISO = parseLocalDatetimeToISO(eventEndLocal);
-        if (!endISO) return "End time is invalid.";
-        if (new Date(endISO).getTime() <= new Date(startISO).getTime()) return "End time must be after start time.";
-      }
-
-      if (flyerFile) {
-        if (flyerFile.size > MAX_FLYER_MB * 1024 * 1024) return `Flyer too large (max ${MAX_FLYER_MB}MB).`;
-        if (!isAllowedImage(flyerFile)) return "Flyer must be JPG, PNG, or WEBP.";
-      }
-
-      // optional link validation (light)
-      if (cleanEventLink) {
-        const ok = /^https?:\/\//i.test(cleanEventLink);
-        if (!ok) return 'Link must start with "http://" or "https://".';
-      }
-
+    if (mode === "give") {
+      // required: photo + category + pickup
+      if (!itemFile) return "Photo is required for Give posts.";
+      if (!giveCategory) return "Category is required.";
+      if (!pickupLocation) return "Pickup spot is required.";
       return null;
     }
 
-    // items (give/request)
-    if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
-
-    if (postType === "give" && !file) return "Photo is required for items. Please add a photo.";
-    if (postType === "give" && file) {
-      if (file.size > MAX_PHOTO_MB * 1024 * 1024) return `Photo too large (max ${MAX_PHOTO_MB}MB).`;
-      if (!isAllowedImage(file)) return "Upload JPG, PNG, or WEBP (HEIC not supported yet).";
+    if (mode === "request") {
+      // required: request type + timeframe
+      if (!requestGroup) return "Request type is required.";
+      if (!requestTimeframe) return "Timeframe is required.";
+      return null;
     }
 
+    // mode === "event"
+    if (!eventCategory) return "Event category is required.";
+    if (!hostOrg.trim()) return "Host Club/Organisation is required.";
+    if (!eventLocation.trim()) return "Location is required.";
+    if (!startIso) return "Start time is required.";
+    if (!isValidHttpUrlMaybeEmpty(eventLink)) return "Link must start with http:// or https:// (or leave it empty).";
+
+    if (endIso && startIso) {
+      if (new Date(endIso).getTime() < new Date(startIso).getTime()) return "End time cannot be before start time.";
+    }
+
+    // flyer is optional -> no requirement here
     return null;
   }
 
@@ -445,61 +415,60 @@ export default function CreatePage() {
     if (!isAllowed || !userId) return false;
     if (!profileComplete) return false;
 
-    if (postType === "event") {
-      if (cleanEventTitle.length < 3) return false;
-      if (cleanEventHost.length < 2) return false;
-      if (cleanEventLoc.length < 2) return false;
-      if (cleanEventDesc.length < 5) return false;
+    if (cleanTitle.length < 3) return false;
+    if (cleanDesc.length < 3) return false;
 
-      const startISO = parseLocalDatetimeToISO(eventStartLocal);
-      if (!startISO) return false;
-
-      if (eventHasEnd) {
-        const endISO = parseLocalDatetimeToISO(eventEndLocal);
-        if (!endISO) return false;
-        if (new Date(endISO).getTime() <= new Date(startISO).getTime()) return false;
-      }
-
-      if (flyerFile) {
-        if (flyerFile.size > MAX_FLYER_MB * 1024 * 1024) return false;
-        if (!isAllowedImage(flyerFile)) return false;
-      }
-
-      if (cleanEventLink) {
-        const ok = /^https?:\/\//i.test(cleanEventLink);
-        if (!ok) return false;
-      }
-
+    if (mode === "give") {
+      if (!itemFile) return false;
+      if (!giveCategory) return false;
+      if (!pickupLocation) return false;
+      if (!isAllowedImage(itemFile)) return false;
+      if (itemFile.size > MAX_ITEM_PHOTO_MB * 1024 * 1024) return false;
       return true;
     }
 
-    // items
-    if (cleanTitle.length < 3) return false;
+    if (mode === "request") {
+      if (!requestGroup) return false;
+      if (!requestTimeframe) return false;
+      return true;
+    }
 
-    if (postType === "give" && !file) return false;
-    if (postType === "give" && file) {
-      if (file.size > MAX_PHOTO_MB * 1024 * 1024) return false;
-      if (!isAllowedImage(file)) return false;
+    // event
+    if (!eventCategory) return false;
+    if (!hostOrg.trim()) return false;
+    if (!eventLocation.trim()) return false;
+    if (!startIso) return false;
+    if (!isValidHttpUrlMaybeEmpty(eventLink)) return false;
+    if (eventFile) {
+      if (!isAllowedImage(eventFile)) return false;
+      if (eventFile.size > MAX_EVENT_FLYER_MB * 1024 * 1024) return false;
+    }
+    if (endIso && startIso) {
+      if (new Date(endIso).getTime() < new Date(startIso).getTime()) return false;
     }
     return true;
   }, [
     isAllowed,
     userId,
     profileComplete,
-    postType,
     cleanTitle,
-    file,
-    cleanEventTitle,
-    cleanEventHost,
-    cleanEventLoc,
-    cleanEventDesc,
-    cleanEventLink,
-    eventStartLocal,
-    eventHasEnd,
-    eventEndLocal,
-    flyerFile,
+    cleanDesc,
+    mode,
+    itemFile,
+    giveCategory,
+    pickupLocation,
+    requestGroup,
+    requestTimeframe,
+    eventCategory,
+    hostOrg,
+    eventLocation,
+    startIso,
+    endIso,
+    eventLink,
+    eventFile,
   ]);
 
+  // ---------- SUBMIT ----------
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setMsg(null);
@@ -507,6 +476,7 @@ export default function CreatePage() {
     const err = validate();
     if (err) {
       setMsg(err);
+      // send to /me if auth/profile issue
       if (!isAllowed || !userId || !profileComplete) router.push("/me");
       return;
     }
@@ -514,85 +484,70 @@ export default function CreatePage() {
     setSaving(true);
 
     try {
-      // ==========================
-      // EVENT SUBMIT
-      // ==========================
-      if (postType === "event") {
-        const starts_at = parseLocalDatetimeToISO(eventStartLocal);
-        const ends_at = eventHasEnd ? parseLocalDatetimeToISO(eventEndLocal) : null;
-
-        if (!starts_at) throw new Error("Invalid start time.");
-
-        const baseEvent: any = {
-          created_by: userId,
-          title: cleanEventTitle,
-          host_org: cleanEventHost,
+      if (mode === "event") {
+        // 1) Insert base event row
+        // NOTE: If your events table column names differ, change keys below.
+        const EVENT_INSERT: any = {
+          owner_id: userId,
+          title: cleanTitle,
+          description: cleanDesc,
           category: eventCategory,
-          location: cleanEventLoc,
-          description: cleanEventDesc,
-          starts_at,
-          ends_at,
-          link_url: cleanEventLink,
-          photo_url: null,
+          location: eventLocation.trim(),
+          host_org: hostOrg.trim(),
+          link: eventLink.trim() ? eventLink.trim() : null,
+          starts_at: startIso,
+          ends_at: endIso ?? null,
           is_anonymous: hideName,
+          flyer_url: null,
         };
 
         const { data: created, error: createErr } = await supabase
-          .from("events")
-          .insert([baseEvent])
+          .from(EVENT_TABLE)
+          .insert([EVENT_INSERT])
           .select("id")
           .single();
 
         if (createErr || !created?.id) throw new Error(createErr?.message || "Failed to create event.");
-
         const eventId = String(created.id);
 
-        // Flyer optional
-        if (!flyerFile) {
-          router.push(`/events`); // build later; change to /feed if you want
-          router.refresh();
-          return;
+        // 2) Optional flyer upload
+        if (eventFile) {
+          const ext = getExt(eventFile.name);
+          const path = `events/${userId}/${eventId}/${uuidSafe()}.${ext}`;
+
+          const { error: upErr } = await supabase.storage.from(EVENT_FLYERS_BUCKET).upload(path, eventFile, {
+            cacheControl: "3600",
+            upsert: false,
+            contentType: eventFile.type || undefined,
+          });
+
+          if (upErr) {
+            // event exists, flyer failed
+            setMsg(`Event posted, but flyer upload failed: ${upErr.message}`);
+            router.push(EVENT_SUCCESS_ROUTE);
+            router.refresh();
+            return;
+          }
+
+          const { data: pub } = supabase.storage.from(EVENT_FLYERS_BUCKET).getPublicUrl(path);
+          const flyerUrl = pub.publicUrl;
+
+          const { error: updErr } = await supabase.from(EVENT_TABLE).update({ flyer_url: flyerUrl }).eq("id", eventId);
+          if (updErr) {
+            setMsg(`Flyer uploaded, but flyer_url update failed: ${updErr.message}`);
+          }
         }
 
-        const ext = getExt(flyerFile.name);
-        const path = `events/${userId}/${eventId}/${uuidSafe()}.${ext}`;
-
-        const { error: uploadErr } = await supabase.storage.from("event-photos").upload(path, flyerFile, {
-          cacheControl: "3600",
-          upsert: false,
-          contentType: flyerFile.type || undefined,
-        });
-
-        if (uploadErr) {
-          setMsg(`Event posted, but flyer upload failed: ${uploadErr.message}`);
-          router.push(`/events`);
-          router.refresh();
-          return;
-        }
-
-        const { data: pub } = supabase.storage.from("event-photos").getPublicUrl(path);
-        const publicUrl = pub.publicUrl;
-
-        const { error: updateErr } = await supabase.from("events").update({ photo_url: publicUrl }).eq("id", eventId);
-
-        if (updateErr) {
-          setMsg(`Flyer uploaded, but photo_url update failed: ${updateErr.message}`);
-          router.push(`/events`);
-          router.refresh();
-          return;
-        }
-
-        router.push(`/events`);
+        router.push(EVENT_SUCCESS_ROUTE);
         router.refresh();
         return;
       }
 
-      // ==========================
-      // ITEMS SUBMIT (Give/Request)
-      // ==========================
+      // mode === give/request -> items
+      const postType: PostType = mode === "give" ? "give" : "request";
       const { untilCancel, expiresAt } = computeExpiry(expireChoice);
 
-      const baseInsert: any = {
+      const itemInsert: any = {
         owner_id: userId,
         title: cleanTitle,
         description: cleanDesc,
@@ -605,40 +560,43 @@ export default function CreatePage() {
       };
 
       if (postType === "give") {
-        baseInsert.category = giveCategory;
-        baseInsert.pickup_location = pickupLocation;
-        baseInsert.request_group = null;
-        baseInsert.request_timeframe = null;
-        baseInsert.request_location = null;
+        itemInsert.category = giveCategory;
+        itemInsert.pickup_location = pickupLocation;
+        itemInsert.request_group = null;
+        itemInsert.request_timeframe = null;
+        itemInsert.request_location = null;
       } else {
-        baseInsert.category = "others";
-        baseInsert.pickup_location = null;
-        baseInsert.request_group = requestGroup;
-        baseInsert.request_timeframe = requestTimeframe;
-        baseInsert.request_location = requestLocation.trim().length ? requestLocation.trim() : null;
+        itemInsert.category = "others";
+        itemInsert.pickup_location = null;
+        itemInsert.request_group = requestGroup;
+        itemInsert.request_timeframe = requestTimeframe;
+        itemInsert.request_location = requestLocation.trim() ? requestLocation.trim() : null;
       }
 
-      const { data: created, error: createErr } = await supabase.from("items").insert([baseInsert]).select("id").single();
+      const { data: createdItem, error: createItemErr } = await supabase
+        .from(ITEMS_TABLE)
+        .insert([itemInsert])
+        .select("id")
+        .single();
 
-      if (createErr || !created?.id) throw new Error(createErr?.message || "Failed to create post.");
+      if (createItemErr || !createdItem?.id) throw new Error(createItemErr?.message || "Failed to create post.");
+      const itemId = String(createdItem.id);
 
-      const itemId = created.id as string;
-
-      // Requests: no photo step
+      // request: no photo upload
       if (postType === "request") {
         router.push(`/item/${itemId}`);
         router.refresh();
         return;
       }
 
-      // Give: photo REQUIRED
-      const ext = getExt(file!.name);
+      // give: REQUIRED photo upload
+      const ext = getExt(itemFile!.name);
       const path = `items/${userId}/${itemId}/${uuidSafe()}.${ext}`;
 
-      const { error: uploadErr } = await supabase.storage.from("item-photos").upload(path, file!, {
+      const { error: uploadErr } = await supabase.storage.from(ITEM_PHOTOS_BUCKET).upload(path, itemFile!, {
         cacheControl: "3600",
         upsert: false,
-        contentType: file!.type || undefined,
+        contentType: itemFile!.type || undefined,
       });
 
       if (uploadErr) {
@@ -648,10 +606,10 @@ export default function CreatePage() {
         return;
       }
 
-      const { data: pub } = supabase.storage.from("item-photos").getPublicUrl(path);
+      const { data: pub } = supabase.storage.from(ITEM_PHOTOS_BUCKET).getPublicUrl(path);
       const publicUrl = pub.publicUrl;
 
-      const { error: updateErr } = await supabase.from("items").update({ photo_url: publicUrl }).eq("id", itemId);
+      const { error: updateErr } = await supabase.from(ITEMS_TABLE).update({ photo_url: publicUrl }).eq("id", itemId);
       if (updateErr) {
         setMsg(`Photo uploaded, but photo_url update failed: ${updateErr.message}`);
         router.push(`/item/${itemId}`);
@@ -659,9 +617,11 @@ export default function CreatePage() {
         return;
       }
 
+      // Optional: keep your item_photos history table
       const { error: photoErr } = await supabase
-        .from("item_photos")
+        .from(ITEM_PHOTOS_TABLE)
         .insert([{ item_id: itemId, photo_url: publicUrl, storage_path: path }]);
+
       if (photoErr) console.log("item_photos insert failed:", photoErr.message);
 
       router.push(`/item/${itemId}`);
@@ -673,7 +633,7 @@ export default function CreatePage() {
     }
   }
 
-  // ---------- UI styles ----------
+  // ---------- UI ----------
   const ui = {
     page: {
       minHeight: "100vh",
@@ -734,6 +694,7 @@ export default function CreatePage() {
     } as React.CSSProperties,
     h1: { fontSize: 22, fontWeight: 950, margin: 0, position: "relative" } as React.CSSProperties,
     sub: { margin: "6px 0 0", color: "#4b5563", lineHeight: 1.35, position: "relative" } as React.CSSProperties,
+
     segmentWrap: {
       display: "flex",
       gap: 8,
@@ -796,6 +757,7 @@ export default function CreatePage() {
       lineHeight: 1.35,
     } as React.CSSProperties,
     grid2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 } as React.CSSProperties,
+    grid3: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 } as React.CSSProperties,
     select: {
       width: "100%",
       padding: "12px 12px",
@@ -808,17 +770,16 @@ export default function CreatePage() {
       cursor: "pointer",
     } as React.CSSProperties,
 
-    drop: (active: boolean, has: boolean) =>
+    drop: (has: boolean) =>
       ({
         borderRadius: 18,
-        border: `1.5px dashed ${active ? "#10b981" : "#d1d5db"}`,
-        background: has ? "white" : active ? "rgba(16,185,129,0.07)" : "#fbfbfc",
+        border: `1.5px dashed ${has ? "rgba(16,185,129,0.55)" : "#d1d5db"}`,
+        background: has ? "white" : "#fbfbfc",
         padding: 14,
         display: "flex",
         gap: 12,
         alignItems: "center",
         justifyContent: "space-between",
-        transition: "all 150ms ease",
       }) as React.CSSProperties,
     ghostBtn: {
       background: "white",
@@ -914,35 +875,49 @@ export default function CreatePage() {
       }) as React.CSSProperties,
   };
 
-  // ---------- Derived UI text ----------
   const helperText =
-    postType === "give"
-      ? "Start with a clear title + a photo. Everything else is quick choices."
-      : postType === "request"
-      ? "Ask clearly. The right person will message you."
-      : "Post a campus event so students don’t miss it.";
+    mode === "give"
+      ? "Give: title + description + photo + category + pickup spot."
+      : mode === "request"
+      ? "Request: title + description + request type + timeframe."
+      : "Event: title + description + location + host + start time + category.";
+
+  const primaryButton = mode === "give" ? "Post item" : mode === "request" ? "Post request" : "Post event";
 
   const stickyHint = useMemo(() => {
-    if (postType === "event") {
-      if (cleanEventTitle.length < 3) return "Add an event title (3+ characters).";
-      if (cleanEventHost.length < 2) return "Host Club/Organisation is required.";
-      if (cleanEventLoc.length < 2) return "Location is required.";
-      if (cleanEventDesc.length < 5) return "Add a short description.";
-      return "Looks good — ready to post.";
+    if (!isAllowed || !userId) return "Log in with your @ashland.edu email to post.";
+    if (!profileComplete) return "Finish profile setup in Account.";
+    if (cleanTitle.length < 3) return "Add a clear title (3+ characters).";
+    if (cleanDesc.length < 3) return "Description is required (short sentence).";
+
+    if (mode === "give") {
+      if (!itemFile) return "Give posts require a photo.";
+      return "Give post ready.";
     }
+    if (mode === "request") {
+      return "Request ready.";
+    }
+    // event
+    if (!hostOrg.trim()) return "Add Host Club/Organisation.";
+    if (!eventLocation.trim()) return "Add event location.";
+    if (!startIso) return "Pick a start time.";
+    if (!isValidHttpUrlMaybeEmpty(eventLink)) return "Fix link (http/https) or clear it.";
+    return "Event ready.";
+  }, [
+    isAllowed,
+    userId,
+    profileComplete,
+    cleanTitle,
+    cleanDesc,
+    mode,
+    itemFile,
+    hostOrg,
+    eventLocation,
+    startIso,
+    eventLink,
+  ]);
 
-    return cleanTitle.length < 3
-      ? "Add a clear title (3+ characters)."
-      : postType === "give"
-      ? file
-        ? "Looks good — ready to post."
-        : "Photo is required for Give posts."
-      : "Ready to post.";
-  }, [postType, cleanTitle, file, cleanEventTitle, cleanEventHost, cleanEventLoc, cleanEventDesc]);
-
-  const primaryButton = postType === "give" ? "Post item" : postType === "request" ? "Post request" : "Post event";
-
-  // ---------- RENDER STATES ----------
+  // ---------- RENDER states ----------
   if (authLoading || profileLoading) {
     return (
       <div style={ui.page}>
@@ -952,7 +927,7 @@ export default function CreatePage() {
             <div style={{ position: "relative" }}>
               <div style={{ fontWeight: 950 }}>Loading your account…</div>
               <div style={{ marginTop: 8, fontSize: 13, color: "#6b7280" }}>
-                If this takes more than a few seconds, your Supabase env vars on Vercel may be missing.
+                If this takes too long, check Supabase env vars on Vercel.
               </div>
               {msg && <div style={{ marginTop: 12, ...ui.msg }}>{msg}</div>}
             </div>
@@ -971,7 +946,7 @@ export default function CreatePage() {
             <div style={{ position: "relative" }}>
               <h1 style={{ fontSize: 24, fontWeight: 950, margin: 0 }}>Post on ScholarSwap</h1>
               <p style={{ color: "#4b5563", marginTop: 8, marginBottom: 0 }}>
-                You must log in with your <b>@ashland.edu</b> email to post.
+                You must log in with your <b>@ashland.edu</b> email.
               </p>
               {msg && <div style={{ marginTop: 12, ...ui.msg }}>{msg}</div>}
               <button onClick={() => router.push("/me")} style={{ ...ui.ghostBtn, marginTop: 14 }}>
@@ -1019,7 +994,7 @@ export default function CreatePage() {
     );
   }
 
-  // ---------- MAIN PAGE ----------
+  // ---------- MAIN ----------
   return (
     <div style={ui.page}>
       <div style={ui.shell}>
@@ -1039,13 +1014,13 @@ export default function CreatePage() {
             <p style={ui.sub}>{helperText}</p>
 
             <div style={ui.segmentWrap}>
-              <button type="button" onClick={() => setPostType("give")} style={ui.segBtn(postType === "give")}>
+              <button type="button" onClick={() => setMode("give")} style={ui.segBtn(mode === "give")}>
                 Give
               </button>
-              <button type="button" onClick={() => setPostType("request")} style={ui.segBtn(postType === "request")}>
+              <button type="button" onClick={() => setMode("request")} style={ui.segBtn(mode === "request")}>
                 Request
               </button>
-              <button type="button" onClick={() => setPostType("event")} style={ui.segBtn(postType === "event")}>
+              <button type="button" onClick={() => setMode("event")} style={ui.segBtn(mode === "event")}>
                 Event
               </button>
             </div>
@@ -1053,204 +1028,73 @@ export default function CreatePage() {
         </div>
 
         <form ref={formRef} onSubmit={handleSubmit} style={ui.convo}>
-          {/* ===================== EVENT FORM ===================== */}
-          {postType === "event" && (
+          {/* TITLE */}
+          <div style={ui.row("left")}>
+            <div style={ui.bubble("left")}>
+              <div style={ui.mini}>ScholarSwap</div>
+              <div style={{ fontWeight: 950 }}>
+                {mode === "give" ? "What are you giving away? (required)" : mode === "request" ? "What do you need? (required)" : "Event title (required)"}
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <input
+                  type="text"
+                  placeholder={
+                    mode === "give"
+                      ? 'Example: "Bedford Handbook (good condition)"'
+                      : mode === "request"
+                      ? 'Example: "Need a ride Friday 6am"'
+                      : 'Example: "Finance Club Guest Speaker Night"'
+                  }
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  style={ui.input}
+                />
+              </div>
+              <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
+                Tip: short + specific beats long + vague.
+              </div>
+            </div>
+          </div>
+
+          {/* DESCRIPTION (required for all 3) */}
+          <div style={ui.row("left")}>
+            <div style={ui.bubble("left")}>
+              <div style={ui.mini}>ScholarSwap</div>
+              <div style={{ fontWeight: 950 }}>
+                {mode === "give"
+                  ? "Any details someone should know? (required)"
+                  : mode === "request"
+                  ? "Add context so people can help fast. (required)"
+                  : "Short description (required)"}
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <textarea
+                  placeholder={
+                    mode === "give"
+                      ? "Condition, what's included, any flaws."
+                      : mode === "request"
+                      ? "Where/when/how urgent? Keep it simple."
+                      : "What is it? Who is it for? Any key details."
+                  }
+                  rows={4}
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  style={ui.textarea}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* GIVE REQUIRED: photo + category + pickup */}
+          {mode === "give" && (
             <>
-              {/* Event title bubble */}
               <div style={ui.row("left")}>
                 <div style={ui.bubble("left")}>
-                  <div style={ui.mini}>ScholarSwap • Events</div>
-                  <div style={{ fontWeight: 950 }}>What’s the event called?</div>
-                  <div style={{ marginTop: 10 }}>
-                    <input
-                      type="text"
-                      placeholder='Example: "Finance Club: Everence Panel"'
-                      value={eventTitle}
-                      onChange={(e) => setEventTitle(e.target.value)}
-                      style={ui.input}
-                    />
-                  </div>
-                  <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>Tip: short + clear + specific.</div>
-                </div>
-              </div>
-
-              {/* Host/Location bubble */}
-              <div style={ui.row("left")}>
-                <div style={ui.bubble("left")}>
-                  <div style={ui.mini}>ScholarSwap • Events</div>
-                  <div style={{ fontWeight: 950 }}>Host + location</div>
-
-                  <div style={{ marginTop: 10, ...ui.grid2 }}>
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
-                        Host Club/Organisation <span style={{ color: "#b91c1c" }}>*</span>
-                      </div>
-                      <input
-                        type="text"
-                        placeholder='Example: "Finance Club"'
-                        value={eventHostOrg}
-                        onChange={(e) => setEventHostOrg(e.target.value)}
-                        style={ui.input}
-                      />
-                    </div>
-
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
-                        Location <span style={{ color: "#b91c1c" }}>*</span>
-                      </div>
-                      <input
-                        type="text"
-                        placeholder='Example: "Dauch 209"'
-                        value={eventLocation}
-                        onChange={(e) => setEventLocation(e.target.value)}
-                        style={ui.input}
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Category + time bubble */}
-              <div style={ui.row("left")}>
-                <div style={ui.bubble("left")}>
-                  <div style={ui.mini}>ScholarSwap • Events</div>
-                  <div style={{ fontWeight: 950 }}>Category + time</div>
-
-                  <div style={{ marginTop: 10, ...ui.grid2 }}>
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Category</div>
-                      <select
-                        value={eventCategory}
-                        onChange={(e) => setEventCategory(e.target.value as EventCategory)}
-                        style={ui.select}
-                      >
-                        <option value="club">Club</option>
-                        <option value="sports">Sports</option>
-                        <option value="party">Party</option>
-                        <option value="career">Career</option>
-                        <option value="volunteering">Volunteering</option>
-                        <option value="workshop">Workshop</option>
-                        <option value="campus">Campus</option>
-                        <option value="other">Other</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
-                        Start time <span style={{ color: "#b91c1c" }}>*</span>
-                      </div>
-                      <input
-                        type="datetime-local"
-                        value={eventStartLocal}
-                        onChange={(e) => setEventStartLocal(e.target.value)}
-                        style={ui.input}
-                      />
-                    </div>
-                  </div>
+                  <div style={ui.mini}>ScholarSwap</div>
+                  <div style={{ fontWeight: 950 }}>Add a photo (required)</div>
 
                   <div style={{ marginTop: 10 }}>
-                    <button
-                      type="button"
-                      style={{
-                        ...ui.ghostBtn,
-                        width: "100%",
-                        borderRadius: 14,
-                        background: eventHasEnd ? "rgba(16,185,129,0.10)" : "white",
-                        borderColor: eventHasEnd ? "rgba(16,185,129,0.35)" : "#e5e7eb",
-                        color: eventHasEnd ? "#065f46" : "#111827",
-                        fontWeight: 950,
-                      }}
-                      onClick={() => setEventHasEnd((v) => !v)}
-                    >
-                      {eventHasEnd ? "End time: ON" : "Add optional end time"}
-                    </button>
-                  </div>
-
-                  {eventHasEnd && (
-                    <div style={{ marginTop: 10 }}>
-                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>End time</div>
-                      <input
-                        type="datetime-local"
-                        value={eventEndLocal}
-                        onChange={(e) => setEventEndLocal(e.target.value)}
-                        style={ui.input}
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Description bubble */}
-              <div style={ui.row("left")}>
-                <div style={ui.bubble("left")}>
-                  <div style={ui.mini}>ScholarSwap • Events</div>
-                  <div style={{ fontWeight: 950 }}>
-                    Description <span style={{ color: "#b91c1c" }}>*</span>
-                  </div>
-                  <div style={{ marginTop: 10 }}>
-                    <textarea
-                      placeholder='Example: "Interactive Q&A with Everence team. Giveaways + networking."'
-                      rows={4}
-                      value={eventDescription}
-                      onChange={(e) => setEventDescription(e.target.value)}
-                      style={ui.textarea}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Link bubble */}
-              <div style={ui.row("left")}>
-                <div style={ui.bubble("left")}>
-                  <div style={ui.mini}>ScholarSwap • Events</div>
-                  <div style={{ fontWeight: 950 }}>Optional link</div>
-                  <div style={{ marginTop: 10 }}>
-                    <input
-                      type="text"
-                      placeholder='Example: "https://instagram.com/p/..."'
-                      value={eventLinkUrl}
-                      onChange={(e) => setEventLinkUrl(e.target.value)}
-                      style={ui.input}
-                    />
-                  </div>
-                  <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
-                    Link must start with http:// or https://
-                  </div>
-                </div>
-              </div>
-
-              {/* Flyer upload bubble (optional) */}
-              <div style={ui.row("left")}>
-                <div style={ui.bubble("left")}>
-                  <div style={ui.mini}>ScholarSwap • Events</div>
-                  <div style={{ fontWeight: 950 }}>Flyer / poster (optional)</div>
-
-                  <div
-                    style={{ marginTop: 10 }}
-                    onDragEnter={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setFlyerDragOver(true);
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setFlyerDragOver(true);
-                    }}
-                    onDragLeave={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setFlyerDragOver(false);
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setFlyerDragOver(false);
-                      const dropped = e.dataTransfer.files?.[0] ?? null;
-                      if (dropped) handleFlyerPicked(dropped);
-                    }}
-                  >
-                    <div style={ui.drop(flyerDragOver, !!flyerPreviewUrl)}>
+                    <div style={ui.drop(!!itemPreviewUrl)}>
                       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
                         <div
                           style={{
@@ -1268,39 +1112,275 @@ export default function CreatePage() {
                           ⬆
                         </div>
                         <div>
-                          <div style={{ fontWeight: 950 }}>
-                            {flyerPreviewUrl ? "Flyer attached" : flyerDragOver ? "Drop it here" : "Drag & drop a flyer"}
-                          </div>
+                          <div style={{ fontWeight: 950 }}>{itemPreviewUrl ? "Photo attached" : "Choose a photo"}</div>
                           <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
-                            JPG / PNG / WEBP • max {MAX_FLYER_MB}MB
+                            JPG / PNG / WEBP • max {MAX_ITEM_PHOTO_MB}MB
                           </div>
                         </div>
                       </div>
 
                       <div style={{ display: "flex", gap: 10 }}>
                         <input
-                          ref={flyerInputRef}
+                          ref={itemFileInputRef}
                           type="file"
                           accept="image/jpeg,image/png,image/webp"
-                          onChange={(e) => handleFlyerPicked(e.target.files?.[0] ?? null)}
+                          onChange={(e) => handleItemFilePicked(e.target.files?.[0] ?? null)}
                           style={{ display: "none" }}
                         />
-                        <button type="button" style={ui.ghostBtn} onClick={() => flyerInputRef.current?.click()}>
-                          {flyerPreviewUrl ? "Change" : "Choose"}
+                        <button type="button" style={ui.ghostBtn} onClick={() => itemFileInputRef.current?.click()}>
+                          {itemPreviewUrl ? "Change" : "Choose"}
                         </button>
-                        {flyerFile && (
-                          <button type="button" style={ui.dangerBtn} onClick={() => setFlyerFile(null)}>
+                        {itemFile && (
+                          <button type="button" style={ui.dangerBtn} onClick={() => setItemFile(null)}>
                             Remove
                           </button>
                         )}
                       </div>
                     </div>
 
-                    {flyerPreviewUrl && (
+                    {itemPreviewUrl && (
                       <div style={{ marginTop: 12 }}>
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
-                          src={flyerPreviewUrl}
+                          src={itemPreviewUrl}
+                          alt="Preview"
+                          style={{
+                            width: "100%",
+                            height: 260,
+                            objectFit: "cover",
+                            borderRadius: 18,
+                            border: "1px solid #e5e7eb",
+                            boxShadow: "0 16px 40px rgba(0,0,0,0.08)",
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap</div>
+                  <div style={{ fontWeight: 950 }}>Category & pickup spot (required)</div>
+
+                  <div style={{ marginTop: 10, ...ui.grid2 }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Category</div>
+                      <select value={giveCategory} onChange={(e) => setGiveCategory(e.target.value as GiveCategory)} style={ui.select}>
+                        <option value="books">Books</option>
+                        <option value="notes">Notes</option>
+                        <option value="electronics">Electronics</option>
+                        <option value="furniture">Furniture</option>
+                        <option value="clothing">Clothing</option>
+                        <option value="sport equipment">Sport equipment</option>
+                        <option value="stationary item">Stationary item</option>
+                        <option value="health & beauty">Health & Beauty</option>
+                        <option value="home & kitchen">Home & Kitchen</option>
+                        <option value="musical instruments">Musical Instruments</option>
+                        <option value="jeweleries">Jeweleries</option>
+                        <option value="art pieces">Art pieces</option>
+                        <option value="ride">Ride</option>
+                        <option value="others">Others</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Pickup spot</div>
+                      <select
+                        value={pickupLocation}
+                        onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
+                        style={ui.select}
+                      >
+                        <option value="College Quad">College Quad</option>
+                        <option value="Safety Service Office">Safety Service Office</option>
+                        <option value="Dining Hall">Dining Hall</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* REQUEST REQUIRED: request type + timeframe */}
+          {mode === "request" && (
+            <div style={ui.row("left")}>
+              <div style={ui.bubble("left")}>
+                <div style={ui.mini}>ScholarSwap</div>
+                <div style={{ fontWeight: 950 }}>Request type & timeframe (required)</div>
+
+                <div style={{ marginTop: 10, ...ui.grid2 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Request type</div>
+                    <select value={requestGroup} onChange={(e) => setRequestGroup(e.target.value as RequestGroup)} style={ui.select}>
+                      <option value="logistics">Logistics (ride / moving / borrow)</option>
+                      <option value="services">Services (tutoring / tech help / haircut)</option>
+                      <option value="urgent">Urgent (charger / calculator / meds)</option>
+                      <option value="collaboration">Collaboration (club / hackathon / project)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Timeframe</div>
+                    <select
+                      value={requestTimeframe}
+                      onChange={(e) => setRequestTimeframe(e.target.value as RequestTimeframe)}
+                      style={ui.select}
+                    >
+                      <option value="today">Today</option>
+                      <option value="this_week">This week</option>
+                      <option value="flexible">Flexible</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Location (optional)</div>
+                  <input
+                    type="text"
+                    placeholder='Example: "Dorm A" or "Near dining hall"'
+                    value={requestLocation}
+                    onChange={(e) => setRequestLocation(e.target.value)}
+                    style={ui.input}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* EVENT REQUIRED: category + start time + location + host; optional: end, link, flyer */}
+          {mode === "event" && (
+            <>
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap • Events</div>
+                  <div style={{ fontWeight: 950 }}>Event details (required)</div>
+
+                  <div style={{ marginTop: 10, ...ui.grid2 }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Category</div>
+                      <select value={eventCategory} onChange={(e) => setEventCategory(e.target.value as EventCategory)} style={ui.select}>
+                        <option value="career">Career</option>
+                        <option value="club">Club</option>
+                        <option value="sports">Sports</option>
+                        <option value="music">Music</option>
+                        <option value="arts">Arts</option>
+                        <option value="volunteering">Volunteering</option>
+                        <option value="academic">Academic</option>
+                        <option value="social">Social</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Host Club/Organisation</div>
+                      <input
+                        type="text"
+                        placeholder='Example: "Finance Club"'
+                        value={hostOrg}
+                        onChange={(e) => setHostOrg(e.target.value)}
+                        style={ui.input}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Location</div>
+                    <input
+                      type="text"
+                      placeholder='Example: "Dauch 125"'
+                      value={eventLocation}
+                      onChange={(e) => setEventLocation(e.target.value)}
+                      style={ui.input}
+                    />
+                  </div>
+
+                  <div style={{ marginTop: 10, ...ui.grid2 }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Start time</div>
+                      <input type="datetime-local" value={startLocal} onChange={(e) => setStartLocal(e.target.value)} style={ui.input} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>End time (optional)</div>
+                      <input type="datetime-local" value={endLocal} onChange={(e) => setEndLocal(e.target.value)} style={ui.input} />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap • Events</div>
+                  <div style={{ fontWeight: 950 }}>Optional link</div>
+                  <div style={{ marginTop: 10 }}>
+                    <input
+                      type="text"
+                      placeholder='Example: "https://instagram.com/p/..."'
+                      value={eventLink}
+                      onChange={(e) => setEventLink(e.target.value)}
+                      style={ui.input}
+                    />
+                  </div>
+                  <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>Link must start with http:// or https:// (or leave empty).</div>
+                </div>
+              </div>
+
+              <div style={ui.row("left")}>
+                <div style={ui.bubble("left")}>
+                  <div style={ui.mini}>ScholarSwap • Events</div>
+                  <div style={{ fontWeight: 950 }}>Flyer / poster (optional)</div>
+
+                  <div style={{ marginTop: 10 }}>
+                    <div style={ui.drop(!!eventPreviewUrl)}>
+                      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                        <div
+                          style={{
+                            width: 42,
+                            height: 42,
+                            borderRadius: 14,
+                            background: "rgba(16,185,129,0.12)",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontWeight: 950,
+                            color: "#065f46",
+                          }}
+                        >
+                          ⬆
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 950 }}>{eventPreviewUrl ? "Flyer attached" : "Choose a flyer image"}</div>
+                          <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+                            JPG / PNG / WEBP • max {MAX_EVENT_FLYER_MB}MB
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <input
+                          ref={eventFileInputRef}
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          onChange={(e) => handleEventFilePicked(e.target.files?.[0] ?? null)}
+                          style={{ display: "none" }}
+                        />
+                        <button type="button" style={ui.ghostBtn} onClick={() => eventFileInputRef.current?.click()}>
+                          {eventPreviewUrl ? "Change" : "Choose"}
+                        </button>
+                        {eventFile && (
+                          <button type="button" style={ui.dangerBtn} onClick={() => setEventFile(null)}>
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {eventPreviewUrl && (
+                      <div style={{ marginTop: 12 }}>
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={eventPreviewUrl}
                           alt="Flyer preview"
                           style={{
                             width: "100%",
@@ -1319,259 +1399,7 @@ export default function CreatePage() {
             </>
           )}
 
-          {/* ===================== ITEM FORM (Give/Request) ===================== */}
-          {postType !== "event" && (
-            <>
-              {/* Title bubble */}
-              <div style={ui.row("left")}>
-                <div style={ui.bubble("left")}>
-                  <div style={ui.mini}>ScholarSwap</div>
-                  <div style={{ fontWeight: 950 }}>
-                    {postType === "give" ? "What are you giving away?" : "What do you need?"}
-                  </div>
-                  <div style={{ marginTop: 10 }}>
-                    <input
-                      type="text"
-                      placeholder={
-                        postType === "give"
-                          ? 'Example: "Bedford Handbook (good condition)"'
-                          : 'Example: "Need a ride Friday 6am"'
-                      }
-                      value={title}
-                      onChange={(e) => setTitle(e.target.value)}
-                      style={ui.input}
-                    />
-                  </div>
-                  <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
-                    Tip: lead with the noun + condition + key detail.
-                  </div>
-                </div>
-              </div>
-
-              {/* Details bubble */}
-              <div style={ui.row("left")}>
-                <div style={ui.bubble("left")}>
-                  <div style={ui.mini}>ScholarSwap</div>
-                  <div style={{ fontWeight: 950 }}>
-                    {postType === "give" ? "Any details someone should know?" : "Add context so people can help fast."}
-                  </div>
-                  <div style={{ marginTop: 10 }}>
-                    <textarea
-                      placeholder={postType === "give" ? "What’s included? any flaws?" : "Where/when/how urgent? Keep it simple."}
-                      rows={4}
-                      value={description}
-                      onChange={(e) => setDescription(e.target.value)}
-                      style={ui.textarea}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Give: photo bubble */}
-              {postType === "give" && (
-                <div style={ui.row("left")}>
-                  <div style={ui.bubble("left")}>
-                    <div style={ui.mini}>ScholarSwap</div>
-                    <div style={{ fontWeight: 950 }}>Add a photo (required)</div>
-
-                    <div
-                      style={{ marginTop: 10 }}
-                      onDragEnter={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setDragOver(true);
-                      }}
-                      onDragOver={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setDragOver(true);
-                      }}
-                      onDragLeave={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setDragOver(false);
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setDragOver(false);
-                        const dropped = e.dataTransfer.files?.[0] ?? null;
-                        if (dropped) handleItemFilePicked(dropped);
-                      }}
-                    >
-                      <div style={ui.drop(dragOver, !!previewUrl)}>
-                        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                          <div
-                            style={{
-                              width: 42,
-                              height: 42,
-                              borderRadius: 14,
-                              background: "rgba(16,185,129,0.12)",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              fontWeight: 950,
-                              color: "#065f46",
-                            }}
-                          >
-                            ⬆
-                          </div>
-                          <div>
-                            <div style={{ fontWeight: 950 }}>
-                              {previewUrl ? "Photo attached" : dragOver ? "Drop it here" : "Drag & drop a photo"}
-                            </div>
-                            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
-                              JPG / PNG / WEBP • max {MAX_PHOTO_MB}MB
-                            </div>
-                          </div>
-                        </div>
-
-                        <div style={{ display: "flex", gap: 10 }}>
-                          <input
-                            ref={fileInputRef}
-                            type="file"
-                            accept="image/jpeg,image/png,image/webp"
-                            onChange={(e) => handleItemFilePicked(e.target.files?.[0] ?? null)}
-                            style={{ display: "none" }}
-                          />
-                          <button type="button" style={ui.ghostBtn} onClick={() => fileInputRef.current?.click()}>
-                            {previewUrl ? "Change" : "Choose"}
-                          </button>
-                          {file && (
-                            <button type="button" style={ui.dangerBtn} onClick={() => setFile(null)}>
-                              Remove
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      {previewUrl && (
-                        <div style={{ marginTop: 12 }}>
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={previewUrl}
-                            alt="Preview"
-                            style={{
-                              width: "100%",
-                              height: 260,
-                              objectFit: "cover",
-                              borderRadius: 18,
-                              border: "1px solid #e5e7eb",
-                              boxShadow: "0 16px 40px rgba(0,0,0,0.08)",
-                            }}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Essentials bubble */}
-              {postType === "give" && (
-                <div style={ui.row("left")}>
-                  <div style={ui.bubble("left")}>
-                    <div style={ui.mini}>ScholarSwap</div>
-                    <div style={{ fontWeight: 950 }}>Quick choices (helps discovery)</div>
-
-                    <div style={{ marginTop: 10, ...ui.grid2 }}>
-                      <div>
-                        <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Category</div>
-                        <select
-                          value={giveCategory}
-                          onChange={(e) => setGiveCategory(e.target.value as GiveCategory)}
-                          style={ui.select}
-                        >
-                          <option value="books">Books</option>
-                          <option value="notes">Notes</option>
-                          <option value="electronics">Electronics</option>
-                          <option value="furniture">Furniture</option>
-                          <option value="clothing">Clothing</option>
-                          <option value="sport equipment">Sport equipment</option>
-                          <option value="stationary item">Stationary item</option>
-                          <option value="health & beauty">Health & Beauty</option>
-                          <option value="home & kitchen">Home & Kitchen</option>
-                          <option value="musical instruments">Musical Instruments</option>
-                          <option value="jeweleries">Jeweleries</option>
-                          <option value="art pieces">Art pieces</option>
-                          <option value="ride">Ride</option>
-                          <option value="others">Others</option>
-                        </select>
-                      </div>
-
-                      <div>
-                        <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Pickup spot</div>
-                        <select
-                          value={pickupLocation}
-                          onChange={(e) => setPickupLocation(e.target.value as PickupLocation)}
-                          style={ui.select}
-                        >
-                          <option value="College Quad">College Quad</option>
-                          <option value="Safety Service Office">Safety Service Office</option>
-                          <option value="Dining Hall">Dining Hall</option>
-                        </select>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {postType === "request" && (
-                <div style={ui.row("left")}>
-                  <div style={ui.bubble("left")}>
-                    <div style={ui.mini}>ScholarSwap</div>
-                    <div style={{ fontWeight: 950 }}>Pick a type + timeframe</div>
-
-                    <div style={{ marginTop: 10, ...ui.grid2 }}>
-                      <div>
-                        <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
-                          Request type
-                        </div>
-                        <select
-                          value={requestGroup}
-                          onChange={(e) => setRequestGroup(e.target.value as RequestGroup)}
-                          style={ui.select}
-                        >
-                          <option value="logistics">Logistics (ride / moving / borrow)</option>
-                          <option value="services">Services (tutoring / tech help / haircut)</option>
-                          <option value="urgent">Urgent (charger / calculator / meds)</option>
-                          <option value="collaboration">Collaboration (club / hackathon / project)</option>
-                        </select>
-                      </div>
-
-                      <div>
-                        <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Timeframe</div>
-                        <select
-                          value={requestTimeframe}
-                          onChange={(e) => setRequestTimeframe(e.target.value as RequestTimeframe)}
-                          style={ui.select}
-                        >
-                          <option value="today">Today</option>
-                          <option value="this_week">This week</option>
-                          <option value="flexible">Flexible</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    <div style={{ marginTop: 10 }}>
-                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
-                        Location (optional)
-                      </div>
-                      <input
-                        type="text"
-                        placeholder='Example: "Dorm A" or "Near dining hall"'
-                        value={requestLocation}
-                        onChange={(e) => setRequestLocation(e.target.value)}
-                        style={ui.input}
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Options drawer (shared) */}
+          {/* OPTIONS */}
           <div>
             <button type="button" onClick={() => setShowOptions((v) => !v)} style={ui.drawerBtn} aria-expanded={showOptions}>
               <span>More options</span>
@@ -1582,9 +1410,7 @@ export default function CreatePage() {
               <div style={ui.drawer}>
                 <div style={ui.grid2}>
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
-                      Hide my name
-                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Hide my name</div>
                     <button
                       type="button"
                       onClick={() => setHideName((v) => !v)}
@@ -1602,43 +1428,26 @@ export default function CreatePage() {
                       {hideName ? "Hidden: ON" : "Hidden: OFF"}
                     </button>
                     <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
-                      When ON, your name won’t show publicly.
+                      When ON, your name won’t show on the feed.
                     </div>
                   </div>
 
-                  {/* Expiry only applies to item requests/gives */}
-                  {postType !== "event" ? (
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
-                        Automatically close after
-                      </div>
-                      <select
-                        value={expireChoice}
-                        onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
-                        style={ui.select}
-                      >
-                        {postType === "request" && <option value="urgent24">Urgent (24 hours)</option>}
-                        <option value="7">7 days</option>
-                        <option value="14">14 days</option>
-                        <option value="30">30 days</option>
-                        <option value="never">Until I cancel</option>
-                      </select>
-                      {postType === "request" && expireChoice === "urgent24" && (
-                        <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
-                          Urgent requests expire in 24 hours unless you repost.
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>
-                        Posting policy
-                      </div>
-                      <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.35 }}>
-                        Events stay visible until the start time (you’ll hide expired events on the Events feed later).
-                      </div>
-                    </div>
-                  )}
+                  {/* expiry only applies to items/requests */}
+                  <div style={{ opacity: mode === "event" ? 0.5 : 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 950, color: "#6b7280", marginBottom: 6 }}>Automatically close after</div>
+                    <select
+                      value={expireChoice}
+                      onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)}
+                      style={ui.select}
+                      disabled={mode === "event"}
+                    >
+                      {mode === "request" && <option value="urgent24">Urgent (24 hours)</option>}
+                      <option value="7">7 days</option>
+                      <option value="14">14 days</option>
+                      <option value="30">30 days</option>
+                      <option value="never">Until I cancel</option>
+                    </select>
+                  </div>
                 </div>
               </div>
             )}
