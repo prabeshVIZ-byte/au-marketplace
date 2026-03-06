@@ -1,707 +1,749 @@
 "use client";
-
 export const dynamic = "force-dynamic";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
-import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
 
-/* ---------------- Types ---------------- */
+/**
+ * CREATE PAGE (Give / Request / Event) — SCHEMA-SAFE VERSION
+ *
+ * Fixes your recurring Supabase schema failures by matching what your DB expects:
+ * ✅ events table has NOT NULL columns like:
+ *    - action (NOT NULL)  -> we send "create"
+ *    - entity_type (NOT NULL) -> we send "campus_event"
+ *
+ * ✅ item_photos table columns (per your schema CSV):
+ *    - item_id (uuid)
+ *    - owner_id (uuid)  (often NOT NULL)
+ *    - path (text)      (storage path)
+ *    -> we insert { item_id, owner_id, path }
+ *
+ * ✅ Button not clickable:
+ *    - sticky submit is a real form submit (type="submit" form="create-form")
+ *    - sticky zIndex high + bottom-nav height CSS var
+ */
 
-type ProfileRow = {
-  id: string;
-  email: string | null;
-  full_name: string | null;
-  user_role: string | null;
-  created_at?: string;
-};
+type Mode = "give" | "request" | "event";
+type PostType = "give" | "request";
 
-type MyItemRow = {
-  id: string;
-  title: string;
-  description: string | null;
-  status: string | null;
-  created_at: string;
-  photo_url: string | null;
-  post_type?: "give" | "request" | null;
-};
+type GiveCategory =
+  | "clothing"
+  | "sport equipment"
+  | "stationary item"
+  | "ride"
+  | "books"
+  | "notes"
+  | "art pieces"
+  | "others"
+  | "electronics"
+  | "furniture"
+  | "health & beauty"
+  | "home & kitchen"
+  | "jeweleries"
+  | "musical instruments";
 
-type MyRequestRow = {
-  item_id: string;
-  created_at?: string | null;
-  items: {
-    id: string;
-    title: string;
-    photo_url: string | null;
-    status: string | null;
-    post_type?: "give" | "request" | null;
-  } | null;
-};
+type PickupLocation = "College Quad" | "Safety Service Office" | "Dining Hall";
 
-type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
+type RequestGroup = "logistics" | "services" | "urgent" | "collaboration";
+type RequestTimeframe = "today" | "this_week" | "flexible";
 
-type IncomingInterestRow = {
-  id: string; // interests.id
-  item_id: string;
-  user_id: string;
-  created_at: string | null;
-  owner_seen_at: string | null;
-  owner_dismissed_at: string | null;
-  status: string | null;
+type EventCategory =
+  | "career"
+  | "club"
+  | "sports"
+  | "music"
+  | "arts"
+  | "volunteering"
+  | "academic"
+  | "social"
+  | "other";
 
-  items: {
-    id: string;
-    title: string;
-    photo_url: string | null;
-    status: string | null;
-    owner_id: string;
-    post_type?: "give" | "request" | null;
-  } | null;
+type ExpireChoice = "7" | "14" | "30" | "never" | "urgent24";
 
-  requester: {
-    full_name: string | null;
-    email: string | null;
-    user_role: string | null;
-  } | null;
-};
+const ITEMS_TABLE = "items";
+const ITEM_PHOTOS_TABLE = "item_photos";
+const EVENTS_TABLE = "events";
 
-type IncomingOfferRow = {
-  id: string; // request_offers.id
-  request_id: string;
-  helper_id: string;
-  status: OfferStatus | null;
-  availability: string | null;
-  note: string | null;
-  created_at: string | null;
-  updated_at: string | null;
+const ITEM_PHOTOS_BUCKET = "item-photos";
+const EVENT_FLYERS_BUCKET = "event-flyers";
 
-  request_item: {
-    id: string;
-    title: string;
-    status: string | null;
-    owner_id: string;
-    post_type?: "give" | "request" | null;
-  } | null;
+const MAX_ITEM_PHOTO_MB = 6;
+const MAX_EVENT_FLYER_MB = 8;
 
-  helper: {
-    full_name: string | null;
-    email: string | null;
-    user_role: string | null;
-  } | null;
-};
+const STICKY_BAR_HEIGHT = 74;
+const EVENT_SUCCESS_ROUTE = "/feed";
 
-type MyOfferRow = {
-  id: string; // request_offers.id
-  request_id: string;
-  helper_id: string;
-  status: OfferStatus | null;
-  availability: string | null;
-  note: string | null;
-  created_at: string | null;
-
-  request_item: {
-    id: string;
-    title: string;
-    status: string | null;
-    post_type?: "give" | "request" | null;
-  } | null;
-};
-
-/* ---------------- Helpers ---------------- */
-
-function isAshlandEmail(email: string) {
-  return email.trim().toLowerCase().endsWith("@ashland.edu");
+// ---------------- utils ----------------
+function isAllowedImage(file: File) {
+  return ["image/jpeg", "image/png", "image/webp"].includes(file.type);
 }
 
-function fmtWhen(ts: string | null | undefined) {
-  if (!ts) return "";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString();
+function getExt(name: string) {
+  const parts = name.split(".");
+  return parts.length > 1 ? (parts.pop() || "jpg").toLowerCase() : "jpg";
 }
 
-function normStatus(s: string | null | undefined) {
-  return (s ?? "").trim().toLowerCase();
+function uuidSafe() {
+  // @ts-ignore
+  if (typeof crypto !== "undefined" && crypto?.randomUUID) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
 }
 
-function niceNameFromProfile(
-  p: { full_name: string | null; email: string | null } | null,
-  fallbackLabel: string
-) {
-  const name = (p?.full_name ?? "").trim();
-  if (name) return name;
-  const email = (p?.email ?? "").trim();
-  if (email) return email.split("@")[0];
-  return fallbackLabel;
+function addDaysISO(days: number) {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
-/* ---------------- Page ---------------- */
+function computeExpiry(choice: ExpireChoice) {
+  if (choice === "urgent24") return { untilCancel: false, expiresAt: addDaysISO(1) };
+  if (choice === "never") return { untilCancel: true, expiresAt: null as string | null };
+  return { untilCancel: false, expiresAt: addDaysISO(Number(choice)) };
+}
 
-export default function AccountPage() {
+function isValidHttpUrlMaybeEmpty(raw: string) {
+  const v = raw.trim();
+  if (!v) return true;
+  return /^https?:\/\//i.test(v);
+}
+
+/** Safari-safe datetime-local -> ISO */
+function localDateTimeToISO(localValue: string) {
+  if (!localValue) return null;
+  const m = localValue.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const hh = Number(m[4]);
+  const mm = Number(m[5]);
+  const dt = new Date(y, mo - 1, d, hh, mm, 0, 0);
+  if (Number.isNaN(dt.getTime())) return null;
+  return dt.toISOString();
+}
+
+function errToMsg(e: any) {
+  if (!e) return "Something went wrong.";
+  if (typeof e === "string") return e;
+  if (e?.message) return e.message;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
+// ---------------- main ----------------
+export default function CreatePage() {
   const router = useRouter();
 
-  // auth (single source of truth)
+  const formRef = useRef<HTMLFormElement | null>(null);
+  const itemFileInputRef = useRef<HTMLInputElement | null>(null);
+  const eventFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // auth + profile
+  const [authLoading, setAuthLoading] = useState(true);
+  const [profileLoading, setProfileLoading] = useState(true);
+
+  const [email, setEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [profileComplete, setProfileComplete] = useState(false);
 
-  // page state
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
+  // mode
+  const [mode, setMode] = useState<Mode>("give");
 
-  // logged-out UI
-  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
-  const [authEmail, setAuthEmail] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [authBusy, setAuthBusy] = useState(false);
+  // shared
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
 
-  // data
-  const [profile, setProfile] = useState<ProfileRow | null>(null);
-  const [myItems, setMyItems] = useState<MyItemRow[]>([]);
-  const [myRequests, setMyRequests] = useState<MyRequestRow[]>([]);
-  const [myOffers, setMyOffers] = useState<MyOfferRow[]>([]);
-  const [incomingInterests, setIncomingInterests] = useState<IncomingInterestRow[]>([]);
-  const [incomingOffers, setIncomingOffers] = useState<IncomingOfferRow[]>([]);
-  const [incomingLoading, setIncomingLoading] = useState(false);
+  // give
+  const [giveCategory, setGiveCategory] = useState<GiveCategory>("books");
+  const [pickupLocation, setPickupLocation] = useState<PickupLocation>("College Quad");
+  const [itemFile, setItemFile] = useState<File | null>(null);
+  const [itemPreviewUrl, setItemPreviewUrl] = useState<string | null>(null);
 
-  // tabs
-  const [tab, setTab] = useState<"listings" | "my_activity" | "requests" | "history">("listings");
+  // request
+  const [requestGroup, setRequestGroup] = useState<RequestGroup>("logistics");
+  const [requestTimeframe, setRequestTimeframe] = useState<RequestTimeframe>("today");
+  const [requestLocation, setRequestLocation] = useState("");
 
-  // lightweight “counts”
-  const [stats, setStats] = useState<{ listed: number; interests: number; offers: number; chats: number }>({
-    listed: 0,
-    interests: 0,
-    offers: 0,
-    chats: 0,
+  // event
+  const [eventCategory, setEventCategory] = useState<EventCategory>("club");
+  const [eventLocation, setEventLocation] = useState("");
+  const [hostOrg, setHostOrg] = useState("");
+  const [eventLink, setEventLink] = useState("");
+  const [startLocal, setStartLocal] = useState("");
+  const [endLocal, setEndLocal] = useState("");
+  const [eventFile, setEventFile] = useState<File | null>(null);
+  const [eventPreviewUrl, setEventPreviewUrl] = useState<string | null>(null);
+
+  // options
+  const [showOptions, setShowOptions] = useState(false);
+  const [hideName, setHideName] = useState(false);
+  const [expireChoice, setExpireChoice] = useState<ExpireChoice>("7");
+
+  // submit
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  // derived
+  const cleanTitle = useMemo(() => title.trim(), [title]);
+  const cleanDesc = useMemo(() => description.trim(), [description]);
+  const startIso = useMemo(() => localDateTimeToISO(startLocal), [startLocal]);
+  const endIso = useMemo(() => localDateTimeToISO(endLocal), [endLocal]);
+
+  const isAshland = useMemo(() => !!email && email.toLowerCase().endsWith("@ashland.edu"), [email]);
+  const isLoggedIn = !!userId && !!email && isAshland;
+
+  useEffect(() => setMsg(null), [mode]);
+
+  // previews
+  useEffect(() => {
+    if (!itemFile) {
+      setItemPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(itemFile);
+    setItemPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [itemFile]);
+
+  useEffect(() => {
+    if (!eventFile) {
+      setEventPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(eventFile);
+    setEventPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [eventFile]);
+
+  // bottom-nav height css var
+  useEffect(() => {
+    const update = () => {
+      const el = document.getElementById("bottom-nav");
+      if (!el) return;
+      document.documentElement.style.setProperty("--bottom-nav-height", `${el.offsetHeight}px`);
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  // auth
+  useEffect(() => {
+    let mounted = true;
+
+    async function syncAuth() {
+      setAuthLoading(true);
+      try {
+        const timeoutMs = 6500;
+        const raced = await Promise.race([
+          supabase.auth.getSession(),
+          new Promise<any>((resolve) =>
+            setTimeout(() => resolve({ data: { session: null }, error: { message: "Auth timeout" } }), timeoutMs)
+          ),
+        ]);
+
+        if (!mounted) return;
+        const { data, error } = raced;
+        if (error) console.log("getSession:", error?.message ?? error);
+
+        const session = data?.session ?? null;
+        setEmail(session?.user?.email ?? null);
+        setUserId(session?.user?.id ?? null);
+      } catch (e: any) {
+        console.log("syncAuth error:", e?.message ?? e);
+        if (!mounted) return;
+        setEmail(null);
+        setUserId(null);
+      } finally {
+        if (mounted) setAuthLoading(false);
+      }
+    }
+
+    syncAuth();
+    const { data: sub } = supabase.auth.onAuthStateChange(() => syncAuth());
+
+    return () => {
+      mounted = false;
+      sub.subscription.unsubscribe();
+    };
+  }, []);
+
+  // profile check
+  useEffect(() => {
+    let mounted = true;
+
+    async function checkProfile() {
+      setProfileLoading(true);
+      setProfileComplete(false);
+
+      if (!userId) {
+        setProfileLoading(false);
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("full_name,user_role")
+          .eq("id", userId)
+          .maybeSingle();
+
+        if (!mounted) return;
+
+        if (error) {
+          console.log("profile check error:", error.message);
+          setProfileComplete(false);
+          return;
+        }
+
+        const fullNameOk = (data?.full_name ?? "").trim().length > 0;
+        const roleOk = data?.user_role === "student" || data?.user_role === "faculty";
+        setProfileComplete(fullNameOk && roleOk);
+      } finally {
+        if (mounted) setProfileLoading(false);
+      }
+    }
+
+    checkProfile();
+    return () => {
+      mounted = false;
+    };
+  }, [userId]);
+
+  // file pickers
+  function pickItemFile(f: File | null) {
+    setMsg(null);
+    if (!f) return setItemFile(null);
+    if (!isAllowedImage(f)) return setMsg("Upload JPG, PNG, or WEBP.");
+    if (f.size > MAX_ITEM_PHOTO_MB * 1024 * 1024) return setMsg(`Photo too large (max ${MAX_ITEM_PHOTO_MB}MB).`);
+    setItemFile(f);
+  }
+
+  function pickEventFile(f: File | null) {
+    setMsg(null);
+    if (!f) return setEventFile(null);
+    if (!isAllowedImage(f)) return setMsg("Flyer must be JPG, PNG, or WEBP.");
+    if (f.size > MAX_EVENT_FLYER_MB * 1024 * 1024) return setMsg(`Flyer too large (max ${MAX_EVENT_FLYER_MB}MB).`);
+    setEventFile(f);
+  }
+
+  function validate(): string | null {
+    if (!isLoggedIn) return "Log in with your @ashland.edu email to post.";
+    if (!profileComplete) return "Complete your profile first (name + student/faculty).";
+
+    if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
+    if (cleanDesc.length < 3) return "Description is required.";
+
+    if (mode === "give") {
+      if (!itemFile) return "Photo is required for Give posts.";
+      if (!giveCategory) return "Category is required.";
+      if (!pickupLocation) return "Pickup spot is required.";
+      return null;
+    }
+
+    if (mode === "request") {
+      if (!requestGroup) return "Request type is required.";
+      if (!requestTimeframe) return "Timeframe is required.";
+      return null;
+    }
+
+    // event
+    if (!eventCategory) return "Event category is required.";
+    if (!hostOrg.trim()) return "Host Club/Organisation is required.";
+    if (!eventLocation.trim()) return "Location is required.";
+    if (!startIso) return "Start time is required.";
+    if (!isValidHttpUrlMaybeEmpty(eventLink)) return "Link must start with http:// or https:// (or leave it empty).";
+    if (endIso && startIso && new Date(endIso).getTime() < new Date(startIso).getTime())
+      return "End time cannot be before start time.";
+    return null;
+  }
+
+  const canSubmit = useMemo(() => {
+    if (!isLoggedIn) return false;
+    if (!profileComplete) return false;
+    if (cleanTitle.length < 3) return false;
+    if (cleanDesc.length < 3) return false;
+
+    if (mode === "give") {
+      if (!itemFile) return false;
+      if (!giveCategory) return false;
+      if (!pickupLocation) return false;
+      if (!isAllowedImage(itemFile)) return false;
+      if (itemFile.size > MAX_ITEM_PHOTO_MB * 1024 * 1024) return false;
+      return true;
+    }
+
+    if (mode === "request") {
+      if (!requestGroup) return false;
+      if (!requestTimeframe) return false;
+      return true;
+    }
+
+    // event
+    if (!eventCategory) return false;
+    if (!hostOrg.trim()) return false;
+    if (!eventLocation.trim()) return false;
+    if (!startIso) return false;
+    if (!isValidHttpUrlMaybeEmpty(eventLink)) return false;
+
+    if (eventFile) {
+      if (!isAllowedImage(eventFile)) return false;
+      if (eventFile.size > MAX_EVENT_FLYER_MB * 1024 * 1024) return false;
+    }
+
+    if (endIso && startIso && new Date(endIso).getTime() < new Date(startIso).getTime()) return false;
+    return true;
+  }, [
+    isLoggedIn,
+    profileComplete,
+    cleanTitle,
+    cleanDesc,
+    mode,
+    itemFile,
+    giveCategory,
+    pickupLocation,
+    requestGroup,
+    requestTimeframe,
+    eventCategory,
+    hostOrg,
+    eventLocation,
+    startIso,
+    endIso,
+    eventLink,
+    eventFile,
+  ]);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+
+    const v = validate();
+    if (v) {
+      setMsg(v);
+      if (!isLoggedIn || !profileComplete) router.push("/me");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      // ===================== EVENT =====================
+      if (mode === "event") {
+        // IMPORTANT: match your schema (action + entity_type are NOT NULL in your DB)
+        const insertRow: any = {
+          created_by: userId,
+          title: cleanTitle,
+          description: cleanDesc,
+          host_org: hostOrg.trim(),
+          category: eventCategory,
+          location: eventLocation.trim(),
+          starts_at: startIso,
+          ends_at: endIso ?? null,
+          link_url: eventLink.trim() ? eventLink.trim() : null,
+          photo_url: null,
+          is_anonymous: hideName,
+
+          // ✅ schema-required fields (fixes your "action NOT NULL" error)
+          action: "create",
+          entity_type: "campus_event",
+        };
+
+        const { data: created, error: createErr } = await supabase
+          .from(EVENTS_TABLE)
+          .insert([insertRow])
+          .select("id")
+          .single();
+
+        if (createErr || !created?.id) {
+          // Give a more useful message
+          const hint =
+            createErr?.message?.includes("violates not-null constraint")
+              ? "Your events table has NOT NULL columns without defaults. Add defaults OR keep sending required fields (action/entity_type)."
+              : "";
+          throw new Error(`${createErr?.message || "Failed to create event."}${hint ? `\n\nHint: ${hint}` : ""}`);
+        }
+
+        const eventId = String(created.id);
+
+        // optional flyer upload
+        if (eventFile) {
+          const ext = getExt(eventFile.name);
+          const path = `events/${userId}/${eventId}/${uuidSafe()}.${ext}`;
+
+          const { error: upErr } = await supabase.storage.from(EVENT_FLYERS_BUCKET).upload(path, eventFile, {
+            cacheControl: "3600",
+            upsert: false,
+            contentType: eventFile.type || undefined,
+          });
+
+          if (upErr) {
+            setMsg(`Event posted, but flyer upload failed: ${upErr.message}`);
+            router.push(EVENT_SUCCESS_ROUTE);
+            router.refresh();
+            return;
+          }
+
+          const { data: pub } = supabase.storage.from(EVENT_FLYERS_BUCKET).getPublicUrl(path);
+          const flyerPublicUrl = pub.publicUrl;
+
+          const { error: updErr } = await supabase
+            .from(EVENTS_TABLE)
+            .update({ photo_url: flyerPublicUrl })
+            .eq("id", eventId);
+
+          if (updErr) setMsg(`Flyer uploaded, but photo_url update failed: ${updErr.message}`);
+        }
+
+        router.push(EVENT_SUCCESS_ROUTE);
+        router.refresh();
+        return;
+      }
+
+      // ===================== GIVE / REQUEST -> ITEMS =====================
+      const postType: PostType = mode === "give" ? "give" : "request";
+      const { untilCancel, expiresAt } = computeExpiry(expireChoice);
+
+      const itemInsert: any = {
+        owner_id: userId,
+        title: cleanTitle,
+        description: cleanDesc,
+        status: "available",
+        is_anonymous: hideName,
+        until_cancel: untilCancel,
+        expires_at: expiresAt,
+        photo_url: null,
+        post_type: postType,
+      };
+
+      if (postType === "give") {
+        itemInsert.category = giveCategory;
+        itemInsert.pickup_location = pickupLocation;
+        itemInsert.request_group = null;
+        itemInsert.request_timeframe = null;
+        itemInsert.request_location = null;
+      } else {
+        itemInsert.category = "others";
+        itemInsert.pickup_location = null;
+        itemInsert.request_group = requestGroup;
+        itemInsert.request_timeframe = requestTimeframe;
+        itemInsert.request_location = requestLocation.trim() ? requestLocation.trim() : null;
+      }
+
+      const { data: createdItem, error: createItemErr } = await supabase
+        .from(ITEMS_TABLE)
+        .insert([itemInsert])
+        .select("id")
+        .single();
+
+      if (createItemErr || !createdItem?.id) {
+        throw new Error(createItemErr?.message || "Failed to create post (RLS or schema mismatch).");
+      }
+
+      const itemId = String(createdItem.id);
+
+      // request: no photo required
+      if (postType === "request") {
+        router.push(`/item/${itemId}`);
+        router.refresh();
+        return;
+      }
+
+      // give: REQUIRED photo upload
+      const ext = getExt(itemFile!.name);
+      const storagePath = `items/${userId}/${itemId}/${uuidSafe()}.${ext}`;
+
+      const { error: uploadErr } = await supabase.storage.from(ITEM_PHOTOS_BUCKET).upload(storagePath, itemFile!, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: itemFile!.type || undefined,
+      });
+
+      if (uploadErr) {
+        setMsg(`Posted, but photo upload failed: ${uploadErr.message}`);
+        router.push(`/item/${itemId}`);
+        router.refresh();
+        return;
+      }
+
+      const { data: pub } = supabase.storage.from(ITEM_PHOTOS_BUCKET).getPublicUrl(storagePath);
+      const publicUrl = pub.publicUrl;
+
+      const { error: updateErr } = await supabase.from(ITEMS_TABLE).update({ photo_url: publicUrl }).eq("id", itemId);
+
+      if (updateErr) {
+        setMsg(`Photo uploaded, but photo_url update failed: ${updateErr.message}`);
+        router.push(`/item/${itemId}`);
+        router.refresh();
+        return;
+      }
+
+      // ✅ item_photos schema-safe insert (matches your actual columns)
+      // table: item_id, owner_id, path
+      const { error: photoErr } = await supabase
+        .from(ITEM_PHOTOS_TABLE)
+        .insert([{ item_id: itemId, owner_id: userId, path: storagePath }]);
+
+      if (photoErr) console.log("item_photos insert failed:", photoErr.message);
+
+      router.push(`/item/${itemId}`);
+      router.refresh();
+    } catch (err: any) {
+      setMsg(errToMsg(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ---------------- UI styles ----------------
+  const pageStyle: React.CSSProperties = {
+    minHeight: "100vh",
+    background: "#f7f7f8",
+    color: "#0f172a",
+    padding: 18,
+    paddingBottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px) + 74px + 24px)",
+  };
+
+  const shell: React.CSSProperties = { maxWidth: 760, margin: "0 auto" };
+
+  const card: React.CSSProperties = {
+    background: "white",
+    border: "1px solid #e5e7eb",
+    borderRadius: 18,
+    padding: 14,
+    boxShadow: "0 10px 24px rgba(0,0,0,0.05)",
+  };
+
+  const input: React.CSSProperties = {
+    width: "100%",
+    padding: "12px 12px",
+    borderRadius: 14,
+    border: "1px solid #e5e7eb",
+    background: "#fbfbfc",
+    outline: "none",
+    fontSize: 14,
+  };
+
+  const textarea: React.CSSProperties = { ...input, resize: "vertical", lineHeight: 1.35 };
+  const select: React.CSSProperties = { ...input, background: "white", cursor: "pointer" };
+  const row2: React.CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 };
+
+  const button: React.CSSProperties = {
+    border: "1px solid #e5e7eb",
+    background: "white",
+    color: "#111827",
+    padding: "10px 12px",
+    borderRadius: 14,
+    cursor: "pointer",
+    fontWeight: 900,
+  };
+
+  const danger: React.CSSProperties = { ...button, borderColor: "#fecaca", color: "#b91c1c" };
+
+  const sticky: React.CSSProperties = {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px))",
+    height: STICKY_BAR_HEIGHT,
+    background: "rgba(247,247,248,0.90)",
+    borderTop: "1px solid #e5e7eb",
+    backdropFilter: "blur(10px)",
+    zIndex: 9999,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "10px 16px",
+    pointerEvents: "auto",
+  };
+
+  const stickyInner: React.CSSProperties = {
+    width: "100%",
+    maxWidth: 760,
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  };
+
+  const primary = (disabled: boolean): React.CSSProperties => ({
+    border: "none",
+    borderRadius: 16,
+    padding: "12px 16px",
+    minWidth: 160,
+    fontWeight: 950,
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.55 : 1,
+    color: "white",
+    background: disabled ? "#94a3b8" : "#10b981",
+    boxShadow: disabled ? "none" : "0 14px 30px rgba(16,185,129,0.25)",
   });
 
-  // drawer
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const helperText =
+    mode === "give"
+      ? "Give: title + description + photo + category + pickup spot."
+      : mode === "request"
+      ? "Request: title + description + request type + timeframe."
+      : "Event: title + description + location + host + start time + category.";
 
-  // action states
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [deletingNotifId, setDeletingNotifId] = useState<string | null>(null);
-  const [offerActingId, setOfferActingId] = useState<string | null>(null);
-  const [myOfferActingId, setMyOfferActingId] = useState<string | null>(null);
+  const primaryLabel = mode === "give" ? "Post item" : mode === "request" ? "Post request" : "Post event";
 
-  // non-blocking UI feedback (replaces alert/confirm)
-  const [toast, setToast] = useState<{ msg: string; kind?: "ok" | "err" } | null>(null);
-  const toastTimer = useRef<any>(null);
+  const stickyHint = useMemo(() => {
+    if (!isLoggedIn) return "Log in with your @ashland.edu email to post.";
+    if (!profileComplete) return "Finish profile setup in Account.";
+    if (cleanTitle.length < 3) return "Add a clear title (3+).";
+    if (cleanDesc.length < 3) return "Add a description.";
 
-  const [confirm, setConfirm] = useState<null | { title: string; body: string; actionLabel: string; onYes: () => Promise<void> }>(null);
-
-  function showToast(msg: string, kind: "ok" | "err" = "ok") {
-    setToast({ msg, kind });
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 2400);
-  }
-
-  // “offers seen” local marker so the red dot clears after user opens Requests.
-  const [offersSeenAt, setOffersSeenAt] = useState<string | null>(null);
-
-  const isLoggedIn = useMemo(() => {
-    return !!userId && !!userEmail && isAshlandEmail(userEmail);
-  }, [userId, userEmail]);
-
-  const unseenIncomingInterestCount = useMemo(() => {
-    return incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at).length;
-  }, [incomingInterests]);
-
-  const unseenIncomingOfferCount = useMemo(() => {
-    // only treat “pending offers created after last seen” as “new”
-    const pending = incomingOffers.filter((o) => (o.status ?? "pending") === "pending");
-    if (!offersSeenAt) return pending.length;
-    const seenT = new Date(offersSeenAt).getTime();
-    return pending.filter((o) => {
-      const t = o.created_at ? new Date(o.created_at).getTime() : 0;
-      return t > seenT;
-    }).length;
-  }, [incomingOffers, offersSeenAt]);
-
-  const hasNewRequests = unseenIncomingInterestCount + unseenIncomingOfferCount > 0;
-
-  const activeListings = useMemo(() => myItems.filter((x) => normStatus(x.status) !== "claimed"), [myItems]);
-  const completedListings = useMemo(() => myItems.filter((x) => normStatus(x.status) === "claimed"), [myItems]);
-
-  const displayName =
-    (profile?.full_name ?? "").trim() || (userEmail ? userEmail.split("@")[0] : "") || "Account";
-  const roleLabel = (profile?.user_role ?? "").trim() || "member";
-
-  /* ---------------- Loaders (NO auth.getSession inside these) ---------------- */
-
-  async function loadProfile(uid: string) {
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("id,email,full_name,user_role,created_at")
-      .eq("id", uid)
-      .maybeSingle()
-      .returns<ProfileRow>();
-
-    if (error) {
-      console.warn("profile load:", error.message);
-      setProfile(null);
-      return;
+    if (mode === "give") {
+      if (!itemFile) return "Give posts require a photo.";
+      return "Ready to post Give.";
     }
-    setProfile(data ?? null);
-  }
+    if (mode === "request") return "Ready to post Request.";
 
-  async function loadMyListings(uid: string) {
-    const { data, error } = await supabase
-      .from("items")
-      .select("id,title,description,status,created_at,photo_url,post_type")
-      .eq("owner_id", uid)
-      .order("created_at", { ascending: false })
-      .returns<MyItemRow[]>();
+    if (!hostOrg.trim()) return "Add Host Club/Organisation.";
+    if (!eventLocation.trim()) return "Add event location.";
+    if (!startIso) return "Pick a start time.";
+    if (!isValidHttpUrlMaybeEmpty(eventLink)) return "Fix link (http/https) or clear it.";
+    return "Ready to post Event.";
+  }, [isLoggedIn, profileComplete, cleanTitle, cleanDesc, mode, itemFile, hostOrg, eventLocation, startIso, eventLink]);
 
-    if (error) {
-      setMyItems([]);
-      setErr(error.message);
-      return [];
-    }
-
-    setMyItems(data ?? []);
-    return data ?? [];
-  }
-
-  async function loadMyRequests(uid: string) {
-    const { data, error } = await supabase
-      .from("interests")
-      .select("item_id,created_at,items:items(id,title,photo_url,status,post_type)")
-      .eq("user_id", uid)
-      .order("created_at", { ascending: false })
-      .returns<MyRequestRow[]>();
-
-    if (error) {
-      console.warn("my requests load:", error.message);
-      setMyRequests([]);
-      return [];
-    }
-
-    setMyRequests(data ?? []);
-    return data ?? [];
-  }
-
-  async function loadMyOffers(uid: string) {
-    const { data, error } = await supabase
-      .from("request_offers")
-      .select("id,request_id,helper_id,status,availability,note,created_at,request_item:items(id,title,status,post_type)")
-      .eq("helper_id", uid)
-      .order("created_at", { ascending: false })
-      .returns<MyOfferRow[]>();
-
-    if (error) {
-      console.warn("my offers load:", error.message);
-      setMyOffers([]);
-      return [];
-    }
-
-    setMyOffers((data as MyOfferRow[]) ?? []);
-    return (data as MyOfferRow[]) ?? [];
-  }
-
-  // ✅ collapsed into ONE query using joins (no owned-items fetch, no extra item/profile fetch)
-  async function loadIncomingInterests(uid: string) {
-    const { data, error } = await supabase
-      .from("interests")
-      .select(
-        `
-        id,item_id,user_id,created_at,owner_seen_at,owner_dismissed_at,status,
-        items:items(id,title,photo_url,status,owner_id,post_type),
-        requester:profiles!interests_user_id_fkey(full_name,email,user_role)
-      `
-      )
-      .is("owner_dismissed_at", null)
-      .eq("items.owner_id", uid)
-      .order("created_at", { ascending: false })
-      .returns<IncomingInterestRow[]>();
-
-    if (error) {
-      console.warn("incoming interests load:", error.message);
-      setIncomingInterests([]);
-      return;
-    }
-
-    setIncomingInterests(data ?? []);
-  }
-
-  // ✅ collapsed into ONE query using joins
-  async function loadIncomingOffers(uid: string) {
-    const { data, error } = await supabase
-      .from("request_offers")
-      .select(
-        `
-        id,request_id,helper_id,status,availability,note,created_at,updated_at,
-        request_item:items(id,title,status,owner_id,post_type),
-        helper:profiles!request_offers_helper_id_fkey(full_name,email,user_role)
-      `
-      )
-      .eq("request_item.owner_id", uid)
-      .eq("request_item.post_type", "request")
-      .order("created_at", { ascending: false })
-      .returns<IncomingOfferRow[]>();
-
-    if (error) {
-      console.warn("incoming offers load:", error.message);
-      setIncomingOffers([]);
-      return;
-    }
-
-    setIncomingOffers(data ?? []);
-  }
-
-  async function loadIncomingAll(uid: string) {
-    setIncomingLoading(true);
-    try {
-      await Promise.all([loadIncomingInterests(uid), loadIncomingOffers(uid)]);
-    } finally {
-      setIncomingLoading(false);
-    }
-  }
-
-  async function markIncomingSeen() {
-    // only for interests (offers don’t have owner_seen_at in your schema)
-    const unseen = incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at);
-    if (unseen.length === 0) return;
-
-    const nowIso = new Date().toISOString();
-    const ids = unseen.map((r) => r.id).filter(Boolean);
-
-    const { error } = await supabase.from("interests").update({ owner_seen_at: nowIso }).in("id", ids);
-    if (error) return;
-
-    setIncomingInterests((prev) =>
-      prev.map((r) => (r.owner_seen_at || r.owner_dismissed_at ? r : { ...r, owner_seen_at: nowIso }))
+  // ---------------- gated screens ----------------
+  if (authLoading || profileLoading) {
+    return (
+      <div style={pageStyle}>
+        <div style={shell}>
+          <div style={card}>
+            <div style={{ fontWeight: 950 }}>Loading your account…</div>
+            <div style={{ marginTop: 8, fontSize: 13, color: "#6b7280" }}>
+              If this hangs, check Supabase env vars and auth settings.
+            </div>
+            {msg && (
+              <div style={{ marginTop: 12, padding: 10, borderRadius: 14, border: "1px solid #fecdd3", background: "#fff1f2", color: "#9f1239", fontWeight: 850 }}>
+                {msg}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     );
   }
 
-  /* ---------------- Actions (non-blocking confirm/toast) ---------------- */
-
-  async function deleteListing(id: string) {
-    setConfirm({
-      title: "Delete post?",
-      body: "This cannot be undone.",
-      actionLabel: "Delete",
-      onYes: async () => {
-        setConfirm(null);
-        setDeletingId(id);
-        const { error } = await supabase.from("items").delete().eq("id", id);
-        setDeletingId(null);
-
-        if (error) return showToast(error.message, "err");
-        setMyItems((prev) => prev.filter((x) => x.id !== id));
-        setStats((s) => ({ ...s, listed: Math.max(0, s.listed - 1) }));
-        showToast("Deleted.");
-      },
-    });
-  }
-
-  async function deleteNotification(r: IncomingInterestRow) {
-    setConfirm({
-      title: "Delete request?",
-      body: "This removes it from your incoming list.",
-      actionLabel: "Delete",
-      onYes: async () => {
-        setConfirm(null);
-        setDeletingNotifId(r.id);
-        const { error } = await supabase.from("interests").delete().eq("id", r.id);
-        setDeletingNotifId(null);
-
-        if (error) return showToast(error.message, "err");
-        setIncomingInterests((prev) => prev.filter((x) => x.id !== r.id));
-        showToast("Removed.");
-      },
-    });
-  }
-
-  async function updateOfferStatus(o: IncomingOfferRow, next: OfferStatus) {
-    setOfferActingId(o.id);
-    const { error } = await supabase.from("request_offers").update({ status: next }).eq("id", o.id);
-    setOfferActingId(null);
-    if (error) return showToast(error.message, "err");
-
-    setIncomingOffers((prev) => prev.map((x) => (x.id === o.id ? { ...x, status: next } : x)));
-    showToast(`Set to ${next}.`);
-  }
-
-  async function startChatWithHelper(o: IncomingOfferRow) {
-    if (!userId) return;
-    if ((o.status ?? "pending") !== "accepted") return showToast("Accept this helper first.", "err");
-    if (!o.request_item?.id) return showToast("Missing request.", "err");
-    if (!o.helper_id) return showToast("Missing helper.", "err");
-
-    try {
-      setOfferActingId(o.id);
-
-      const threadId = await ensureThread({
-        itemId: o.request_item.id,
-        ownerId: userId,
-        requesterId: o.helper_id,
-      });
-
-      await insertSystemMessage({
-        threadId,
-        senderId: userId,
-        body: "✅ Offer accepted. Use this chat to finalize details and confirm completion.",
-      });
-
-      router.push(`/messages/${threadId}`);
-    } catch (e: any) {
-      showToast(e?.message || "Could not open chat.", "err");
-    } finally {
-      setOfferActingId(null);
-    }
-  }
-
-  async function withdrawMyOffer(off: MyOfferRow) {
-    const st = (off.status ?? "pending") as OfferStatus;
-    if (st === "accepted" || st === "completed") return showToast("Cannot withdraw after acceptance/completion.", "err");
-
-    setConfirm({
-      title: "Withdraw offer?",
-      body: "This removes your offer from the request post.",
-      actionLabel: "Withdraw",
-      onYes: async () => {
-        setConfirm(null);
-        setMyOfferActingId(off.id);
-        const { error } = await supabase.from("request_offers").delete().eq("id", off.id);
-        setMyOfferActingId(null);
-
-        if (error) return showToast(error.message, "err");
-        setMyOffers((prev) => prev.filter((x) => x.id !== off.id));
-        setStats((s) => ({ ...s, offers: Math.max(0, s.offers - 1) }));
-        showToast("Offer withdrawn.");
-      },
-    });
-  }
-
-  async function startChatFromMyOffer(off: MyOfferRow) {
-    if (!userId) return;
-    const st = (off.status ?? "pending") as OfferStatus;
-    if (st !== "accepted") return showToast("Chat unlocks after acceptance.", "err");
-
-    const reqId = off.request_item?.id ?? off.request_id;
-    if (!reqId) return showToast("Missing request.", "err");
-
-    try {
-      setMyOfferActingId(off.id);
-
-      const { data, error } = await supabase.from("items").select("owner_id").eq("id", reqId).single();
-      if (error) throw new Error(error.message);
-
-      const ownerId = (data as any)?.owner_id ?? null;
-      if (!ownerId) throw new Error("Missing request owner.");
-
-      const threadId = await ensureThread({
-        itemId: reqId,
-        ownerId,
-        requesterId: userId,
-      });
-
-      await insertSystemMessage({
-        threadId,
-        senderId: userId,
-        body: "✅ Helper here. My offer was accepted — ready to finalize details.",
-      });
-
-      router.push(`/messages/${threadId}`);
-    } catch (e: any) {
-      showToast(e?.message || "Could not open chat.", "err");
-    } finally {
-      setMyOfferActingId(null);
-    }
-  }
-
-  async function signOut() {
-    await supabase.auth.signOut();
-    setDrawerOpen(false);
-    // auth listener will handle clearing state
-  }
-
-  async function handleAuth() {
-    setErr(null);
-
-    const email = authEmail.trim().toLowerCase();
-    if (!email) return setErr("Enter your email.");
-    if (!isAshlandEmail(email)) return setErr("Use your @ashland.edu email.");
-    if (authPassword.length < 6) return setErr("Password must be at least 6 characters.");
-
-    setAuthBusy(true);
-
-    try {
-      if (authMode === "signin") {
-        const { error } = await supabase.auth.signInWithPassword({ email, password: authPassword });
-        if (error) setErr(error.message);
-        return;
-      }
-
-      const { error } = await supabase.auth.signUp({ email, password: authPassword });
-      if (error) setErr(error.message);
-    } finally {
-      setAuthBusy(false);
-    }
-  }
-
-  /* ---------------- Single load pipeline ---------------- */
-
-  async function loadAllFor(uid: string, email: string) {
-    setLoading(true);
-    setErr(null);
-
-    await loadProfile(uid);
-
-    const [iRows, rRows, oRows] = await Promise.all([
-      loadMyListings(uid),
-      loadMyRequests(uid),
-      loadMyOffers(uid),
-    ]);
-
-    await loadIncomingAll(uid);
-
-    let chats = 0;
-    try {
-      const { count, error: tErr } = await supabase
-        .from("threads")
-        .select("id", { count: "exact", head: true })
-        .or(`owner_id.eq.${uid},requester_id.eq.${uid}`);
-      if (!tErr) chats = count ?? 0;
-    } catch {
-      chats = 0;
-    }
-
-    setStats({
-      listed: iRows.length,
-      interests: rRows.length,
-      offers: oRows.length,
-      chats,
-    });
-
-    setLoading(false);
-  }
-
-  function clearAll() {
-    setProfile(null);
-    setMyItems([]);
-    setMyRequests([]);
-    setMyOffers([]);
-    setIncomingInterests([]);
-    setIncomingOffers([]);
-    setStats({ listed: 0, interests: 0, offers: 0, chats: 0 });
-    setOffersSeenAt(null);
-  }
-
-  useEffect(() => {
-    // ✅ ONE initial session fetch
-    (async () => {
-      const { data } = await supabase.auth.getSession();
-      const s = data.session;
-      const uid = s?.user?.id ?? null;
-      const email = s?.user?.email ?? null;
-
-      setUserId(uid);
-      setUserEmail(email);
-
-      if (!uid || !email || !isAshlandEmail(email)) {
-        clearAll();
-        setLoading(false);
-        return;
-      }
-
-      await loadAllFor(uid, email);
-    })();
-
-    // ✅ ONE auth listener that drives reloads
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
-      const uid = session?.user?.id ?? null;
-      const email = session?.user?.email ?? null;
-
-      setUserId(uid);
-      setUserEmail(email);
-
-      if (!uid || !email || !isAshlandEmail(email)) {
-        clearAll();
-        setLoading(false);
-        return;
-      }
-
-      await loadAllFor(uid, email);
-    });
-
-    return () => sub.subscription.unsubscribe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        setDrawerOpen(false);
-        setConfirm(null);
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  /* ---------------- Render ---------------- */
-
-  if (loading) return <div style={pageWrap}>Loading…</div>;
-
-  /* ---------------- Logged Out ---------------- */
   if (!isLoggedIn) {
     return (
-      <div style={{ ...pageWrap, paddingBottom: 120 }}>
-        <div style={lightShell}>
-          <h1 style={{ margin: 0, fontSize: 28, fontWeight: 950 }}>Account</h1>
-          <p style={{ opacity: 0.75, marginTop: 10 }}>
-            Sign in or sign up using your <b>@ashland.edu</b> email.
-          </p>
-
-          <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={() => setAuthMode("signin")} style={pillBtnLight(authMode === "signin")}>
-              Sign in
-            </button>
-            <button onClick={() => setAuthMode("signup")} style={pillBtnLight(authMode === "signup")}>
-              Sign up
-            </button>
-          </div>
-
-          <div style={panelLight}>
-            <div style={{ fontWeight: 950, marginBottom: 10 }}>
-              {authMode === "signin" ? "Welcome back" : "Create an account"}
-            </div>
-
-            <input
-              value={authEmail}
-              onChange={(e) => setAuthEmail(e.target.value)}
-              placeholder="you@ashland.edu"
-              autoComplete="email"
-              inputMode="email"
-              style={inputStyleLight}
-            />
-
-            <input
-              value={authPassword}
-              onChange={(e) => setAuthPassword(e.target.value)}
-              placeholder="password"
-              type="password"
-              autoComplete={authMode === "signin" ? "current-password" : "new-password"}
-              style={{ ...inputStyleLight, marginTop: 10 }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleAuth();
-              }}
-            />
-
-            <button onClick={handleAuth} disabled={authBusy} style={primaryBtnLight(authBusy)}>
-              {authBusy ? "Working…" : authMode === "signin" ? "Sign in" : "Sign up"}
-            </button>
-
-            {err && <div style={{ marginTop: 10, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
-
-            <div style={{ marginTop: 12, opacity: 0.72, fontSize: 13 }}>
-              You can still browse the feed without logging in.
-            </div>
-
-            <button onClick={() => router.push("/feed")} style={{ ...outlineBtnLight, width: "100%", height: 44 }}>
-              Browse feed
+      <div style={pageStyle}>
+        <div style={shell}>
+          <div style={card}>
+            <div style={{ fontSize: 22, fontWeight: 950 }}>Post on ScholarSwap</div>
+            <p style={{ color: "#4b5563" }}>
+              You must log in with your <b>@ashland.edu</b> email.
+            </p>
+            {msg && (
+              <div style={{ marginTop: 12, padding: 10, borderRadius: 14, border: "1px solid #fecdd3", background: "#fff1f2", color: "#9f1239", fontWeight: 850 }}>
+                {msg}
+              </div>
+            )}
+            <button onClick={() => router.push("/me")} style={{ ...button, marginTop: 12 }}>
+              Go to Account
             </button>
           </div>
         </div>
@@ -709,1147 +751,334 @@ export default function AccountPage() {
     );
   }
 
-  /* ---------------- Logged In ---------------- */
+  if (!profileComplete) {
+    return (
+      <div style={pageStyle}>
+        <div style={shell}>
+          <div style={card}>
+            <div style={{ fontSize: 22, fontWeight: 950 }}>Complete Profile</div>
+            <p style={{ color: "#4b5563" }}>Before posting, add your full name and pick Student/Faculty in Account.</p>
+            <button onClick={() => router.push("/me")} style={{ ...primary(false), marginTop: 10 }}>
+              Go to Profile Setup
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------------- main render ----------------
   return (
-    <div style={pageWrap}>
-      <style jsx>{`
-        /* Sticky reliability: never set overflow on ancestors of header */
-        .shell {
-          max-width: 1100px;
-          margin: 0 auto;
-          padding: 14px;
-          padding-bottom: calc(120px + env(safe-area-inset-bottom));
-        }
+    <div style={pageStyle}>
+      <div style={shell}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12 }}>
+          <button onClick={() => router.push("/feed")} style={{ ...button, borderRadius: 999 }}>
+            ← Back
+          </button>
+          <div style={{ fontSize: 12, color: "#374151", border: "1px solid #e5e7eb", background: "white", padding: "8px 10px", borderRadius: 999 }}>
+            Posting as <b>{email}</b>
+          </div>
+        </div>
 
-        .header {
-          position: sticky;
-          top: 0;
-          z-index: 50;
-          background: rgba(247, 247, 248, 0.86);
-          backdrop-filter: blur(12px);
-          -webkit-backdrop-filter: blur(12px);
-          border: 1px solid #e5e7eb;
-          border-radius: 18px;
-          padding: 12px;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
-        }
+        <div style={card}>
+          <div style={{ fontSize: 22, fontWeight: 950 }}>Create</div>
+          <div style={{ marginTop: 6, color: "#4b5563" }}>{helperText}</div>
 
-        .topRow {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          min-width: 0;
-        }
+          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" onClick={() => setMode("give")} style={{ ...button, borderRadius: 999, background: mode === "give" ? "#111827" : "white", color: mode === "give" ? "white" : "#111827" }}>
+              Give
+            </button>
+            <button type="button" onClick={() => setMode("request")} style={{ ...button, borderRadius: 999, background: mode === "request" ? "#111827" : "white", color: mode === "request" ? "white" : "#111827" }}>
+              Request
+            </button>
+            <button type="button" onClick={() => setMode("event")} style={{ ...button, borderRadius: 999, background: mode === "event" ? "#111827" : "white", color: mode === "event" ? "white" : "#111827" }}>
+              Event
+            </button>
+          </div>
+        </div>
 
-        .identity {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          min-width: 0;
-        }
-
-        .nameLine {
-          font-size: 18px;
-          font-weight: 950;
-          line-height: 1.1;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .subLine {
-          opacity: 0.72;
-          font-size: 12px;
-          margin-top: 2px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .tabs {
-          display: flex;
-          gap: 10px;
-          overflow-x: auto;
-          -webkit-overflow-scrolling: touch;
-          padding-top: 10px;
-          padding-bottom: 6px;
-        }
-        .tabs::-webkit-scrollbar {
-          display: none;
-        }
-
-        .statsRow {
-          display: flex;
-          gap: 12px;
-          flex-wrap: nowrap;
-          overflow-x: auto;
-          -webkit-overflow-scrolling: touch;
-          margin-top: 6px;
-          opacity: 0.78;
-          font-size: 12px;
-          font-weight: 900;
-          padding-bottom: 2px;
-        }
-        .statsRow::-webkit-scrollbar {
-          display: none;
-        }
-
-        .content {
-          margin-top: 12px;
-        }
-
-        .reqCard {
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          border-radius: 18px;
-          padding: 14px;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.05);
-        }
-
-        .reqRow {
-          display: flex;
-          align-items: flex-start;
-          gap: 12px;
-          min-width: 0;
-          flex-wrap: wrap;
-        }
-
-        .reqMain {
-          flex: 1;
-          min-width: 0;
-        }
-
-        .reqTitle {
-          font-weight: 950;
-          font-size: 16px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          color: #111827;
-        }
-
-        .reqMeta {
-          opacity: 0.85;
-          color: #374151;
-          font-size: 12px;
-          margin-top: 6px;
-          line-height: 1.35;
-          overflow-wrap: anywhere;
-          word-break: break-word;
-        }
-
-        .reqActions {
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-          justify-content: flex-start;
-          align-items: center;
-          width: 100%;
-          margin-top: 10px;
-        }
-
-        @media (min-width: 720px) {
-          .reqActions {
-            width: auto;
-            margin-top: 0;
-            justify-content: flex-end;
-          }
-        }
-
-        .rail {
-          margin-top: 12px;
-          display: flex;
-          gap: 12px;
-          overflow-x: auto;
-          padding-bottom: 10px;
-          -webkit-overflow-scrolling: touch;
-          scroll-snap-type: x mandatory;
-        }
-        .rail::-webkit-scrollbar {
-          display: none;
-        }
-
-        .railItem {
-          scroll-snap-align: start;
-          flex: 0 0 auto;
-          width: min(320px, 86vw);
-        }
-
-        @media (min-width: 900px) {
-          .railItem {
-            width: 340px;
-          }
-        }
-      `}</style>
-
-      <div className="shell">
-        {/* Header */}
-        <div className="header">
-          <div className="topRow">
-            <div className="identity">
-              <div style={avatarLight} title={displayName}>
-                {displayName.slice(0, 1).toUpperCase()}
-              </div>
-
-              <div style={{ minWidth: 0 }}>
-                <div className="nameLine">{displayName}</div>
-                <div className="subLine">
-                  {roleLabel} • {userEmail}
-                </div>
-              </div>
+        <form id="create-form" ref={formRef} onSubmit={handleSubmit} style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* TITLE */}
+          <div style={card}>
+            <div style={{ fontWeight: 950 }}>
+              {mode === "give" ? "What are you giving away? (required)" : mode === "request" ? "What do you need? (required)" : "Event title (required)"}
             </div>
-
-            <button onClick={() => setDrawerOpen(true)} style={iconBtnLight} aria-label="Open menu" title="Menu">
-              ☰
-            </button>
-          </div>
-
-          {err && <div style={{ marginTop: 10, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
-
-          <div className="tabs">
-            <button onClick={() => setTab("listings")} style={tabPillLight(tab === "listings")}>
-              Listings
-            </button>
-
-            <button onClick={() => setTab("my_activity")} style={tabPillLight(tab === "my_activity")}>
-              My activity
-            </button>
-
-            <button
-              onClick={() => {
-                // ✅ instant UI
-                setTab("requests");
-
-                // ✅ offers “seen” marker so dot clears
-                setOffersSeenAt(new Date().toISOString());
-
-                // ✅ mark seen in background (no await)
-                void markIncomingSeen();
-              }}
-              style={tabPillLight(tab === "requests")}
-            >
-              Requests
-              {hasNewRequests && <span style={dotLight} aria-label="New requests" title="New requests" />}
-            </button>
-
-            <button onClick={() => setTab("history")} style={tabPillLight(tab === "history")}>
-              History
-            </button>
-          </div>
-
-          <div className="statsRow">
-            <span>Listed: {stats.listed}</span>
-            <span>Interests: {stats.interests}</span>
-            <span>Offers: {stats.offers}</span>
-            <span>Chats: {stats.chats}</span>
-          </div>
-        </div>
-
-        {/* Content */}
-        <div className="content">
-          {tab === "listings" && (
-            <>
-              <div style={sectionHintLight}>Your active posts (give + requests). Completed (claimed) posts live in History.</div>
-
-              {activeListings.length === 0 ? (
-                <EmptyBoxLight title="No active listings." body="List something or post a request to start exchanging.">
-                  <button onClick={() => router.push("/create")} style={outlineBtnLight}>
-                    ＋ Create post
-                  </button>
-                </EmptyBoxLight>
-              ) : (
-                <div className="rail">
-                  {activeListings.map((item) => (
-                    <div className="railItem" key={item.id}>
-                      <ItemCardLight
-                        item={item}
-                        variant="active"
-                        onEdit={() => router.push(`/item/${item.id}/edit`)}
-                        onManage={() => router.push(`/manage/${item.id}`)}
-                        onDelete={() => deleteListing(item.id)}
-                        deleting={deletingId === item.id}
-                      />
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-
-          {tab === "my_activity" && (
-            <>
-              <div style={sectionHintLight}>Your activity across both flows.</div>
-
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontWeight: 950, fontSize: 18, color: "#111827" }}>My interests (items I requested)</div>
-                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13, color: "#374151" }}>
-                  These are GIVE posts you requested.
-                </div>
-              </div>
-
-              {myRequests.length === 0 ? (
-                <EmptyBoxLight title="No interests yet." body="Go to the feed and request an item.">
-                  <button onClick={() => router.push("/feed")} style={outlineBtnLight}>
-                    Browse feed
-                  </button>
-                </EmptyBoxLight>
-              ) : (
-                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                  {myRequests.map((r) => {
-                    const it = r.items;
-                    return (
-                      <div key={r.item_id + (r.created_at ?? "")} className="reqCard">
-                        <div className="reqRow">
-                          <ThumbLight photoUrl={it?.photo_url ?? null} label={it?.title ?? "Item"} />
-
-                          <div className="reqMain">
-                            <div className="reqTitle">{it?.title ?? "Unknown item"}</div>
-                            <div className="reqMeta">
-                              Status: <b>{it?.status ?? "—"}</b>
-                              {r.created_at ? ` • Sent: ${fmtWhen(r.created_at)}` : ""}
-                            </div>
-                          </div>
-
-                          <div className="reqActions">
-                            <button onClick={() => router.push(`/item/${r.item_id}`)} style={{ ...outlineBtnLight, marginTop: 0 }}>
-                              View
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              <div style={{ marginTop: 18 }}>
-                <div style={{ fontWeight: 950, fontSize: 18, color: "#111827" }}>My offers (help I offered)</div>
-                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13, color: "#374151" }}>
-                  REQUEST posts where you offered help. Chat unlocks only after acceptance.
-                </div>
-              </div>
-
-              {myOffers.length === 0 ? (
-                <EmptyBoxLight title="No offers yet." body="Find a request post in the feed and tap “Offer help”.">
-                  <button onClick={() => router.push("/feed")} style={outlineBtnLight}>
-                    Browse feed
-                  </button>
-                </EmptyBoxLight>
-              ) : (
-                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                  {myOffers.map((o) => {
-                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
-                    const st = (o.status ?? "pending") as OfferStatus;
-                    const acting = myOfferActingId === o.id;
-
-                    return (
-                      <div key={o.id} className="reqCard">
-                        <div className="reqRow">
-                          <div style={{ ...thumbWrapLight, width: 54, height: 54 }}>🤝</div>
-
-                          <div className="reqMain">
-                            <div className="reqTitle">
-                              Offered help on <span style={{ opacity: 0.9 }}>{title}</span>
-                            </div>
-                            <div className="reqMeta">
-                              Status: <b>{st}</b>
-                              {o.created_at ? ` • Offered: ${fmtWhen(o.created_at)}` : ""}
-                              {o.availability ? ` • Availability: ${o.availability}` : ""}
-                            </div>
-                            {o.note ? (
-                              <div style={{ marginTop: 8, opacity: 0.9, fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: "#374151" }}>
-                                {o.note}
-                              </div>
-                            ) : null}
-                          </div>
-
-                          <div className="reqActions">
-                            <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtnLight, marginTop: 0 }}>
-                              View
-                            </button>
-
-                            <button
-                              onClick={() => startChatFromMyOffer(o)}
-                              disabled={acting || st !== "accepted"}
-                              style={{
-                                ...outlineBtnLight,
-                                marginTop: 0,
-                                border: st === "accepted" ? "1px solid rgba(16,185,129,0.55)" : "1px solid #e5e7eb",
-                                background: st === "accepted" ? "rgba(16,185,129,0.10)" : "transparent",
-                                cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
-                                opacity: acting || st !== "accepted" ? 0.65 : 1,
-                              }}
-                              title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
-                            >
-                              {acting ? "Opening…" : "Start chat"}
-                            </button>
-
-                            <button
-                              onClick={() => withdrawMyOffer(o)}
-                              disabled={acting || st === "accepted" || st === "completed"}
-                              style={{
-                                ...outlineBtnLight,
-                                marginTop: 0,
-                                border: "1px solid rgba(185,28,28,0.55)",
-                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                                color: "#991b1b",
-                              }}
-                              title={st === "accepted" || st === "completed" ? "Cannot withdraw after acceptance/completion" : "Withdraw offer"}
-                            >
-                              {acting ? "Working…" : "Withdraw"}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </>
-          )}
-
-          {tab === "requests" && (
-            <>
-              <div style={sectionHintLight}>Incoming requests for your GIVE listings + offers for your REQUEST posts.</div>
-
-              <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button
-                  onClick={() => {
-                    if (userId) void loadIncomingAll(userId);
-                  }}
-                  disabled={incomingLoading}
-                  style={{
-                    ...outlineBtnLight,
-                    marginTop: 0,
-                    cursor: incomingLoading ? "not-allowed" : "pointer",
-                    opacity: incomingLoading ? 0.8 : 1,
-                  }}
-                >
-                  {incomingLoading ? "Refreshing…" : "Refresh"}
-                </button>
-              </div>
-
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontWeight: 950, fontSize: 18, color: "#111827" }}>Incoming item requests (GIVE)</div>
-                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13, color: "#374151" }}>People who requested your items.</div>
-              </div>
-
-              {incomingInterests.length === 0 ? (
-                <EmptyBoxLight title="No incoming item requests." body="When someone requests your item, it will appear here." />
-              ) : (
-                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                  {incomingInterests.map((r) => {
-                    const itemTitle = r.items?.title?.trim() ? r.items.title : "Unknown item";
-                    const who = niceNameFromProfile(r.requester, "Ashland user");
-                    const when = fmtWhen(r.created_at);
-                    const deleting = deletingNotifId === r.id;
-
-                    return (
-                      <div key={r.id} className="reqCard">
-                        <div className="reqRow">
-                          <ThumbLight photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
-
-                          <div className="reqMain">
-                            <div className="reqTitle">
-                              {who} requested <span style={{ opacity: 0.9 }}>{itemTitle}</span>
-                            </div>
-                            <div className="reqMeta">
-                              {when ? `Requested: ${when} • ` : ""}
-                              {r.owner_seen_at ? "Seen" : "New"}
-                              {r.status ? ` • ${r.status}` : ""}
-                            </div>
-                          </div>
-
-                          <div className="reqActions">
-                            <button onClick={() => router.push(`/manage/${r.item_id}`)} style={{ ...outlineBtnLight, marginTop: 0 }}>
-                              Open
-                            </button>
-
-                            <button
-                              onClick={() => deleteNotification(r)}
-                              disabled={deleting}
-                              style={{
-                                ...outlineBtnLight,
-                                marginTop: 0,
-                                border: "1px solid rgba(185,28,28,0.55)",
-                                cursor: deleting ? "not-allowed" : "pointer",
-                                opacity: deleting ? 0.75 : 1,
-                                color: "#991b1b",
-                              }}
-                              title="Delete request"
-                            >
-                              {deleting ? "Deleting…" : "Delete"}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              <div style={{ marginTop: 18 }}>
-                <div style={{ fontWeight: 950, fontSize: 18, color: "#111827" }}>Incoming help offers (REQUEST)</div>
-                <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13, color: "#374151" }}>
-                  Accept one helper; hold others; decline if needed. Chat opens only after acceptance.
-                </div>
-              </div>
-
-              {incomingOffers.length === 0 ? (
-                <EmptyBoxLight title="No incoming offers." body="When someone offers help on your request post, it will appear here." />
-              ) : (
-                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-                  {incomingOffers.map((o) => {
-                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
-                    const who = niceNameFromProfile(o.helper, "Ashland user");
-                    const when = fmtWhen(o.created_at);
-                    const st = (o.status ?? "pending") as OfferStatus;
-                    const acting = offerActingId === o.id;
-
-                    return (
-                      <div key={o.id} className="reqCard">
-                        <div className="reqRow">
-                          <div style={{ ...thumbWrapLight, width: 54, height: 54 }}>🤝</div>
-
-                          <div className="reqMain">
-                            <div className="reqTitle">
-                              {who} offered help on <span style={{ opacity: 0.9 }}>{title}</span>
-                            </div>
-                            <div className="reqMeta">
-                              {when ? `Offered: ${when} • ` : ""}
-                              Status: <b>{st}</b>
-                              {o.availability ? ` • Availability: ${o.availability}` : ""}
-                            </div>
-                            {o.note ? (
-                              <div style={{ marginTop: 8, opacity: 0.9, fontSize: 13, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: "#374151" }}>
-                                {o.note}
-                              </div>
-                            ) : null}
-                          </div>
-
-                          <div className="reqActions">
-                            <button onClick={() => router.push(`/item/${o.request_id}`)} style={{ ...outlineBtnLight, marginTop: 0 }}>
-                              View
-                            </button>
-
-                            <button
-                              onClick={() => updateOfferStatus(o, "accepted")}
-                              disabled={acting || st === "accepted" || st === "completed"}
-                              style={{
-                                ...outlineBtnLight,
-                                marginTop: 0,
-                                border: "1px solid rgba(16,185,129,0.55)",
-                                background: "rgba(16,185,129,0.10)",
-                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                              }}
-                            >
-                              {acting ? "Working…" : "Accept"}
-                            </button>
-
-                            <button
-                              onClick={() => updateOfferStatus(o, "hold")}
-                              disabled={acting || st === "accepted" || st === "completed"}
-                              style={{
-                                ...outlineBtnLight,
-                                marginTop: 0,
-                                cursor: acting || st === "accepted" || st === "completed" ? "not-allowed" : "pointer",
-                                opacity: acting || st === "accepted" || st === "completed" ? 0.65 : 1,
-                              }}
-                            >
-                              Hold
-                            </button>
-
-                            <button
-                              onClick={() => updateOfferStatus(o, "declined")}
-                              disabled={acting || st === "declined" || st === "completed"}
-                              style={{
-                                ...outlineBtnLight,
-                                marginTop: 0,
-                                border: "1px solid rgba(185,28,28,0.55)",
-                                color: "#991b1b",
-                                cursor: acting || st === "declined" || st === "completed" ? "not-allowed" : "pointer",
-                                opacity: acting || st === "declined" || st === "completed" ? 0.65 : 1,
-                              }}
-                            >
-                              Decline
-                            </button>
-
-                            <button
-                              onClick={() => startChatWithHelper(o)}
-                              disabled={acting || st !== "accepted"}
-                              style={{
-                                ...outlineBtnLight,
-                                marginTop: 0,
-                                border: st === "accepted" ? "1px solid rgba(16,185,129,0.55)" : "1px solid #e5e7eb",
-                                background: st === "accepted" ? "rgba(16,185,129,0.10)" : "transparent",
-                                cursor: acting || st !== "accepted" ? "not-allowed" : "pointer",
-                                opacity: acting || st !== "accepted" ? 0.65 : 1,
-                              }}
-                              title={st !== "accepted" ? "Chat unlocks after acceptance" : "Start chat"}
-                            >
-                              {acting ? "Opening…" : "Start chat"}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </>
-          )}
-
-          {tab === "history" && (
-            <>
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontWeight: 950, fontSize: 20, color: "#111827" }}>Completed listings</div>
-                <div style={{ opacity: 0.75, marginTop: 6, color: "#374151" }}>
-                  These were picked up (claimed). No actions needed.
-                </div>
-              </div>
-
-              {completedListings.length === 0 ? (
-                <EmptyBoxLight title="No completed listings yet." body="When a pickup is marked, it will move here." />
-              ) : (
-                <div className="rail">
-                  {completedListings.map((item) => (
-                    <div className="railItem" key={item.id}>
-                      <ItemCardLight item={item} variant="history" />
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* Drawer */}
-        {drawerOpen && (
-          <div onClick={() => setDrawerOpen(false)} style={backdrop}>
-            <div onClick={(e) => e.stopPropagation()} style={drawerLight}>
-              <div style={drawerTop}>
-                <div style={{ fontWeight: 950 }}>Menu</div>
-                <button onClick={() => setDrawerOpen(false)} style={smallCloseBtnLight}>
-                  ✕
-                </button>
-              </div>
-
-              <div style={{ padding: 14, display: "grid", gap: 10 }}>
-                <button
-                  onClick={() => {
-                    setDrawerOpen(false);
-                    router.push("/messages");
-                  }}
-                  style={drawerBtnLight}
-                >
-                  Messages
-                </button>
-
-                <button
-                  onClick={() => {
-                    setDrawerOpen(false);
-                    router.push("/pickups");
-                  }}
-                  style={drawerBtnLight}
-                >
-                  My pickups
-                </button>
-
-                <button onClick={signOut} style={{ ...drawerBtnLight, border: "1px solid rgba(185,28,28,0.55)", color: "#991b1b" }}>
-                  Sign out
-                </button>
-              </div>
+            <div style={{ marginTop: 10 }}>
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                style={input}
+                placeholder={mode === "give" ? `Example: "Bedford Handbook (good condition)"` : mode === "request" ? `Example: "Need a ride Friday 6am"` : `Example: "Finance Club Guest Speaker Night"`}
+              />
             </div>
           </div>
-        )}
 
-        {/* Confirm */}
-        {confirm && (
-          <ConfirmModal
-            title={confirm.title}
-            body={confirm.body}
-            actionLabel={confirm.actionLabel}
-            onCancel={() => setConfirm(null)}
-            onConfirm={confirm.onYes}
-          />
-        )}
+          {/* DESCRIPTION */}
+          <div style={card}>
+            <div style={{ fontWeight: 950 }}>
+              {mode === "give" ? "Any details someone should know? (required)" : mode === "request" ? "Add context so people can help fast. (required)" : "Short description (required)"}
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                style={textarea}
+                rows={4}
+                placeholder={mode === "give" ? "Condition, what's included, any flaws." : mode === "request" ? "Where/when/how urgent? Keep it simple." : "What is it? Who is it for? Any key details."}
+              />
+            </div>
+          </div>
 
-        {/* Toast */}
-        {toast && <Toast msg={toast.msg} kind={toast.kind} />}
+          {/* GIVE */}
+          {mode === "give" && (
+            <>
+              <div style={card}>
+                <div style={{ fontWeight: 950 }}>Add a photo (required)</div>
+
+                <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 13, color: "#6b7280" }}>JPG / PNG / WEBP • max {MAX_ITEM_PHOTO_MB}MB</div>
+
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <input ref={itemFileInputRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => pickItemFile(e.target.files?.[0] ?? null)} style={{ display: "none" }} />
+                    <button type="button" style={button} onClick={() => itemFileInputRef.current?.click()}>
+                      {itemFile ? "Change" : "Choose"}
+                    </button>
+                    {itemFile && (
+                      <button type="button" style={danger} onClick={() => setItemFile(null)}>
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {itemPreviewUrl && (
+                  <div style={{ marginTop: 12 }}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={itemPreviewUrl} alt="Item preview" style={{ width: "100%", height: 260, objectFit: "cover", borderRadius: 16, border: "1px solid #e5e7eb" }} />
+                  </div>
+                )}
+              </div>
+
+              <div style={card}>
+                <div style={{ fontWeight: 950 }}>Category & pickup spot (required)</div>
+
+                <div style={{ marginTop: 10, ...row2 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Category</div>
+                    <select value={giveCategory} onChange={(e) => setGiveCategory(e.target.value as GiveCategory)} style={select}>
+                      <option value="books">Books</option>
+                      <option value="notes">Notes</option>
+                      <option value="electronics">Electronics</option>
+                      <option value="furniture">Furniture</option>
+                      <option value="clothing">Clothing</option>
+                      <option value="sport equipment">Sport equipment</option>
+                      <option value="stationary item">Stationary item</option>
+                      <option value="health & beauty">Health & Beauty</option>
+                      <option value="home & kitchen">Home & Kitchen</option>
+                      <option value="musical instruments">Musical Instruments</option>
+                      <option value="jeweleries">Jeweleries</option>
+                      <option value="art pieces">Art pieces</option>
+                      <option value="ride">Ride</option>
+                      <option value="others">Others</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Pickup spot</div>
+                    <select value={pickupLocation} onChange={(e) => setPickupLocation(e.target.value as PickupLocation)} style={select}>
+                      <option value="College Quad">College Quad</option>
+                      <option value="Safety Service Office">Safety Service Office</option>
+                      <option value="Dining Hall">Dining Hall</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* REQUEST */}
+          {mode === "request" && (
+            <div style={card}>
+              <div style={{ fontWeight: 950 }}>Request type & timeframe (required)</div>
+
+              <div style={{ marginTop: 10, ...row2 }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Request type</div>
+                  <select value={requestGroup} onChange={(e) => setRequestGroup(e.target.value as RequestGroup)} style={select}>
+                    <option value="logistics">Logistics (ride / moving / borrow)</option>
+                    <option value="services">Services (tutoring / tech help / haircut)</option>
+                    <option value="urgent">Urgent (charger / calculator / meds)</option>
+                    <option value="collaboration">Collaboration (club / hackathon / project)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Timeframe</div>
+                  <select value={requestTimeframe} onChange={(e) => setRequestTimeframe(e.target.value as RequestTimeframe)} style={select}>
+                    <option value="today">Today</option>
+                    <option value="this_week">This week</option>
+                    <option value="flexible">Flexible</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Location (optional)</div>
+                <input value={requestLocation} onChange={(e) => setRequestLocation(e.target.value)} style={input} placeholder={`Example: "Dorm A" or "Near dining hall"`} />
+              </div>
+            </div>
+          )}
+
+          {/* EVENT */}
+          {mode === "event" && (
+            <>
+              <div style={card}>
+                <div style={{ fontWeight: 950 }}>Event details (required)</div>
+
+                <div style={{ marginTop: 10, ...row2 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Category</div>
+                    <select value={eventCategory} onChange={(e) => setEventCategory(e.target.value as EventCategory)} style={select}>
+                      <option value="career">Career</option>
+                      <option value="club">Club</option>
+                      <option value="sports">Sports</option>
+                      <option value="music">Music</option>
+                      <option value="arts">Arts</option>
+                      <option value="volunteering">Volunteering</option>
+                      <option value="academic">Academic</option>
+                      <option value="social">Social</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Host Club/Organisation</div>
+                    <input value={hostOrg} onChange={(e) => setHostOrg(e.target.value)} style={input} placeholder={`Example: "Finance Club"`} />
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Location</div>
+                  <input value={eventLocation} onChange={(e) => setEventLocation(e.target.value)} style={input} placeholder={`Example: "Dauch 125"`} />
+                </div>
+
+                <div style={{ marginTop: 10, ...row2 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Start time</div>
+                    <input type="datetime-local" value={startLocal} onChange={(e) => setStartLocal(e.target.value)} style={input} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>End time (optional)</div>
+                    <input type="datetime-local" value={endLocal} onChange={(e) => setEndLocal(e.target.value)} style={input} />
+                  </div>
+                </div>
+              </div>
+
+              <div style={card}>
+                <div style={{ fontWeight: 950 }}>Optional link</div>
+                <div style={{ marginTop: 10 }}>
+                  <input value={eventLink} onChange={(e) => setEventLink(e.target.value)} style={input} placeholder={`Example: "https://instagram.com/p/..."`} />
+                </div>
+                <div style={{ marginTop: 8, fontSize: 12, color: "#6b7280" }}>If provided, must start with http:// or https://</div>
+              </div>
+
+              <div style={card}>
+                <div style={{ fontWeight: 950 }}>Flyer / poster (optional)</div>
+
+                <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 13, color: "#6b7280" }}>JPG / PNG / WEBP • max {MAX_EVENT_FLYER_MB}MB</div>
+
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <input ref={eventFileInputRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => pickEventFile(e.target.files?.[0] ?? null)} style={{ display: "none" }} />
+                    <button type="button" style={button} onClick={() => eventFileInputRef.current?.click()}>
+                      {eventFile ? "Change" : "Choose"}
+                    </button>
+                    {eventFile && (
+                      <button type="button" style={danger} onClick={() => setEventFile(null)}>
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {eventPreviewUrl && (
+                  <div style={{ marginTop: 12 }}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={eventPreviewUrl} alt="Flyer preview" style={{ width: "100%", height: 260, objectFit: "cover", borderRadius: 16, border: "1px solid #e5e7eb" }} />
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* OPTIONS */}
+          <div style={card}>
+            <button type="button" onClick={() => setShowOptions((v) => !v)} style={{ ...button, width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>More options</span>
+              <span style={{ color: "#6b7280" }}>{showOptions ? "—" : "+"}</span>
+            </button>
+
+            {showOptions && (
+              <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                <div style={{ ...row2 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Hide my name</div>
+                    <button type="button" onClick={() => setHideName((v) => !v)} style={{ ...button, width: "100%", background: hideName ? "rgba(16,185,129,0.10)" : "white" }}>
+                      {hideName ? "Hidden: ON" : "Hidden: OFF"}
+                    </button>
+                    <div style={{ marginTop: 6, fontSize: 12, color: "#6b7280" }}>When ON, your name won’t show publicly.</div>
+                  </div>
+
+                  <div style={{ opacity: mode === "event" ? 0.5 : 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Automatically close after</div>
+                    <select value={expireChoice} onChange={(e) => setExpireChoice(e.target.value as ExpireChoice)} style={select} disabled={mode === "event"}>
+                      <option value="urgent24">Urgent (24 hours)</option>
+                      <option value="7">7 days</option>
+                      <option value="14">14 days</option>
+                      <option value="30">30 days</option>
+                      <option value="never">Until I cancel</option>
+                    </select>
+                    <div style={{ marginTop: 6, fontSize: 12, color: "#6b7280" }}>Applies to items/requests only.</div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {msg && (
+            <div style={{ ...card, borderColor: "#fecdd3", background: "#fff1f2", color: "#9f1239", fontWeight: 850 }}>
+              {msg}
+            </div>
+          )}
+        </form>
       </div>
-    </div>
-  );
-}
 
-/* ---------------- Components ---------------- */
+      {/* Sticky submit */}
+      <div style={sticky}>
+        <div style={stickyInner}>
+          <div style={{ flex: 1, fontSize: 12, color: "#6b7280" }}>{stickyHint}</div>
 
-function ItemCardLight({
-  item,
-  variant,
-  onEdit,
-  onManage,
-  onDelete,
-  deleting,
-}: {
-  item: MyItemRow;
-  variant: "active" | "history";
-  onEdit?: () => void;
-  onManage?: () => void;
-  onDelete?: () => void;
-  deleting?: boolean;
-}) {
-  const status = item.status ?? "—";
-  const type = (item.post_type ?? "give") as "give" | "request";
-
-  return (
-    <div style={cardLight}>
-      <div style={cardMediaWrapLight}>
-        {item.photo_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.photo_url} alt={item.title} style={cardImg} />
-        ) : (
-          <div style={noPhotoLight}>{type === "request" ? "Request" : "No photo"}</div>
-        )}
-      </div>
-
-      <div style={{ marginTop: 10, minHeight: 44 }}>
-        <div style={cardTitleLight}>{item.title}</div>
-        <div style={cardSubLight}>{item.description ? item.description : "—"}</div>
-      </div>
-
-      <div style={cardMetaLight}>
-        Type: <b>{type}</b> • Status: <b>{status}</b>
-      </div>
-
-      {variant === "active" ? (
-        <div style={cardActions}>
-          <button onClick={onEdit} style={cardBtnPrimaryLight}>
-            Edit
-          </button>
-          <button onClick={onManage} style={cardBtnOutlineLight}>
-            Manage
-          </button>
-          <button onClick={onDelete} disabled={!!deleting} style={cardBtnDangerLight(!!deleting)}>
-            {deleting ? "Deleting…" : "Delete"}
+          <button type="submit" form="create-form" disabled={saving || !canSubmit} style={primary(saving || !canSubmit)}>
+            {saving ? "Posting…" : primaryLabel}
           </button>
         </div>
-      ) : (
-        <div style={{ marginTop: 10, opacity: 0.75, fontSize: 12, color: "#374151" }}>Completed ✅</div>
-      )}
-    </div>
-  );
-}
-
-function ThumbLight({ photoUrl, label }: { photoUrl: string | null; label: string }) {
-  return (
-    <div style={thumbWrapLight}>
-      {photoUrl ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={photoUrl} alt={label} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-      ) : (
-        "—"
-      )}
-    </div>
-  );
-}
-
-function EmptyBoxLight({ title, body, children }: { title: string; body: string; children?: React.ReactNode }) {
-  return (
-    <div style={{ marginTop: 14, ...panelLight }}>
-      <div style={{ fontWeight: 950, color: "#111827" }}>{title}</div>
-      <div style={{ opacity: 0.85, marginTop: 6, color: "#374151" }}>{body}</div>
-      {children ? <div style={{ marginTop: 10 }}>{children}</div> : null}
-    </div>
-  );
-}
-
-function Toast({ msg, kind = "ok" }: { msg: string; kind?: "ok" | "err" }) {
-  return (
-    <div
-      style={{
-        position: "fixed",
-        left: "50%",
-        transform: "translateX(-50%)",
-        bottom: 18,
-        zIndex: 99999,
-        borderRadius: 14,
-        padding: "10px 12px",
-        border: "1px solid #e5e7eb",
-        background: "#ffffff",
-        color: "#111827",
-        boxShadow: "0 18px 50px rgba(0,0,0,0.14)",
-        fontWeight: 900,
-        maxWidth: "min(560px, calc(100vw - 24px))",
-        width: "fit-content",
-      }}
-    >
-      <span style={{ color: kind === "err" ? "#b91c1c" : "#065f46" }}>{kind === "err" ? "⚠ " : "✓ "}</span>
-      {msg}
-    </div>
-  );
-}
-
-function ConfirmModal({
-  title,
-  body,
-  actionLabel,
-  onCancel,
-  onConfirm,
-}: {
-  title: string;
-  body: string;
-  actionLabel: string;
-  onCancel: () => void;
-  onConfirm: () => Promise<void>;
-}) {
-  const [busy, setBusy] = useState(false);
-
-  return (
-    <div onClick={onCancel} style={backdrop} role="dialog" aria-modal="true">
-      <div onClick={(e) => e.stopPropagation()} style={modalLight}>
-        <div style={{ fontWeight: 950, fontSize: 16, color: "#111827" }}>{title}</div>
-        <div style={{ marginTop: 6, color: "#374151", opacity: 0.92 }}>{body}</div>
-
-        <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <button onClick={onCancel} disabled={busy} style={outlineBtnLight}>
-            Cancel
-          </button>
-          <button
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await onConfirm();
-              } finally {
-                setBusy(false);
-              }
-            }}
-            disabled={busy}
-            style={{
-              ...primaryBtnLight(busy),
-              marginTop: 0,
-              height: 44,
-            }}
-          >
-            {busy ? "Working…" : actionLabel}
-          </button>
-        </div>
       </div>
     </div>
   );
 }
 
-/* ---------------- Styles (Light) ---------------- */
-
-const pageWrap: React.CSSProperties = {
-  minHeight: "100vh",
-  background: "#f7f7f8",
-  color: "#111827",
-};
-
-const lightShell: React.CSSProperties = {
-  maxWidth: 720,
-  margin: "0 auto",
-  padding: 16,
-};
-
-const avatarLight: React.CSSProperties = {
-  width: 44,
-  height: 44,
-  borderRadius: 16,
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  fontWeight: 950,
-  fontSize: 16,
-  color: "#111827",
-  flexShrink: 0,
-  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
-};
-
-const iconBtnLight: React.CSSProperties = {
-  width: 42,
-  height: 42,
-  borderRadius: 14,
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  color: "#111827",
-  cursor: "pointer",
-  fontWeight: 900,
-  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
-};
-
-const panelLight: React.CSSProperties = {
-  borderRadius: 18,
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  padding: 14,
-  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
-};
-
-const inputStyleLight: React.CSSProperties = {
-  width: "100%",
-  height: 44,
-  borderRadius: 14,
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  color: "#111827",
-  padding: "0 12px",
-  outline: "none",
-  fontWeight: 800,
-};
-
-function primaryBtnLight(disabled: boolean): React.CSSProperties {
-  return {
-    marginTop: 12,
-    width: "100%",
-    height: 44,
-    borderRadius: 14,
-    border: "1px solid rgba(16,185,129,0.35)",
-    background: disabled ? "rgba(16,185,129,0.10)" : "rgba(16,185,129,0.14)",
-    color: "#065f46",
-    cursor: disabled ? "not-allowed" : "pointer",
-    fontWeight: 950,
-    boxShadow: "0 14px 30px rgba(16,185,129,0.12)",
-  };
-}
-
-function pillBtnLight(active: boolean): React.CSSProperties {
-  return {
-    borderRadius: 999,
-    border: active ? "1px solid rgba(16,185,129,0.35)" : "1px solid #e5e7eb",
-    background: active ? "rgba(16,185,129,0.12)" : "#ffffff",
-    color: active ? "#065f46" : "#111827",
-    padding: "10px 12px",
-    cursor: "pointer",
-    fontWeight: 900,
-  };
-}
-
-const outlineBtnLight: React.CSSProperties = {
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  color: "#111827",
-  padding: "10px 12px",
-  borderRadius: 14,
-  cursor: "pointer",
-  fontWeight: 900,
-  whiteSpace: "nowrap",
-  boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
-};
-
-function tabPillLight(active: boolean): React.CSSProperties {
-  return {
-    flex: "0 0 auto",
-    borderRadius: 999,
-    border: active ? "1px solid rgba(16,185,129,0.35)" : "1px solid #e5e7eb",
-    background: active ? "rgba(16,185,129,0.12)" : "#ffffff",
-    color: active ? "#065f46" : "#111827",
-    padding: "10px 12px",
-    cursor: "pointer",
-    fontWeight: 900,
-    whiteSpace: "nowrap",
-  };
-}
-
-const dotLight: React.CSSProperties = {
-  display: "inline-block",
-  width: 8,
-  height: 8,
-  borderRadius: 999,
-  background: "#ef4444",
-  marginLeft: 8,
-  boxShadow: "0 0 0 3px rgba(239,68,68,0.20)",
-};
-
-const sectionHintLight: React.CSSProperties = {
-  marginTop: 14,
-  opacity: 0.78,
-  fontSize: 13,
-  color: "#374151",
-};
-
-const cardLight: React.CSSProperties = {
-  background: "#ffffff",
-  padding: 14,
-  borderRadius: 18,
-  border: "1px solid #e5e7eb",
-  width: "100%",
-  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
-};
-
-const cardMediaWrapLight: React.CSSProperties = {
-  width: "100%",
-  height: 150,
-  borderRadius: 16,
-  overflow: "hidden",
-  border: "1px solid #e5e7eb",
-  background: "#f3f4f6",
-};
-
-const cardImg: React.CSSProperties = {
-  width: "100%",
-  height: "100%",
-  objectFit: "cover",
-  display: "block",
-};
-
-const noPhotoLight: React.CSSProperties = {
-  width: "100%",
-  height: "100%",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  color: "#6b7280",
-  border: "1px dashed #e5e7eb",
-  borderRadius: 16,
-};
-
-const cardTitleLight: React.CSSProperties = {
-  fontSize: 18,
-  fontWeight: 950,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "#111827",
-};
-
-const cardSubLight: React.CSSProperties = {
-  opacity: 0.8,
-  marginTop: 6,
-  fontSize: 13,
-  display: "-webkit-box",
-  WebkitLineClamp: 2,
-  WebkitBoxOrient: "vertical" as any,
-  overflow: "hidden",
-  overflowWrap: "anywhere",
-  color: "#374151",
-};
-
-const cardMetaLight: React.CSSProperties = {
-  opacity: 0.8,
-  marginTop: 10,
-  fontSize: 13,
-  color: "#374151",
-};
-
-const cardActions: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: 10,
-  marginTop: 12,
-};
-
-const cardBtnPrimaryLight: React.CSSProperties = {
-  border: "1px solid rgba(16,185,129,0.35)",
-  background: "rgba(16,185,129,0.12)",
-  color: "#065f46",
-  padding: "10px 12px",
-  borderRadius: 14,
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-const cardBtnOutlineLight: React.CSSProperties = {
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  color: "#111827",
-  padding: "10px 12px",
-  borderRadius: 14,
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-function cardBtnDangerLight(disabled: boolean): React.CSSProperties {
-  return {
-    border: "1px solid rgba(185,28,28,0.55)",
-    background: disabled ? "rgba(185,28,28,0.12)" : "#ffffff",
-    color: "#991b1b",
-    padding: "10px 12px",
-    borderRadius: 14,
-    cursor: disabled ? "not-allowed" : "pointer",
-    fontWeight: 900,
-    opacity: disabled ? 0.8 : 1,
-  };
-}
-
-const thumbWrapLight: React.CSSProperties = {
-  width: 54,
-  height: 54,
-  borderRadius: 16,
-  border: "1px solid #e5e7eb",
-  background: "#f3f4f6",
-  overflow: "hidden",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  color: "#6b7280",
-  flexShrink: 0,
-};
-
-const smallCloseBtnLight: React.CSSProperties = {
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  color: "#111827",
-  borderRadius: 14,
-  padding: "6px 10px",
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-const backdrop: React.CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(17,24,39,0.35)",
-  zIndex: 9998,
-};
-
-const drawerLight: React.CSSProperties = {
-  position: "absolute",
-  right: 12,
-  top: 12,
-  width: "min(360px, calc(100vw - 24px))",
-  background: "#ffffff",
-  border: "1px solid #e5e7eb",
-  borderRadius: 18,
-  overflow: "hidden",
-  boxShadow: "0 30px 80px rgba(0,0,0,0.12)",
-};
-
-const drawerTop: React.CSSProperties = {
-  padding: 14,
-  borderBottom: "1px solid #e5e7eb",
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-};
-
-const drawerBtnLight: React.CSSProperties = {
-  width: "100%",
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  color: "#111827",
-  padding: "10px 12px",
-  borderRadius: 14,
-  cursor: "pointer",
-  fontWeight: 900,
-  textAlign: "left",
-  boxShadow: "0 1px 0 rgba(0,0,0,0.03)",
-};
-
-const modalLight: React.CSSProperties = {
-  position: "absolute",
-  left: "50%",
-  top: "50%",
-  transform: "translate(-50%, -50%)",
-  width: "min(520px, calc(100vw - 24px))",
-  background: "#ffffff",
-  border: "1px solid #e5e7eb",
-  borderRadius: 18,
-  padding: 14,
-  boxShadow: "0 30px 80px rgba(0,0,0,0.12)",
-};
+/**
+ * REQUIRED in your BottomNav so sticky never gets covered:
+ * <div id="bottom-nav" style={{ position:"fixed", bottom:0, left:0, right:0, zIndex:1000 }}>
+ *   ...
+ * </div>
+ *
+ * useEffect(() => {
+ *   const el = document.getElementById("bottom-nav");
+ *   if (!el) return;
+ *   const update = () => document.documentElement.style.setProperty("--bottom-nav-height", `${el.offsetHeight}px`);
+ *   update();
+ *   window.addEventListener("resize", update);
+ *   return () => window.removeEventListener("resize", update);
+ * }, []);
+ */
