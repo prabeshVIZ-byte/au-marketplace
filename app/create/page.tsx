@@ -6,6 +6,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
+/* =========================
+   TYPES
+========================= */
+
 type Mode = "give" | "request" | "event";
 type PostType = "give" | "request";
 
@@ -55,6 +59,9 @@ type EventCategory =
 
 type ExpireChoice = "7" | "14" | "30" | "never" | "urgent24";
 
+type StepKey = "media" | "write" | "details" | "review";
+type ErrorSection = "account" | "type" | "media" | "details" | "review" | null;
+
 type DraftState = {
   mode: Mode | null;
 
@@ -72,7 +79,6 @@ type DraftState = {
   eventLocation: string;
   hostOrg: string;
   eventLink: string;
-
   eventDate: string;
   eventStartTime: string;
   eventEndTime: string;
@@ -84,8 +90,15 @@ type DraftState = {
   eventFileName: string | null;
 };
 
-type Step = 1 | 2 | 3 | 4;
-type ErrorSection = "account" | "type" | "media" | "details" | "review" | null;
+type ValidationResult = {
+  ok: boolean;
+  message?: string;
+  section?: ErrorSection;
+};
+
+/* =========================
+   CONSTANTS
+========================= */
 
 const ITEMS_TABLE = "items";
 const ITEM_PHOTOS_TABLE = "item_photos";
@@ -97,10 +110,107 @@ const EVENT_FLYERS_BUCKET = "event-flyers";
 const MAX_ITEM_PHOTO_MB = 6;
 const MAX_EVENT_FLYER_MB = 8;
 
-const DRAFT_KEY = "scholarswap_create_modern_mobile_v1";
+const DRAFT_KEY = "scholarswap_create_phone_first_v2";
 const SUCCESS_ROUTE = "/feed";
 
-/* ---------------- utilities ---------------- */
+const GIVE_STEPS: StepKey[] = ["media", "write", "details", "review"];
+const REQUEST_STEPS: StepKey[] = ["write", "details", "review"];
+const EVENT_STEPS: StepKey[] = ["media", "write", "details", "review"];
+
+const GIVE_CATEGORY_OPTIONS: GiveCategory[] = [
+  "books",
+  "notes",
+  "electronics",
+  "furniture",
+  "clothing",
+  "sport equipment",
+  "stationary item",
+  "ride",
+  "art pieces",
+  "health & beauty",
+  "home & kitchen",
+  "jeweleries",
+  "musical instruments",
+  "lost & found",
+  "others",
+];
+
+const PICKUP_OPTIONS: PickupLocation[] = [
+  "College Quad",
+  "Safety Service Office",
+  "Dining Hall",
+  "Library",
+  "Student Center",
+];
+
+const REQUEST_GROUP_OPTIONS: RequestGroup[] = [
+  "logistics",
+  "services",
+  "urgent",
+  "collaboration",
+  "lost & found",
+];
+
+const REQUEST_TIMEFRAME_OPTIONS: RequestTimeframe[] = [
+  "today",
+  "this_week",
+  "flexible",
+];
+
+const EVENT_CATEGORY_OPTIONS: EventCategory[] = [
+  "career",
+  "club",
+  "sports",
+  "music",
+  "arts",
+  "volunteering",
+  "academic",
+  "social",
+  "other",
+];
+
+const EXPIRE_OPTIONS: ExpireChoice[] = ["urgent24", "7", "14", "30", "never"];
+
+/* =========================
+   HELPERS
+========================= */
+
+function getDefaultDraft(): DraftState {
+  return {
+    mode: null,
+
+    title: "",
+    description: "",
+
+    giveCategory: "books",
+    pickupLocation: "College Quad",
+
+    requestGroup: "logistics",
+    requestTimeframe: "today",
+    requestLocation: "",
+
+    eventCategory: "club",
+    eventLocation: "",
+    hostOrg: "",
+    eventLink: "",
+    eventDate: "",
+    eventStartTime: "",
+    eventEndTime: "",
+
+    hideName: false,
+    expireChoice: "7",
+
+    itemFileName: null,
+    eventFileName: null,
+  };
+}
+
+function getStepsForMode(mode: Mode | null): StepKey[] {
+  if (mode === "give") return GIVE_STEPS;
+  if (mode === "request") return REQUEST_STEPS;
+  if (mode === "event") return EVENT_STEPS;
+  return [];
+}
 
 function isAllowedImage(file: File) {
   return ["image/jpeg", "image/png", "image/webp"].includes(file.type);
@@ -114,7 +224,9 @@ function getExt(name: string) {
 function uuidSafe() {
   // @ts-ignore
   if (typeof crypto !== "undefined" && crypto?.randomUUID) return crypto.randomUUID();
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random()
+    .toString(16)
+    .slice(2)}`;
 }
 
 function addDaysISO(days: number) {
@@ -133,19 +245,20 @@ function isValidHttpUrlMaybeEmpty(raw: string) {
   return /^https?:\/\//i.test(v);
 }
 
-function errToMsg(e: any) {
-  if (!e) return "Something went wrong.";
-  if (typeof e === "string") return e;
-  if (e?.message) return e.message;
+function errToMsg(error: unknown) {
+  if (!error) return "Something went wrong.";
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
   try {
-    return JSON.stringify(e);
+    return JSON.stringify(error);
   } catch {
-    return String(e);
+    return String(error);
   }
 }
 
 function combineLocalDateAndTimeToISO(dateStr: string, timeStr: string) {
   if (!dateStr || !timeStr) return null;
+
   const mDate = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   const mTime = timeStr.match(/^(\d{2}):(\d{2})$/);
   if (!mDate || !mTime) return null;
@@ -174,27 +287,27 @@ function formatLongDateTime(iso: string | null) {
   });
 }
 
-function requestGroupLabel(g: RequestGroup) {
-  if (g === "logistics") return "Logistics";
-  if (g === "services") return "Services";
-  if (g === "urgent") return "Urgent";
-  if (g === "collaboration") return "Collaboration";
-  if (g === "lost & found") return "Lost & Found";
-  return "Request";
-}
-
-function requestTimeframeLabel(t: RequestTimeframe) {
-  if (t === "today") return "Today";
-  if (t === "this_week") return "This week";
-  if (t === "flexible") return "Flexible";
-  return "";
-}
-
 function giveCategoryLabel(v: GiveCategory) {
   return v
     .split(" ")
     .map((x) => x.charAt(0).toUpperCase() + x.slice(1))
     .join(" ");
+}
+
+function requestGroupLabel(v: RequestGroup) {
+  if (v === "logistics") return "Logistics";
+  if (v === "services") return "Services";
+  if (v === "urgent") return "Urgent";
+  if (v === "collaboration") return "Collaboration";
+  if (v === "lost & found") return "Lost & Found";
+  return "Request";
+}
+
+function requestTimeframeLabel(v: RequestTimeframe) {
+  if (v === "today") return "Today";
+  if (v === "this_week") return "This week";
+  if (v === "flexible") return "Flexible";
+  return "";
 }
 
 function eventCategoryLabel(v: EventCategory) {
@@ -209,65 +322,75 @@ function expireChoiceLabel(v: ExpireChoice) {
   return "Until canceled";
 }
 
-function getDefaultDraft(): DraftState {
-  return {
-    mode: null,
-
-    title: "",
-    description: "",
-
-    giveCategory: "books",
-    pickupLocation: "College Quad",
-
-    requestGroup: "logistics",
-    requestTimeframe: "today",
-    requestLocation: "",
-
-    eventCategory: "club",
-    eventLocation: "",
-    hostOrg: "",
-    eventLink: "",
-
-    eventDate: "",
-    eventStartTime: "",
-    eventEndTime: "",
-
-    hideName: false,
-    expireChoice: "7",
-
-    itemFileName: null,
-    eventFileName: null,
-  };
+function modeLabel(mode: Mode | null) {
+  if (!mode) return "";
+  return mode.charAt(0).toUpperCase() + mode.slice(1);
 }
 
-function getInitialStepForMode(mode: Mode): Step {
-  return mode === "request" ? 2 : 1;
+function stepTitle(mode: Mode, stepKey: StepKey) {
+  if (mode === "give") {
+    if (stepKey === "media") return "Add a photo";
+    if (stepKey === "write") return "Describe the item";
+    if (stepKey === "details") return "Add item details";
+    return "Review before posting";
+  }
+
+  if (mode === "request") {
+    if (stepKey === "write") return "Write your request";
+    if (stepKey === "details") return "Add details";
+    return "Review before posting";
+  }
+
+  if (stepKey === "media") return "Add a flyer";
+  if (stepKey === "write") return "Write the event";
+  if (stepKey === "details") return "Add event details";
+  return "Review before publishing";
 }
 
-/* ---------------- component ---------------- */
+function stepSubtitle(mode: Mode, stepKey: StepKey) {
+  if (mode === "give") {
+    if (stepKey === "media") return "Photos make posts feel real and trustworthy.";
+    if (stepKey === "write") return "Tell students what it is and why it matters.";
+    if (stepKey === "details") return "Help people understand category and pickup quickly.";
+    return "Check everything once before sharing.";
+  }
+
+  if (mode === "request") {
+    if (stepKey === "write") return "Be specific so people can actually help.";
+    if (stepKey === "details") return "Set urgency and context clearly.";
+    return "Check the request before posting.";
+  }
+
+  if (stepKey === "media") return "A strong flyer makes the event feel alive.";
+  if (stepKey === "write") return "Make the event sound worth attending.";
+  if (stepKey === "details") return "Add time, host, location, and category.";
+  return "Check everything once before publishing.";
+}
+
+/* =========================
+   PAGE
+========================= */
 
 export default function CreatePage() {
   const router = useRouter();
 
+  const topRef = useRef<HTMLDivElement | null>(null);
   const itemFileInputRef = useRef<HTMLInputElement | null>(null);
   const eventFileInputRef = useRef<HTMLInputElement | null>(null);
-  const topRef = useRef<HTMLDivElement | null>(null);
 
   const [authLoading, setAuthLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(true);
+  const [hydratedDraft, setHydratedDraft] = useState(false);
 
   const [email, setEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [profileComplete, setProfileComplete] = useState(false);
 
   const [draft, setDraft] = useState<DraftState>(getDefaultDraft());
-  const [hydratedDraft, setHydratedDraft] = useState(false);
-
-  const [step, setStep] = useState<Step>(1);
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
 
   const [itemFile, setItemFile] = useState<File | null>(null);
   const [eventFile, setEventFile] = useState<File | null>(null);
-
   const [itemPreviewUrl, setItemPreviewUrl] = useState<string | null>(null);
   const [eventPreviewUrl, setEventPreviewUrl] = useState<string | null>(null);
 
@@ -275,6 +398,11 @@ export default function CreatePage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<ErrorSection>(null);
   const [isDesktop, setIsDesktop] = useState(false);
+
+  const steps = useMemo(() => getStepsForMode(draft.mode), [draft.mode]);
+  const currentStep = steps[currentStepIndex] ?? null;
+  const totalSteps = steps.length;
+  const displayStep = draft.mode ? currentStepIndex + 1 : 1;
 
   const cleanTitle = useMemo(() => draft.title.trim(), [draft.title]);
   const cleanDesc = useMemo(() => draft.description.trim(), [draft.description]);
@@ -289,8 +417,19 @@ export default function CreatePage() {
     [draft.eventDate, draft.eventEndTime]
   );
 
-  const isAshland = useMemo(() => !!email && email.toLowerCase().endsWith("@ashland.edu"), [email]);
+  const isAshland = useMemo(
+    () => !!email && email.toLowerCase().endsWith("@ashland.edu"),
+    [email]
+  );
   const isLoggedIn = !!userId && !!email && isAshland;
+
+  const eventTimeSummary = useMemo(() => {
+    return eventStartIso
+      ? `${formatLongDateTime(eventStartIso)}${
+          eventEndIso ? ` → ${formatLongDateTime(eventEndIso)}` : ""
+        }`
+      : "—";
+  }, [eventStartIso, eventEndIso]);
 
   useEffect(() => {
     const updateDevice = () => {
@@ -299,6 +438,17 @@ export default function CreatePage() {
     updateDevice();
     window.addEventListener("resize", updateDevice);
     return () => window.removeEventListener("resize", updateDevice);
+  }, []);
+
+  useEffect(() => {
+    const update = () => {
+      const el = document.getElementById("bottom-nav");
+      const height = el?.offsetHeight ?? 86;
+      document.documentElement.style.setProperty("--bottom-nav-height", `${height}px`);
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
   }, []);
 
   useEffect(() => {
@@ -328,15 +478,18 @@ export default function CreatePage() {
         setHydratedDraft(true);
         return;
       }
-      const parsed = JSON.parse(raw) as Partial<DraftState & { step?: Step }>;
-      const next = { ...getDefaultDraft(), ...parsed };
-      setDraft(next);
-      if (next.mode) {
-        const safeStep = parsed.step && parsed.step >= 1 && parsed.step <= 4 ? parsed.step : getInitialStepForMode(next.mode);
-        setStep(safeStep as Step);
-      }
+
+      const parsed = JSON.parse(raw) as Partial<DraftState & { currentStepIndex?: number }>;
+      const nextDraft: DraftState = { ...getDefaultDraft(), ...parsed };
+      setDraft(nextDraft);
+
+      const nextSteps = getStepsForMode(nextDraft.mode);
+      const rawIndex = Number(parsed.currentStepIndex ?? 0);
+      const safeIndex =
+        Number.isFinite(rawIndex) && rawIndex >= 0 && rawIndex < nextSteps.length ? rawIndex : 0;
+      setCurrentStepIndex(safeIndex);
     } catch {
-      // ignore
+      // ignore corrupted draft
     } finally {
       setHydratedDraft(true);
     }
@@ -345,22 +498,17 @@ export default function CreatePage() {
   useEffect(() => {
     if (!hydratedDraft) return;
     try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...draft, step }));
+      localStorage.setItem(
+        DRAFT_KEY,
+        JSON.stringify({
+          ...draft,
+          currentStepIndex,
+        })
+      );
     } catch {
       // ignore
     }
-  }, [draft, step, hydratedDraft]);
-
-  useEffect(() => {
-    const update = () => {
-      const el = document.getElementById("bottom-nav");
-      if (!el) return;
-      document.documentElement.style.setProperty("--bottom-nav-height", `${el.offsetHeight}px`);
-    };
-    update();
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, []);
+  }, [draft, currentStepIndex, hydratedDraft]);
 
   useEffect(() => {
     let mounted = true;
@@ -370,15 +518,17 @@ export default function CreatePage() {
       try {
         const raced = await Promise.race([
           supabase.auth.getSession(),
-          new Promise<any>((resolve) =>
-            setTimeout(() => resolve({ data: { session: null }, error: { message: "Auth timeout" } }), 6500)
+          new Promise<{ data: { session: null }; error: { message: string } }>((resolve) =>
+            setTimeout(
+              () => resolve({ data: { session: null }, error: { message: "Auth timeout" } }),
+              6500
+            )
           ),
         ]);
 
         if (!mounted) return;
 
-        const { data } = raced;
-        const session = data?.session ?? null;
+        const session = raced?.data?.session ?? null;
         setEmail(session?.user?.email ?? null);
         setUserId(session?.user?.id ?? null);
       } catch {
@@ -391,7 +541,9 @@ export default function CreatePage() {
     }
 
     syncAuth();
-    const { data: sub } = supabase.auth.onAuthStateChange(() => syncAuth());
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      syncAuth();
+    });
 
     return () => {
       mounted = false;
@@ -419,6 +571,7 @@ export default function CreatePage() {
           .maybeSingle();
 
         if (!mounted) return;
+
         if (error) {
           setProfileComplete(false);
           return;
@@ -444,11 +597,21 @@ export default function CreatePage() {
     setFieldError(null);
   }
 
-  function resetComposer() {
-    setDraft(getDefaultDraft());
-    setStep(1);
+  function scrollTopSmooth() {
+    requestAnimationFrame(() => {
+      topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
+  function clearModeFiles() {
     setItemFile(null);
     setEventFile(null);
+  }
+
+  function resetComposer() {
+    setDraft(getDefaultDraft());
+    setCurrentStepIndex(0);
+    clearModeFiles();
     setMsg(null);
     setFieldError(null);
 
@@ -461,21 +624,16 @@ export default function CreatePage() {
 
   function goBackToTypes() {
     resetComposer();
-    requestAnimationFrame(() => {
-      topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
+    scrollTopSmooth();
   }
 
   function selectMode(mode: Mode) {
     setMsg(null);
     setFieldError(null);
-    setItemFile(null);
-    setEventFile(null);
+    clearModeFiles();
     setDraft({ ...getDefaultDraft(), mode });
-    setStep(getInitialStepForMode(mode));
-    requestAnimationFrame(() => {
-      topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
+    setCurrentStepIndex(0);
+    scrollTopSmooth();
   }
 
   function pickItemFile(file: File | null) {
@@ -530,13 +688,12 @@ export default function CreatePage() {
     patchDraft("eventFileName", file.name);
   }
 
-  function canAdvanceFromCurrentStep(): { ok: boolean; message?: string; section?: ErrorSection } {
+  function validateStep(stepKey: StepKey): ValidationResult {
     if (!draft.mode) {
       return { ok: false, message: "Choose Give, Request, or Event first.", section: "type" };
     }
 
-    if (step === 1) {
-      if (draft.mode === "request") return { ok: true };
+    if (stepKey === "media") {
       if (draft.mode === "give" && !itemFile) {
         return { ok: false, message: "Add a photo to continue.", section: "media" };
       }
@@ -545,7 +702,7 @@ export default function CreatePage() {
       }
     }
 
-    if (step === 2) {
+    if (stepKey === "write") {
       if (cleanTitle.length < 3) {
         return { ok: false, message: "Title must be at least 3 characters.", section: "details" };
       }
@@ -554,33 +711,61 @@ export default function CreatePage() {
       }
     }
 
-    if (step === 3) {
+    if (stepKey === "details") {
       if (draft.mode === "give") {
-        if (!draft.giveCategory) return { ok: false, message: "Choose a category.", section: "details" };
-        if (!draft.pickupLocation) return { ok: false, message: "Choose a pickup location.", section: "details" };
+        if (!draft.giveCategory) {
+          return { ok: false, message: "Choose a category.", section: "details" };
+        }
+        if (!draft.pickupLocation) {
+          return { ok: false, message: "Choose a pickup location.", section: "details" };
+        }
       }
 
       if (draft.mode === "request") {
-        if (!draft.requestGroup) return { ok: false, message: "Choose a request type.", section: "details" };
-        if (!draft.requestTimeframe) return { ok: false, message: "Choose a timeframe.", section: "details" };
+        if (!draft.requestGroup) {
+          return { ok: false, message: "Choose a request type.", section: "details" };
+        }
+        if (!draft.requestTimeframe) {
+          return { ok: false, message: "Choose a timeframe.", section: "details" };
+        }
       }
 
       if (draft.mode === "event") {
-        if (!draft.hostOrg.trim()) return { ok: false, message: "Host is required.", section: "details" };
-        if (!draft.eventCategory) return { ok: false, message: "Choose a category.", section: "details" };
-        if (!draft.eventLocation.trim()) return { ok: false, message: "Location is required.", section: "details" };
-        if (!draft.eventDate) return { ok: false, message: "Choose a date.", section: "details" };
-        if (!draft.eventStartTime) return { ok: false, message: "Choose a start time.", section: "details" };
-        if (!eventStartIso) return { ok: false, message: "Start time is invalid.", section: "details" };
+        if (!draft.hostOrg.trim()) {
+          return { ok: false, message: "Host is required.", section: "details" };
+        }
+        if (!draft.eventCategory) {
+          return { ok: false, message: "Choose a category.", section: "details" };
+        }
+        if (!draft.eventLocation.trim()) {
+          return { ok: false, message: "Location is required.", section: "details" };
+        }
+        if (!draft.eventDate) {
+          return { ok: false, message: "Choose a date.", section: "details" };
+        }
+        if (!draft.eventStartTime) {
+          return { ok: false, message: "Choose a start time.", section: "details" };
+        }
+        if (!eventStartIso) {
+          return { ok: false, message: "Start time is invalid.", section: "details" };
+        }
         if (!isValidHttpUrlMaybeEmpty(draft.eventLink)) {
-          return { ok: false, message: "Link must start with http:// or https://", section: "details" };
+          return {
+            ok: false,
+            message: "Link must start with http:// or https://",
+            section: "details",
+          };
         }
         if (
           draft.eventEndTime &&
           eventEndIso &&
           new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime()
         ) {
-          return { ok: false, message: "End time cannot be before start time.", section: "details" };
+          return {
+            ok: false,
+            message: "End time cannot be before start time.",
+            section: "details",
+          };
         }
       }
     }
@@ -588,105 +773,83 @@ export default function CreatePage() {
     return { ok: true };
   }
 
-  function validateBeforeSubmit(): { message: string; section: ErrorSection } | null {
-    if (!draft.mode) return { message: "Choose Give, Request, or Event first.", section: "type" };
-    if (!isLoggedIn) return { message: "Log in with your @ashland.edu email to post.", section: "account" };
-    if (!profileComplete) return { message: "Complete your profile first.", section: "account" };
-
-    if (draft.mode === "give") {
-      if (!itemFile) return { message: "Add a photo to continue.", section: "media" };
-      if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "details" };
-      if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
-      if (!draft.giveCategory) return { message: "Choose a category.", section: "details" };
-      if (!draft.pickupLocation) return { message: "Choose a pickup location.", section: "details" };
-      return null;
+  function validateBeforeSubmit(): ValidationResult {
+    if (!draft.mode) {
+      return { ok: false, message: "Choose Give, Request, or Event first.", section: "type" };
     }
 
-    if (draft.mode === "request") {
-      if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "details" };
-      if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
-      if (!draft.requestGroup) return { message: "Choose a request type.", section: "details" };
-      if (!draft.requestTimeframe) return { message: "Choose a timeframe.", section: "details" };
-      return null;
+    if (!isLoggedIn) {
+      return {
+        ok: false,
+        message: "Log in with your @ashland.edu email to post.",
+        section: "account",
+      };
     }
 
-    if (!eventFile) return { message: "Add a flyer image to continue.", section: "media" };
-    if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "details" };
-    if (!draft.hostOrg.trim()) return { message: "Host is required.", section: "details" };
-    if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
-    if (!draft.eventCategory) return { message: "Choose a category.", section: "details" };
-    if (!draft.eventLocation.trim()) return { message: "Location is required.", section: "details" };
-    if (!draft.eventDate) return { message: "Choose a date.", section: "details" };
-    if (!draft.eventStartTime) return { message: "Choose a start time.", section: "details" };
-    if (!eventStartIso) return { message: "Start time is invalid.", section: "details" };
-    if (!isValidHttpUrlMaybeEmpty(draft.eventLink)) {
-      return { message: "Link must start with http:// or https://", section: "details" };
-    }
-    if (
-      draft.eventEndTime &&
-      eventEndIso &&
-      new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime()
-    ) {
-      return { message: "End time cannot be before start time.", section: "details" };
+    if (!profileComplete) {
+      return {
+        ok: false,
+        message: "Complete your profile first.",
+        section: "account",
+      };
     }
 
-    return null;
+    for (const stepKey of steps) {
+      const result = validateStep(stepKey);
+      if (!result.ok) return result;
+    }
+
+    return { ok: true };
   }
 
   function goNext() {
     setMsg(null);
     setFieldError(null);
 
-    const check = canAdvanceFromCurrentStep();
+    if (!currentStep || !draft.mode) return;
+
+    const check = validateStep(currentStep);
     if (!check.ok) {
       setMsg(check.message || "Please complete this step.");
       setFieldError(check.section || "details");
       return;
     }
 
-    if (step < 4) {
-      setStep((prev) => (Math.min(4, prev + 1) as Step));
-      requestAnimationFrame(() => {
-        topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      });
+    if (currentStepIndex < steps.length - 1) {
+      setCurrentStepIndex((prev) => prev + 1);
+      scrollTopSmooth();
     }
   }
 
   function goPrev() {
-  setMsg(null);
-  setFieldError(null);
+    setMsg(null);
+    setFieldError(null);
 
-  const mode = draft.mode;
-  if (!mode) {
-    goBackToTypes();
-    return;
+    if (!draft.mode) {
+      goBackToTypes();
+      return;
+    }
+
+    if (currentStepIndex <= 0) {
+      goBackToTypes();
+      return;
+    }
+
+    setCurrentStepIndex((prev) => Math.max(0, prev - 1));
+    scrollTopSmooth();
   }
-
-  const firstStep = getInitialStepForMode(mode);
-
-  if (step === firstStep) {
-    goBackToTypes();
-    return;
-  }
-
-  setStep((prev) => Math.max(firstStep, prev - 1) as Step);
-
-  requestAnimationFrame(() => {
-    topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  });
-}
 
   async function handleSubmit() {
     setMsg(null);
     setFieldError(null);
 
     const validation = validateBeforeSubmit();
-    if (validation) {
-      setMsg(validation.message);
-      setFieldError(validation.section);
+    if (!validation.ok) {
+      setMsg(validation.message || "Please complete the form.");
+      setFieldError(validation.section || "details");
 
-      if (validation.section === "account" && (!isLoggedIn || !profileComplete)) {
-        setTimeout(() => router.push("/me"), 250);
+      if (validation.section === "account") {
+        router.push("/me");
       }
       return;
     }
@@ -700,7 +863,7 @@ export default function CreatePage() {
 
     try {
       if (draft.mode === "event") {
-        const eventInsert: any = {
+        const eventInsert = {
           created_by: userId,
           title: cleanTitle,
           description: cleanDesc,
@@ -730,17 +893,19 @@ export default function CreatePage() {
 
         if (!eventFile) {
           await supabase.from(EVENTS_TABLE).delete().eq("id", eventId);
-          throw new Error("Image is required.");
+          throw new Error("Flyer image is required.");
         }
 
         const ext = getExt(eventFile.name);
         const path = `events/${userId}/${eventId}/${uuidSafe()}.${ext}`;
 
-        const { error: uploadErr } = await supabase.storage.from(EVENT_FLYERS_BUCKET).upload(path, eventFile, {
-          cacheControl: "3600",
-          upsert: false,
-          contentType: eventFile.type || undefined,
-        });
+        const { error: uploadErr } = await supabase.storage
+          .from(EVENT_FLYERS_BUCKET)
+          .upload(path, eventFile, {
+            cacheControl: "3600",
+            upsert: false,
+            contentType: eventFile.type || undefined,
+          });
 
         if (uploadErr) {
           await supabase.from(EVENTS_TABLE).delete().eq("id", eventId);
@@ -750,15 +915,15 @@ export default function CreatePage() {
         const { data: pub } = supabase.storage.from(EVENT_FLYERS_BUCKET).getPublicUrl(path);
         const photoUrl = `${pub.publicUrl}?v=${Date.now()}`;
 
-        const { error: updErr } = await supabase
+        const { error: updateErr } = await supabase
           .from(EVENTS_TABLE)
           .update({ photo_url: photoUrl })
           .eq("id", eventId);
 
-        if (updErr) {
+        if (updateErr) {
           await supabase.storage.from(EVENT_FLYERS_BUCKET).remove([path]);
           await supabase.from(EVENTS_TABLE).delete().eq("id", eventId);
-          throw new Error(`Event created but image save failed: ${updErr.message}`);
+          throw new Error(`Event created but image save failed: ${updateErr.message}`);
         }
 
         resetComposer();
@@ -770,7 +935,22 @@ export default function CreatePage() {
       const postType: PostType = draft.mode === "give" ? "give" : "request";
       const { untilCancel, expiresAt } = computeExpiry(draft.expireChoice);
 
-      const itemInsert: any = {
+      const itemInsert: {
+        owner_id: string;
+        title: string;
+        description: string;
+        status: string;
+        is_anonymous: boolean;
+        until_cancel: boolean;
+        expires_at: string | null;
+        photo_url: string | null;
+        post_type: PostType;
+        category?: string | null;
+        pickup_location?: string | null;
+        request_group?: string | null;
+        request_timeframe?: string | null;
+        request_location?: string | null;
+      } = {
         owner_id: userId,
         title: cleanTitle,
         description: cleanDesc,
@@ -823,11 +1003,13 @@ export default function CreatePage() {
       const ext = getExt(itemFile.name);
       const storagePath = `items/${userId}/${itemId}/${uuidSafe()}.${ext}`;
 
-      const { error: uploadErr } = await supabase.storage.from(ITEM_PHOTOS_BUCKET).upload(storagePath, itemFile, {
-        cacheControl: "3600",
-        upsert: false,
-        contentType: itemFile.type || undefined,
-      });
+      const { error: uploadErr } = await supabase.storage
+        .from(ITEM_PHOTOS_BUCKET)
+        .upload(storagePath, itemFile, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: itemFile.type || undefined,
+        });
 
       if (uploadErr) {
         await supabase.from(ITEMS_TABLE).delete().eq("id", itemId);
@@ -861,63 +1043,37 @@ export default function CreatePage() {
       resetComposer();
       router.push(`/item/${itemId}`);
       router.refresh();
-    } catch (err: any) {
-      setMsg(errToMsg(err));
+    } catch (error) {
+      setMsg(errToMsg(error));
     } finally {
       setSaving(false);
     }
   }
 
-  const totalSteps = useMemo(() => {
-    if (!draft.mode) return 4;
-    return draft.mode === "request" ? 3 : 4;
-  }, [draft.mode]);
-
-  const displayStep = useMemo(() => {
-    if (!draft.mode) return 1;
-    if (draft.mode === "request") {
-      if (step === 2) return 1;
-      if (step === 3) return 2;
-      if (step === 4) return 3;
-    }
-    return step;
-  }, [draft.mode, step]);
-
-  const eventTimeSummary = eventStartIso
-    ? `${formatLongDateTime(eventStartIso)}${eventEndIso ? ` → ${formatLongDateTime(eventEndIso)}` : ""}`
-    : "—";
-
-  function stepTitle() {
-    if (!draft.mode) return "Create";
-    if (draft.mode === "request") {
-      if (step === 2) return "Write your request";
-      if (step === 3) return "Add details";
-      return "Review before posting";
-    }
-
-    if (step === 1) return draft.mode === "give" ? "Add a photo" : "Add a flyer";
-    if (step === 2) return draft.mode === "give" ? "Describe the item" : "Write the event";
-    if (step === 3) return draft.mode === "give" ? "Add item details" : "Add event details";
-    return "Review before publishing";
+  function stickyHint() {
+    if (!draft.mode) return "Choose a type to begin.";
+    if (!isLoggedIn) return "Log in with your @ashland.edu email.";
+    if (!profileComplete) return "Finish your profile first.";
+    if (currentStep === "review") return "Looks good. Ready to post.";
+    return `Step ${displayStep} of ${totalSteps}`;
   }
 
-  function stepSubtitle() {
-    if (!draft.mode) return "What do you want to share today?";
-    if (draft.mode === "give") {
-      if (step === 1) return "Photos make posts feel real and trustworthy.";
-      if (step === 2) return "Tell students what it is and why it matters.";
-      if (step === 3) return "Help people understand category and pickup quickly.";
-      return "Check everything once before sharing.";
+  function primaryLabel() {
+    if (saving) return "Posting...";
+    if (!draft.mode) return "Continue";
+    if (currentStep !== "review") return "Continue";
+    if (draft.mode === "give") return "Share item";
+    if (draft.mode === "request") return "Post request";
+    return "Publish event";
+  }
+
+  function handlePrimaryAction() {
+    if (!draft.mode) return;
+    if (currentStep !== "review") {
+      goNext();
+      return;
     }
-    if (draft.mode === "request") {
-      if (step === 2) return "Be specific so people can actually help.";
-      if (step === 3) return "Set urgency and context clearly.";
-      return "Check the request before posting.";
-    }
-    if (step === 1) return "A strong flyer makes the event feel alive.";
-    if (step === 2) return "Make the event sound worth attending.";
-    if (step === 3) return "Add time, host, location, and category.";
-    return "Check everything once before publishing.";
+    handleSubmit();
   }
 
   function renderModePicker() {
@@ -954,25 +1110,27 @@ export default function CreatePage() {
   }
 
   function renderStepper() {
-    if (!draft.mode) return null;
-
-    const labels =
-      draft.mode === "request"
-        ? ["Write", "Details", "Review"]
-        : ["Media", "Write", "Details", "Review"];
+    if (!draft.mode || !steps.length) return null;
 
     return (
-      <div style={stepperWrap}>
-        {labels.map((label, index) => {
-          const n = index + 1;
-          const active = n === displayStep;
-          const done = n < displayStep;
+      <div style={stepperWrap(steps.length)}>
+        {steps.map((labelKey, index) => {
+          const active = index === currentStepIndex;
+          const done = index < currentStepIndex;
+          const label =
+            labelKey === "media"
+              ? "Media"
+              : labelKey === "write"
+              ? "Write"
+              : labelKey === "details"
+              ? "Details"
+              : "Review";
 
           return (
-            <div key={label} style={stepperItem}>
+            <div key={labelKey} style={stepperItem}>
               <div style={stepperLineWrap}>
-                <div style={stepperDot(active, done)}>{done ? "✓" : n}</div>
-                {index < labels.length - 1 && <div style={stepperLine(done)} />}
+                <div style={stepperDot(active, done)}>{done ? "✓" : index + 1}</div>
+                {index < steps.length - 1 && <div style={stepperLine(done)} />}
               </div>
               <div style={stepperLabel(active)}>{label}</div>
             </div>
@@ -983,7 +1141,7 @@ export default function CreatePage() {
   }
 
   function renderMediaStep() {
-    if (!draft.mode || draft.mode === "request" || step !== 1) return null;
+    if (!draft.mode || currentStep !== "media") return null;
 
     const isGive = draft.mode === "give";
     const file = isGive ? itemFile : eventFile;
@@ -997,13 +1155,19 @@ export default function CreatePage() {
             ref={isGive ? itemFileInputRef : eventFileInputRef}
             type="file"
             accept="image/jpeg,image/png,image/webp"
-            onChange={(e) => (isGive ? pickItemFile(e.target.files?.[0] ?? null) : pickEventFile(e.target.files?.[0] ?? null))}
+            onChange={(e) =>
+              isGive
+                ? pickItemFile(e.target.files?.[0] ?? null)
+                : pickEventFile(e.target.files?.[0] ?? null)
+            }
             style={{ display: "none" }}
           />
 
           <button
             type="button"
-            onClick={() => (isGive ? itemFileInputRef.current?.click() : eventFileInputRef.current?.click())}
+            onClick={() =>
+              isGive ? itemFileInputRef.current?.click() : eventFileInputRef.current?.click()
+            }
             style={heroUploadButton}
           >
             {preview ? (
@@ -1021,15 +1185,18 @@ export default function CreatePage() {
               </div>
             )}
 
-            <div style={floatingUploadAction}>
-              {file ? "Change image" : "Tap to upload"}
-            </div>
+            <div style={floatingUploadAction}>{file ? "Change image" : "Tap to upload"}</div>
           </button>
 
           <div style={fileMetaRow}>
             <div style={fileMetaName}>
-              {file ? file.name : savedName ? `Saved draft: ${savedName}` : "No image selected"}
+              {file
+                ? file.name
+                : savedName
+                ? `Saved draft file: ${savedName} (re-upload required after refresh)`
+                : "No image selected"}
             </div>
+
             {file && (
               <button
                 type="button"
@@ -1046,8 +1213,7 @@ export default function CreatePage() {
   }
 
   function renderWriteStep() {
-    if (!draft.mode) return null;
-    if ((draft.mode !== "request" && step !== 2) || (draft.mode === "request" && step !== 2)) return null;
+    if (!draft.mode || currentStep !== "write") return null;
 
     return (
       <section style={screenCard(fieldError === "details")}>
@@ -1070,7 +1236,11 @@ export default function CreatePage() {
 
         <div style={{ marginTop: 18 }}>
           <label style={fieldLabelModern}>
-            {draft.mode === "request" ? "Details" : draft.mode === "event" ? "Why should people come?" : "Description"}
+            {draft.mode === "request"
+              ? "Details"
+              : draft.mode === "event"
+              ? "Why should people come?"
+              : "Description"}
           </label>
           <textarea
             value={draft.description}
@@ -1097,8 +1267,7 @@ export default function CreatePage() {
   }
 
   function renderDetailsStep() {
-    if (!draft.mode) return null;
-    if ((draft.mode !== "request" && step !== 3) || (draft.mode === "request" && step !== 3)) return null;
+    if (!draft.mode || currentStep !== "details") return null;
 
     if (draft.mode === "give") {
       return (
@@ -1106,7 +1275,7 @@ export default function CreatePage() {
           <div style={detailGroup}>
             <div style={fieldLabelModern}>Category</div>
             <div style={choiceGrid}>
-              {(["books", "notes", "electronics", "furniture", "clothing", "others"] as GiveCategory[]).map((v) => (
+              {GIVE_CATEGORY_OPTIONS.map((v) => (
                 <button
                   key={v}
                   type="button"
@@ -1122,9 +1291,7 @@ export default function CreatePage() {
           <div style={detailGroup}>
             <div style={fieldLabelModern}>Pickup location</div>
             <div style={choiceGrid}>
-              {(
-                ["College Quad", "Safety Service Office", "Dining Hall", "Library", "Student Center"] as PickupLocation[]
-              ).map((v) => (
+              {PICKUP_OPTIONS.map((v) => (
                 <button
                   key={v}
                   type="button"
@@ -1162,12 +1329,15 @@ export default function CreatePage() {
           <div style={detailGroup}>
             <div style={fieldLabelModern}>Auto-close</div>
             <div style={choiceGrid}>
-              {(["urgent24", "7", "14", "30", "never"] as ExpireChoice[]).map((v) => (
+              {EXPIRE_OPTIONS.map((v) => (
                 <button
                   key={v}
                   type="button"
                   onClick={() => patchDraft("expireChoice", v)}
-                  style={choiceTile(draft.expireChoice === v, v === "urgent24" ? "danger" : "neutral")}
+                  style={choiceTile(
+                    draft.expireChoice === v,
+                    v === "urgent24" ? "danger" : "neutral"
+                  )}
                 >
                   {expireChoiceLabel(v)}
                 </button>
@@ -1184,7 +1354,7 @@ export default function CreatePage() {
           <div style={detailGroup}>
             <div style={fieldLabelModern}>Request type</div>
             <div style={choiceGrid}>
-              {(["logistics", "services", "urgent", "collaboration", "lost & found"] as RequestGroup[]).map((v) => (
+              {REQUEST_GROUP_OPTIONS.map((v) => (
                 <button
                   key={v}
                   type="button"
@@ -1199,8 +1369,8 @@ export default function CreatePage() {
 
           <div style={detailGroup}>
             <div style={fieldLabelModern}>Timeframe</div>
-            <div style={segmentedWrap}>
-              {(["today", "this_week", "flexible"] as RequestTimeframe[]).map((v) => (
+            <div style={segmentedTripletWrap}>
+              {REQUEST_TIMEFRAME_OPTIONS.map((v) => (
                 <button
                   key={v}
                   type="button"
@@ -1248,12 +1418,15 @@ export default function CreatePage() {
           <div style={detailGroup}>
             <div style={fieldLabelModern}>Auto-close</div>
             <div style={choiceGrid}>
-              {(["urgent24", "7", "14", "30", "never"] as ExpireChoice[]).map((v) => (
+              {EXPIRE_OPTIONS.map((v) => (
                 <button
                   key={v}
                   type="button"
                   onClick={() => patchDraft("expireChoice", v)}
-                  style={choiceTile(draft.expireChoice === v, v === "urgent24" ? "danger" : "neutral")}
+                  style={choiceTile(
+                    draft.expireChoice === v,
+                    v === "urgent24" ? "danger" : "neutral"
+                  )}
                 >
                   {expireChoiceLabel(v)}
                 </button>
@@ -1269,7 +1442,7 @@ export default function CreatePage() {
         <div style={detailGroup}>
           <div style={fieldLabelModern}>Category</div>
           <div style={choiceGrid}>
-            {(["career", "club", "sports", "music", "arts", "volunteering", "academic", "social", "other"] as EventCategory[]).map((v) => (
+            {EVENT_CATEGORY_OPTIONS.map((v) => (
               <button
                 key={v}
                 type="button"
@@ -1302,7 +1475,7 @@ export default function CreatePage() {
           />
         </div>
 
-        <div style={grid2}>
+        <div style={grid2PhoneFirst}>
           <div>
             <div style={fieldLabelModern}>Date</div>
             <input
@@ -1312,6 +1485,7 @@ export default function CreatePage() {
               style={softInputModern}
             />
           </div>
+
           <div>
             <div style={fieldLabelModern}>Start time</div>
             <input
@@ -1323,7 +1497,7 @@ export default function CreatePage() {
           </div>
         </div>
 
-        <div style={grid2}>
+        <div style={grid2PhoneFirst}>
           <div>
             <div style={fieldLabelModern}>End time</div>
             <input
@@ -1333,6 +1507,7 @@ export default function CreatePage() {
               style={softInputModern}
             />
           </div>
+
           <div>
             <div style={fieldLabelModern}>Link</div>
             <input
@@ -1403,7 +1578,8 @@ export default function CreatePage() {
             <div style={previewHeadline}>{cleanTitle || "Untitled post"}</div>
             <div style={previewText}>{cleanDesc || "No description yet."}</div>
             <div style={previewFooter}>
-              {draft.hideName ? "Anonymous" : "Visible name"} • {expireChoiceLabel(draft.expireChoice)}
+              {draft.hideName ? "Anonymous" : "Visible name"} •{" "}
+              {expireChoiceLabel(draft.expireChoice)}
             </div>
           </div>
         </div>
@@ -1413,23 +1589,36 @@ export default function CreatePage() {
     if (draft.mode === "request") {
       return (
         <div style={previewCard}>
-          <div style={{ ...previewMediaWrap, height: 160, background: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)" }}>
+          <div
+            style={{
+              ...previewMediaWrap,
+              height: 160,
+              background: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)",
+            }}
+          >
             <div style={{ padding: 18, width: "100%" }}>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>{requestGroupLabel(draft.requestGroup)}</span>
-                <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>{requestTimeframeLabel(draft.requestTimeframe)}</span>
+                <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>
+                  {requestGroupLabel(draft.requestGroup)}
+                </span>
+                <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>
+                  {requestTimeframeLabel(draft.requestTimeframe)}
+                </span>
               </div>
+
               <div style={{ marginTop: 16, fontWeight: 1000, fontSize: 24, lineHeight: 1.15 }}>
                 {cleanTitle || "Untitled request"}
               </div>
             </div>
+
             <div style={previewBadge("#eff6ff", "#1d4ed8", "#93c5fd")}>REQUEST</div>
           </div>
 
           <div style={previewBody}>
             <div style={previewText}>{cleanDesc || "No description yet."}</div>
             <div style={previewFooter}>
-              {draft.requestLocation.trim() || "No location added"} • {draft.hideName ? "Anonymous" : "Visible name"} •{" "}
+              {draft.requestLocation.trim() || "No location added"} •{" "}
+              {draft.hideName ? "Anonymous" : "Visible name"} •{" "}
               {expireChoiceLabel(draft.expireChoice)}
             </div>
           </div>
@@ -1465,7 +1654,7 @@ export default function CreatePage() {
   }
 
   function renderReviewStep() {
-    if (!draft.mode || step !== 4) return null;
+    if (!draft.mode || currentStep !== "review") return null;
 
     return (
       <section style={screenCard(fieldError === "review")}>
@@ -1474,7 +1663,7 @@ export default function CreatePage() {
         <div style={{ marginTop: 18, display: "grid", gap: 10 }}>
           <div style={reviewRow}>
             <span style={reviewLabel}>Type</span>
-            <span style={reviewValue}>{draft.mode.charAt(0).toUpperCase() + draft.mode.slice(1)}</span>
+            <span style={reviewValue}>{modeLabel(draft.mode)}</span>
           </div>
 
           {draft.mode === "give" && (
@@ -1550,7 +1739,7 @@ export default function CreatePage() {
   }
 
   function renderCurrentStep() {
-    if (!draft.mode) return null;
+    if (!draft.mode || !currentStep) return null;
 
     return (
       <>
@@ -1560,32 +1749,6 @@ export default function CreatePage() {
         {renderReviewStep()}
       </>
     );
-  }
-
-  function stickyHint() {
-    if (!draft.mode) return "Choose a type to begin.";
-    if (!isLoggedIn) return "Log in with your @ashland.edu email.";
-    if (!profileComplete) return "Finish your profile first.";
-    if (step === 4) return "Looks good. Ready to post.";
-    return `Step ${displayStep} of ${totalSteps}`;
-  }
-
-  function primaryLabel() {
-    if (saving) return "Posting...";
-    if (!draft.mode) return "Continue";
-    if (step < 4) return "Continue";
-    if (draft.mode === "give") return "Share item";
-    if (draft.mode === "request") return "Post request";
-    return "Publish event";
-  }
-
-  function handlePrimaryAction() {
-    if (!draft.mode) return;
-    if (step < 4) {
-      goNext();
-      return;
-    }
-    handleSubmit();
   }
 
   if (!hydratedDraft || authLoading || profileLoading) {
@@ -1676,8 +1839,10 @@ export default function CreatePage() {
             <div style={mainColumn}>
               <div style={heroHeaderCompact}>
                 <div style={pageEyebrow}>{draft.mode.toUpperCase()}</div>
-                <div style={heroTitleSmall}>{stepTitle()}</div>
-                <div style={heroSubtitleSmall}>{stepSubtitle()}</div>
+                <div style={heroTitleSmall}>{stepTitle(draft.mode, currentStep as StepKey)}</div>
+                <div style={heroSubtitleSmall}>
+                  {stepSubtitle(draft.mode, currentStep as StepKey)}
+                </div>
               </div>
 
               {renderStepper()}
@@ -1693,7 +1858,7 @@ export default function CreatePage() {
               {msg && <div style={errorBanner}>{msg}</div>}
             </div>
 
-            {isDesktop && step === 4 && (
+            {isDesktop && currentStep === "review" && (
               <div style={sideColumn}>
                 <div style={desktopStickyPreview}>
                   <div style={{ fontWeight: 1000, fontSize: 16, marginBottom: 12 }}>Preview</div>
@@ -1717,7 +1882,12 @@ export default function CreatePage() {
               {displayStep === 1 ? "Types" : "Back"}
             </button>
 
-            <button type="button" onClick={handlePrimaryAction} style={primaryStickyBtn(saving)} disabled={saving}>
+            <button
+              type="button"
+              onClick={handlePrimaryAction}
+              style={primaryStickyBtn(saving)}
+              disabled={saving}
+            >
               {primaryLabel()}
             </button>
           </div>
@@ -1727,7 +1897,9 @@ export default function CreatePage() {
   );
 }
 
-/* ---------------- styles ---------------- */
+/* =========================
+   STYLES
+========================= */
 
 const pageStyle: React.CSSProperties = {
   minHeight: "100vh",
@@ -1908,13 +2080,15 @@ const modeArrow: React.CSSProperties = {
   flexShrink: 0,
 };
 
-const stepperWrap: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-  gap: 8,
-  marginTop: 6,
-  marginBottom: 16,
-};
+function stepperWrap(stepCount: number): React.CSSProperties {
+  return {
+    display: "grid",
+    gridTemplateColumns: `repeat(${stepCount}, minmax(0, 1fr))`,
+    gap: 8,
+    marginTop: 6,
+    marginBottom: 16,
+  };
+}
 
 const stepperItem: React.CSSProperties = {
   minWidth: 0,
@@ -1970,7 +2144,9 @@ function screenCard(highlight: boolean): React.CSSProperties {
     border: `1px solid ${highlight ? "#fecdd3" : "#e5e7eb"}`,
     borderRadius: 28,
     padding: 18,
-    boxShadow: highlight ? "0 0 0 3px rgba(251,113,133,0.08)" : "0 20px 50px rgba(15,23,42,0.05)",
+    boxShadow: highlight
+      ? "0 0 0 3px rgba(251,113,133,0.08)"
+      : "0 20px 50px rgba(15,23,42,0.05)",
   };
 }
 
@@ -2106,17 +2282,40 @@ const choiceGrid: React.CSSProperties = {
   gap: 10,
 };
 
-function choiceTile(active: boolean, tone: "warm" | "blue" | "purple" | "neutral" | "danger"): React.CSSProperties {
+function choiceTile(
+  active: boolean,
+  tone: "warm" | "blue" | "purple" | "neutral" | "danger"
+): React.CSSProperties {
   const palette =
     tone === "warm"
-      ? { bg: active ? "#ffedd5" : "#ffffff", border: active ? "#fb923c" : "#e5e7eb", color: active ? "#9a3412" : "#0f172a" }
+      ? {
+          bg: active ? "#ffedd5" : "#ffffff",
+          border: active ? "#fb923c" : "#e5e7eb",
+          color: active ? "#9a3412" : "#0f172a",
+        }
       : tone === "blue"
-      ? { bg: active ? "#dbeafe" : "#ffffff", border: active ? "#60a5fa" : "#e5e7eb", color: active ? "#1d4ed8" : "#0f172a" }
+      ? {
+          bg: active ? "#dbeafe" : "#ffffff",
+          border: active ? "#60a5fa" : "#e5e7eb",
+          color: active ? "#1d4ed8" : "#0f172a",
+        }
       : tone === "purple"
-      ? { bg: active ? "#ede9fe" : "#ffffff", border: active ? "#8b5cf6" : "#e5e7eb", color: active ? "#6d28d9" : "#0f172a" }
+      ? {
+          bg: active ? "#ede9fe" : "#ffffff",
+          border: active ? "#8b5cf6" : "#e5e7eb",
+          color: active ? "#6d28d9" : "#0f172a",
+        }
       : tone === "danger"
-      ? { bg: active ? "#ffe4e6" : "#ffffff", border: active ? "#fb7185" : "#e5e7eb", color: active ? "#be123c" : "#0f172a" }
-      : { bg: active ? "#f1f5f9" : "#ffffff", border: active ? "#94a3b8" : "#e5e7eb", color: "#0f172a" };
+      ? {
+          bg: active ? "#ffe4e6" : "#ffffff",
+          border: active ? "#fb7185" : "#e5e7eb",
+          color: active ? "#be123c" : "#0f172a",
+        }
+      : {
+          bg: active ? "#f1f5f9" : "#ffffff",
+          border: active ? "#94a3b8" : "#e5e7eb",
+          color: "#0f172a",
+        };
 
   return {
     padding: "12px 14px",
@@ -2133,6 +2332,12 @@ function choiceTile(active: boolean, tone: "warm" | "blue" | "purple" | "neutral
 const segmentedWrap: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: 10,
+};
+
+const segmentedTripletWrap: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
   gap: 10,
 };
 
@@ -2158,9 +2363,9 @@ const softInputModern: React.CSSProperties = {
   fontSize: 14,
 };
 
-const grid2: React.CSSProperties = {
+const grid2PhoneFirst: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "1fr 1fr",
+  gridTemplateColumns: "1fr",
   gap: 12,
   marginBottom: 18,
 };
