@@ -7,7 +7,9 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
 
-/* ---------------- Types ---------------- */
+/* ================================
+   TYPES
+================================ */
 
 type ProfileRow = {
   id: string;
@@ -103,9 +105,11 @@ type MyOfferRow = {
   } | null;
 };
 
-type TabKey = "overview" | "listings" | "activity" | "requests" | "history";
+type TabKey = "overview" | "listings" | "requests" | "activity" | "history";
 
-/* ---------------- Helpers ---------------- */
+/* ================================
+   HELPERS
+================================ */
 
 function isAshlandEmail(email: string) {
   return email.trim().toLowerCase().endsWith("@ashland.edu");
@@ -116,6 +120,17 @@ function fmtWhen(ts: string | null | undefined) {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleString();
+}
+
+function fmtShort(ts: string | null | undefined) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 
 function normStatus(s: string | null | undefined) {
@@ -140,7 +155,29 @@ function getFriendlyError(e: any) {
   return "Something went wrong.";
 }
 
-/* ---------------- Page ---------------- */
+function readableRole(role: string | null | undefined) {
+  const raw = (role ?? "").trim().toLowerCase();
+  if (!raw) return "Ashland member";
+  if (raw === "student") return "Student member";
+  if (raw === "faculty") return "Faculty member";
+  return raw;
+}
+
+function statusTone(status: string | null | undefined) {
+  const s = normStatus(status);
+  if (s === "accepted" || s === "claimed" || s === "completed") return "green";
+  if (s === "pending" || s === "hold") return "amber";
+  if (s === "declined") return "red";
+  return "gray";
+}
+
+function itemVerb(type: "give" | "request" | null | undefined) {
+  return type === "request" ? "Request" : "Give";
+}
+
+/* ================================
+   PAGE
+================================ */
 
 export default function AccountPage() {
   const router = useRouter();
@@ -155,6 +192,7 @@ export default function AccountPage() {
   const [err, setErr] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("overview");
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
   // auth form
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
@@ -194,7 +232,7 @@ export default function AccountPage() {
   const [offerActingId, setOfferActingId] = useState<string | null>(null);
   const [myOfferActingId, setMyOfferActingId] = useState<string | null>(null);
 
-  // local seen marker
+  // seen marker for offers
   const [offersSeenAt, setOffersSeenAt] = useState<string | null>(null);
 
   const isLoggedIn = useMemo(() => {
@@ -206,7 +244,21 @@ export default function AccountPage() {
     (userEmail ? userEmail.split("@")[0] : "") ||
     "Account";
 
-  const roleLabel = (profile?.user_role ?? "").trim() || "member";
+  const displayRole = readableRole(profile?.user_role);
+  const memberSince = fmtShort(profile?.created_at);
+
+  const activeListings = useMemo(
+    () => myItems.filter((x) => normStatus(x.status) !== "claimed" && normStatus(x.status) !== "completed"),
+    [myItems]
+  );
+
+  const completedListings = useMemo(
+    () => myItems.filter((x) => {
+      const s = normStatus(x.status);
+      return s === "claimed" || s === "completed";
+    }),
+    [myItems]
+  );
 
   const unseenIncomingInterestCount = useMemo(() => {
     return incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at).length;
@@ -222,17 +274,89 @@ export default function AccountPage() {
     }).length;
   }, [incomingOffers, offersSeenAt]);
 
+  const acceptedIncomingOffers = useMemo(() => {
+    return incomingOffers.filter((o) => (o.status ?? "pending") === "accepted").length;
+  }, [incomingOffers]);
+
+  const acceptedMyOffers = useMemo(() => {
+    return myOffers.filter((o) => (o.status ?? "pending") === "accepted").length;
+  }, [myOffers]);
+
+  const pendingIncomingOffers = useMemo(() => {
+    return incomingOffers.filter((o) => (o.status ?? "pending") === "pending").length;
+  }, [incomingOffers]);
+
   const hasNewRequests = unseenIncomingInterestCount + unseenIncomingOfferCount > 0;
 
-  const activeListings = useMemo(
-    () => myItems.filter((x) => normStatus(x.status) !== "claimed"),
-    [myItems]
-  );
+  const overviewHighlights = useMemo(() => {
+    const rows: Array<{ key: string; title: string; body: string; cta: string; onClick: () => void }> = [];
 
-  const completedListings = useMemo(
-    () => myItems.filter((x) => normStatus(x.status) === "claimed"),
-    [myItems]
-  );
+    if (unseenIncomingInterestCount > 0) {
+      rows.push({
+        key: "new-item-requests",
+        title: `${unseenIncomingInterestCount} new item request${unseenIncomingInterestCount > 1 ? "s" : ""}`,
+        body: "People want your give posts. Review them first.",
+        cta: "Open requests",
+        onClick: () => {
+          setTab("requests");
+          setOffersSeenAt(new Date().toISOString());
+          void markIncomingSeen();
+        },
+      });
+    }
+
+    if (pendingIncomingOffers > 0) {
+      rows.push({
+        key: "helper-offers",
+        title: `${pendingIncomingOffers} helper offer${pendingIncomingOffers > 1 ? "s" : ""} waiting`,
+        body: "Accept one, place some on hold, or decline.",
+        cta: "Review offers",
+        onClick: () => {
+          setTab("requests");
+          setOffersSeenAt(new Date().toISOString());
+          void markIncomingSeen();
+        },
+      });
+    }
+
+    if (acceptedIncomingOffers > 0) {
+      rows.push({
+        key: "accepted-helper",
+        title: `${acceptedIncomingOffers} accepted helper${acceptedIncomingOffers > 1 ? "s" : ""}`,
+        body: "You can open chat and finalize details.",
+        cta: "Go to requests",
+        onClick: () => setTab("requests"),
+      });
+    }
+
+    if (acceptedMyOffers > 0) {
+      rows.push({
+        key: "my-accepted-offers",
+        title: `${acceptedMyOffers} of your offers got accepted`,
+        body: "Open chat and finish the coordination.",
+        cta: "View activity",
+        onClick: () => setTab("activity"),
+      });
+    }
+
+    if (rows.length === 0) {
+      rows.push({
+        key: "all-caught-up",
+        title: "You’re all caught up",
+        body: "No urgent actions right now. Create something new or browse the feed.",
+        cta: "Create post",
+        onClick: () => router.push("/create"),
+      });
+    }
+
+    return rows.slice(0, 3);
+  }, [
+    unseenIncomingInterestCount,
+    pendingIncomingOffers,
+    acceptedIncomingOffers,
+    acceptedMyOffers,
+    router,
+  ]);
 
   function showToast(msg: string, kind: "ok" | "err" = "ok") {
     setToast({ msg, kind });
@@ -251,7 +375,9 @@ export default function AccountPage() {
     setOffersSeenAt(null);
   }
 
-  /* ---------------- Loaders ---------------- */
+  /* ================================
+     LOADERS
+  ================================ */
 
   async function loadProfile(uid: string) {
     const { data, error } = await supabase
@@ -309,7 +435,9 @@ export default function AccountPage() {
   async function loadMyOffers(uid: string) {
     const { data, error } = await supabase
       .from("request_offers")
-      .select("id,request_id,helper_id,status,availability,note,created_at,request_item:items(id,title,status,post_type)")
+      .select(
+        "id,request_id,helper_id,status,availability,note,created_at,request_item:items(id,title,status,post_type)"
+      )
       .eq("helper_id", uid)
       .order("created_at", { ascending: false })
       .returns<MyOfferRow[]>();
@@ -385,17 +513,12 @@ export default function AccountPage() {
     const nowIso = new Date().toISOString();
     const ids = unseen.map((r) => r.id).filter(Boolean);
 
-    const { error } = await supabase
-      .from("interests")
-      .update({ owner_seen_at: nowIso })
-      .in("id", ids);
+    const { error } = await supabase.from("interests").update({ owner_seen_at: nowIso }).in("id", ids);
 
     if (error) return;
 
     setIncomingInterests((prev) =>
-      prev.map((r) =>
-        r.owner_seen_at || r.owner_dismissed_at ? r : { ...r, owner_seen_at: nowIso }
-      )
+      prev.map((r) => (r.owner_seen_at || r.owner_dismissed_at ? r : { ...r, owner_seen_at: nowIso }))
     );
   }
 
@@ -434,7 +557,9 @@ export default function AccountPage() {
     setLoading(false);
   }
 
-  /* ---------------- Actions ---------------- */
+  /* ================================
+     ACTIONS
+  ================================ */
 
   async function deleteListing(id: string) {
     setConfirm({
@@ -460,9 +585,9 @@ export default function AccountPage() {
 
   async function deleteNotification(r: IncomingInterestRow) {
     setConfirm({
-      title: "Delete request?",
+      title: "Remove this request?",
       body: "This removes it from your incoming list.",
-      actionLabel: "Delete",
+      actionLabel: "Remove",
       onYes: async () => {
         setConfirm(null);
         setDeletingNotifId(r.id);
@@ -482,10 +607,7 @@ export default function AccountPage() {
   async function updateOfferStatus(o: IncomingOfferRow, next: OfferStatus) {
     setOfferActingId(o.id);
 
-    const { error } = await supabase
-      .from("request_offers")
-      .update({ status: next })
-      .eq("id", o.id);
+    const { error } = await supabase.from("request_offers").update({ status: next }).eq("id", o.id);
 
     setOfferActingId(null);
 
@@ -563,11 +685,7 @@ export default function AccountPage() {
     try {
       setMyOfferActingId(off.id);
 
-      const { data, error } = await supabase
-        .from("items")
-        .select("owner_id")
-        .eq("id", reqId)
-        .single();
+      const { data, error } = await supabase.from("items").select("owner_id").eq("id", reqId).single();
 
       if (error) throw new Error(error.message);
 
@@ -629,7 +747,9 @@ export default function AccountPage() {
     }
   }
 
-  /* ---------------- Effects ---------------- */
+  /* ================================
+     EFFECTS
+  ================================ */
 
   useEffect(() => {
     (async () => {
@@ -675,41 +795,93 @@ export default function AccountPage() {
       if (e.key === "Escape") {
         setDrawerOpen(false);
         setConfirm(null);
+        setActiveMenuId(null);
       }
     }
+
+    function onClick() {
+      setActiveMenuId(null);
+    }
+
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("click", onClick);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("click", onClick);
+    };
   }, []);
 
-  /* ---------------- Render ---------------- */
+  /* ================================
+     RENDER - LOADING / AUTH
+  ================================ */
 
   if (loading) {
-    return <div style={pageWrap}><div style={shell}>Loading…</div></div>;
+    return (
+      <div style={pageWrap}>
+        <div style={shell}>
+          <div style={heroCard}>
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <div style={avatarLargeSkeleton} />
+              <div style={{ flex: 1 }}>
+                <div style={skel(180, 18)} />
+                <div style={{ ...skel(240, 12), marginTop: 10 }} />
+              </div>
+            </div>
+
+            <div style={{ marginTop: 18, display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 10 }}>
+              <div style={skeletonCard} />
+              <div style={skeletonCard} />
+              <div style={skeletonCard} />
+              <div style={skeletonCard} />
+            </div>
+          </div>
+
+          <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+            <div style={panelSoft}>
+              <div style={skel(150, 16)} />
+              <div style={{ ...skel("100%", 52), marginTop: 12 }} />
+            </div>
+            <div style={panel}>
+              <div style={skel(120, 16)} />
+              <div style={{ ...skel("100%", 92), marginTop: 12 }} />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (!isLoggedIn) {
     return (
       <div style={pageWrap}>
-        <div style={shell}>
-          <div style={headerCard}>
-            <div style={{ fontSize: 28, fontWeight: 950 }}>Account</div>
-            <div style={{ marginTop: 8, color: "#4b5563" }}>
-              Sign in or sign up using your <b>@ashland.edu</b> email.
+        <div style={shellNarrow}>
+          <div style={heroCard}>
+            <div style={heroTop}>
+              <div>
+                <div style={eyebrow}>My account</div>
+                <div style={heroTitle}>Sign in to manage your campus activity</div>
+                <div style={heroSub}>
+                  Use your <b>@ashland.edu</b> email to manage listings, requests, offers, and chats.
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 18, display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <button onClick={() => setAuthMode("signin")} style={segBtn(authMode === "signin")}>
+                Sign in
+              </button>
+              <button onClick={() => setAuthMode("signup")} style={segBtn(authMode === "signup")}>
+                Sign up
+              </button>
             </div>
           </div>
 
-          <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={() => setAuthMode("signin")} style={pillBtn(authMode === "signin")}>
-              Sign in
-            </button>
-            <button onClick={() => setAuthMode("signup")} style={pillBtn(authMode === "signup")}>
-              Sign up
-            </button>
-          </div>
-
           <div style={{ ...panel, marginTop: 14 }}>
-            <div style={{ fontWeight: 950, marginBottom: 12 }}>
-              {authMode === "signin" ? "Welcome back" : "Create an account"}
+            <div style={{ fontWeight: 950, fontSize: 18 }}>
+              {authMode === "signin" ? "Welcome back" : "Create your account"}
+            </div>
+            <div style={{ color: "#6b7280", marginTop: 6 }}>
+              Keep everything in one place: your posts, incoming requests, and active chats.
             </div>
 
             <input
@@ -718,7 +890,7 @@ export default function AccountPage() {
               placeholder="you@ashland.edu"
               autoComplete="email"
               inputMode="email"
-              style={input}
+              style={{ ...input, marginTop: 14 }}
             />
 
             <input
@@ -733,134 +905,310 @@ export default function AccountPage() {
               }}
             />
 
-            <button onClick={handleAuth} disabled={authBusy} style={primaryBtn(authBusy)}>
-              {authBusy ? "Working…" : authMode === "signin" ? "Sign in" : "Sign up"}
-            </button>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
+              <button onClick={handleAuth} disabled={authBusy} style={primaryBtn(authBusy)}>
+                {authBusy ? "Working…" : authMode === "signin" ? "Sign in" : "Sign up"}
+              </button>
 
-            {err && <div style={{ marginTop: 12, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
-
-            <div style={{ marginTop: 12, fontSize: 13, color: "#6b7280" }}>
-              You can still browse the feed without logging in.
+              <button onClick={() => router.push("/feed")} style={secondaryBtn}>
+                Browse feed
+              </button>
             </div>
 
-            <button onClick={() => router.push("/feed")} style={{ ...outlineBtn, width: "100%", marginTop: 10 }}>
-              Browse feed
-            </button>
+            {err && <div style={{ marginTop: 12, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
           </div>
         </div>
       </div>
     );
   }
 
+  /* ================================
+     MAIN
+  ================================ */
+
   return (
     <div style={pageWrap}>
       <div style={shell}>
-        {/* top */}
-        <div style={headerCard}>
-          <div style={topRow}>
-            <div style={idWrap}>
-              <div style={avatar}>{displayName.slice(0, 1).toUpperCase()}</div>
-              <div style={{ minWidth: 0 }}>
-                <div style={nameLine}>{displayName}</div>
-                <div style={subLine}>
-                  {roleLabel} • {userEmail}
+        <section style={heroCard}>
+          <div style={heroTop}>
+            <div style={heroIdentity}>
+              <div style={avatarLarge}>{displayName.slice(0, 1).toUpperCase()}</div>
+
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={eyebrow}>My space</div>
+                <div style={heroTitle}>{displayName}</div>
+                <div style={heroSub}>
+                  {displayRole} • {userEmail}
+                  {memberSince ? ` • Joined ${memberSince}` : ""}
+                </div>
+
+                <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <Chip label={`${activeListings.length} active`} tone="green" />
+                  <Chip
+                    label={`${unseenIncomingInterestCount + unseenIncomingOfferCount} new`}
+                    tone={hasNewRequests ? "red" : "gray"}
+                  />
+                  <Chip label={`${stats.chats} chats`} tone="gray" />
                 </div>
               </div>
             </div>
 
-            <button onClick={() => setDrawerOpen(true)} style={iconBtn} aria-label="Open menu">
-              ☰
-            </button>
+            <div style={heroActions}>
+              <button onClick={() => router.push("/create")} style={primaryCtaBtn}>
+                + Create post
+              </button>
+              <button onClick={() => router.push("/messages")} style={secondaryCtaBtn}>
+                Messages
+              </button>
+              <button onClick={() => setDrawerOpen(true)} style={iconBtn} aria-label="Open menu">
+                ☰
+              </button>
+            </div>
           </div>
 
-          {err && <div style={{ marginTop: 10, color: "#b91c1c", fontWeight: 900 }}>{err}</div>}
+          <div style={metricGrid}>
+            <MetricCard
+              label="Active listings"
+              value={activeListings.length}
+              hint="Posts currently live"
+              onClick={() => setTab("listings")}
+            />
+            <MetricCard
+              label="Incoming requests"
+              value={incomingInterests.length + incomingOffers.length}
+              hint="People waiting on you"
+              onClick={() => {
+                setTab("requests");
+                setOffersSeenAt(new Date().toISOString());
+                void markIncomingSeen();
+              }}
+              highlight={hasNewRequests}
+            />
+            <MetricCard
+              label="My activity"
+              value={myRequests.length + myOffers.length}
+              hint="Interests and help offers"
+              onClick={() => setTab("activity")}
+            />
+            <MetricCard
+              label="Completed"
+              value={completedListings.length}
+              hint="Finished items"
+              onClick={() => setTab("history")}
+            />
+          </div>
+        </section>
 
-          <div style={tabsRow}>
-            <button onClick={() => setTab("overview")} style={tabPill(tab === "overview")}>
+        <section style={{ marginTop: 14 }}>
+          <div style={sectionHeaderRow}>
+            <div>
+              <div style={sectionTitle}>Needs attention</div>
+              <div style={sectionHint}>Surface what matters first instead of making you dig through tabs.</div>
+            </div>
+          </div>
+
+          <div style={attentionGrid}>
+            {overviewHighlights.map((row) => (
+              <AttentionCard
+                key={row.key}
+                title={row.title}
+                body={row.body}
+                cta={row.cta}
+                onClick={row.onClick}
+              />
+            ))}
+          </div>
+        </section>
+
+        <section style={{ marginTop: 14 }}>
+          <div style={tabsShell}>
+            <button onClick={() => setTab("overview")} style={tabBtn(tab === "overview")}>
               Overview
             </button>
-            <button onClick={() => setTab("listings")} style={tabPill(tab === "listings")}>
+
+            <button onClick={() => setTab("listings")} style={tabBtn(tab === "listings")}>
               Listings
             </button>
-            <button onClick={() => setTab("activity")} style={tabPill(tab === "activity")}>
-              My activity
-            </button>
+
             <button
               onClick={() => {
                 setTab("requests");
                 setOffersSeenAt(new Date().toISOString());
                 void markIncomingSeen();
               }}
-              style={tabPill(tab === "requests")}
+              style={tabBtn(tab === "requests")}
             >
               Requests
-              {hasNewRequests && <span style={dot} />}
+              {hasNewRequests ? <span style={badgeRed}>{unseenIncomingInterestCount + unseenIncomingOfferCount}</span> : null}
             </button>
-            <button onClick={() => setTab("history")} style={tabPill(tab === "history")}>
+
+            <button onClick={() => setTab("activity")} style={tabBtn(tab === "activity")}>
+              Activity
+            </button>
+
+            <button onClick={() => setTab("history")} style={tabBtn(tab === "history")}>
               History
             </button>
           </div>
+        </section>
 
-          <div style={statsRow}>
-            <span>Listed: {stats.listed}</span>
-            <span>Interests: {stats.interests}</span>
-            <span>Offers: {stats.offers}</span>
-            <span>Chats: {stats.chats}</span>
-          </div>
-        </div>
-
-        {/* overview */}
         {tab === "overview" && (
-          <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
-            <div style={panel}>
-              <div style={{ fontWeight: 950, fontSize: 18 }}>Quick actions</div>
-              <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                <button onClick={() => router.push("/create")} style={primaryBtn(false)}>
-                  Create post
-                </button>
-                <button onClick={() => router.push("/feed")} style={outlineBtn}>
-                  Browse feed
-                </button>
-                <button onClick={() => router.push("/messages")} style={outlineBtn}>
-                  Messages
-                </button>
-                <button onClick={() => router.push("/pickups")} style={outlineBtn}>
-                  My pickups
-                </button>
+          <div style={{ marginTop: 14, display: "grid", gap: 14 }}>
+            <section style={panel}>
+              <div style={sectionHeaderRow}>
+                <div>
+                  <div style={sectionTitle}>Quick actions</div>
+                  <div style={sectionHint}>The actions you are most likely to need next.</div>
+                </div>
               </div>
-            </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
-              <StatCard label="Active listings" value={activeListings.length} />
-              <StatCard label="Completed listings" value={completedListings.length} />
-              <StatCard label="Incoming requests" value={incomingInterests.length} />
-              <StatCard label="Incoming offers" value={incomingOffers.length} />
-            </div>
+              <div style={quickActionGrid}>
+                <QuickActionCard
+                  emoji="📝"
+                  title="Create a new post"
+                  body="Share a give item, ask for help, or publish an event."
+                  actionLabel="Create"
+                  onClick={() => router.push("/create")}
+                  primary
+                />
+                <QuickActionCard
+                  emoji="📩"
+                  title="Open messages"
+                  body="Continue accepted requests and helper conversations."
+                  actionLabel="Messages"
+                  onClick={() => router.push("/messages")}
+                />
+                <QuickActionCard
+                  emoji="🔎"
+                  title="Browse the feed"
+                  body="Explore what the campus community is posting now."
+                  actionLabel="Browse"
+                  onClick={() => router.push("/feed")}
+                />
+                <QuickActionCard
+                  emoji="📦"
+                  title="My pickups"
+                  body="See pickup progress and next coordination steps."
+                  actionLabel="Pickups"
+                  onClick={() => router.push("/pickups")}
+                />
+              </div>
+            </section>
+
+            <section style={doubleCol}>
+              <div style={panel}>
+                <div style={sectionHeaderRow}>
+                  <div>
+                    <div style={sectionTitle}>Recent listings</div>
+                    <div style={sectionHint}>A quick view of what you posted most recently.</div>
+                  </div>
+                  <button onClick={() => setTab("listings")} style={linkBtn}>
+                    See all
+                  </button>
+                </div>
+
+                {activeListings.slice(0, 3).length === 0 ? (
+                  <EmptyState
+                    title="No active listings yet"
+                    body="Your active give posts and request posts will appear here."
+                    compact
+                  />
+                ) : (
+                  <div style={stackList}>
+                    {activeListings.slice(0, 3).map((item) => (
+                      <CompactItemRow
+                        key={item.id}
+                        title={item.title}
+                        subtitle={item.description || "No description"}
+                        photoUrl={item.photo_url}
+                        chip1={itemVerb(item.post_type)}
+                        chip2={item.status ?? "—"}
+                        onClick={() => router.push(`/manage/${item.id}`)}
+                        ctaLabel="Manage"
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div style={panel}>
+                <div style={sectionHeaderRow}>
+                  <div>
+                    <div style={sectionTitle}>Latest activity</div>
+                    <div style={sectionHint}>Your recent interests and offers in one place.</div>
+                  </div>
+                  <button onClick={() => setTab("activity")} style={linkBtn}>
+                    See all
+                  </button>
+                </div>
+
+                {myRequests.length === 0 && myOffers.length === 0 ? (
+                  <EmptyState
+                    title="No activity yet"
+                    body="When you request an item or offer help, it will show here."
+                    compact
+                  />
+                ) : (
+                  <div style={stackList}>
+                    {myRequests.slice(0, 2).map((r, i) => (
+                      <CompactTextRow
+                        key={`req-${r.item_id}-${i}`}
+                        icon="🙋"
+                        title={r.items?.title ?? "Unknown item"}
+                        subtitle={`Interest sent${r.created_at ? ` • ${fmtWhen(r.created_at)}` : ""}`}
+                        onClick={() => router.push(`/item/${r.item_id}`)}
+                        ctaLabel="View"
+                      />
+                    ))}
+
+                    {myOffers.slice(0, 2).map((o) => (
+                      <CompactTextRow
+                        key={`offer-${o.id}`}
+                        icon="🤝"
+                        title={o.request_item?.title ?? "Unknown request"}
+                        subtitle={`Offer status: ${o.status ?? "pending"}`}
+                        onClick={() => router.push(`/item/${o.request_id}`)}
+                        ctaLabel="Open"
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
           </div>
         )}
 
-        {/* listings */}
         {tab === "listings" && (
-          <div style={{ marginTop: 14 }}>
-            <div style={sectionHint}>Your active posts. Claimed items move to History.</div>
+          <div style={{ marginTop: 14, display: "grid", gap: 14 }}>
+            <section style={panelSoft}>
+              <div style={sectionTitle}>Your listings</div>
+              <div style={sectionHint}>
+                Active posts stay here. Claimed or completed ones move to History.
+              </div>
+            </section>
 
             {activeListings.length === 0 ? (
-              <EmptyBox title="No active listings." body="List something or post a request to get started.">
-                <button onClick={() => router.push("/create")} style={outlineBtn}>
-                  ＋ Create post
-                </button>
-              </EmptyBox>
+              <EmptyState
+                title="No active listings"
+                body="Post your first give item or request to get started."
+                actionLabel="Create post"
+                onAction={() => router.push("/create")}
+              />
             ) : (
               <div style={grid}>
                 {activeListings.map((item) => (
-                  <ItemCard
+                  <ListingCardModern
                     key={item.id}
                     item={item}
-                    variant="active"
-                    onEdit={() => router.push(`/item/${item.id}/edit`)}
-                    onManage={() => router.push(`/manage/${item.id}`)}
-                    onDelete={() => deleteListing(item.id)}
                     deleting={deletingId === item.id}
+                    menuOpen={activeMenuId === item.id}
+                    onToggleMenu={(e) => {
+                      e.stopPropagation();
+                      setActiveMenuId((prev) => (prev === item.id ? null : item.id));
+                    }}
+                    onOpen={() => router.push(`/manage/${item.id}`)}
+                    onEdit={() => router.push(`/item/${item.id}/edit`)}
+                    onDelete={() => deleteListing(item.id)}
                   />
                 ))}
               </div>
@@ -868,102 +1216,206 @@ export default function AccountPage() {
           </div>
         )}
 
-        {/* activity */}
-        {tab === "activity" && (
-          <div style={{ marginTop: 14, display: "grid", gap: 18 }}>
-            <section>
-              <div style={sectionTitle}>My interests</div>
-              <div style={sectionHint}>These are GIVE posts you requested.</div>
+        {tab === "requests" && (
+          <div style={{ marginTop: 14, display: "grid", gap: 14 }}>
+            <section style={panelSoft}>
+              <div style={sectionHeaderRow}>
+                <div>
+                  <div style={sectionTitle}>Requests and offers waiting on you</div>
+                  <div style={sectionHint}>This is your decision center.</div>
+                </div>
 
-              {myRequests.length === 0 ? (
-                <EmptyBox title="No interests yet." body="Go to the feed and request an item.">
-                  <button onClick={() => router.push("/feed")} style={outlineBtn}>
-                    Browse feed
-                  </button>
-                </EmptyBox>
+                <button
+                  onClick={() => {
+                    if (userId) void loadIncomingAll(userId);
+                  }}
+                  disabled={incomingLoading}
+                  style={secondaryBtn}
+                >
+                  {incomingLoading ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
+            </section>
+
+            <section style={panel}>
+              <div style={sectionHeaderRow}>
+                <div>
+                  <div style={subSectionTitle}>Incoming item requests</div>
+                  <div style={sectionHint}>People who requested your give listings.</div>
+                </div>
+                <Chip label={`${incomingInterests.length}`} tone={incomingInterests.length ? "green" : "gray"} />
+              </div>
+
+              {incomingInterests.length === 0 ? (
+                <EmptyState
+                  title="No incoming item requests"
+                  body="When someone requests one of your give posts, it will appear here."
+                  compact
+                />
               ) : (
-                <div style={list}>
-                  {myRequests.map((r) => {
-                    const it = r.items;
-                    return (
-                      <div key={r.item_id + (r.created_at ?? "")} style={rowCard}>
-                        <div style={rowMain}>
-                          <Thumb photoUrl={it?.photo_url ?? null} label={it?.title ?? "Item"} />
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={rowTitle}>{it?.title ?? "Unknown item"}</div>
-                            <div style={rowMeta}>
-                              Status: <b>{it?.status ?? "—"}</b>
-                              {r.created_at ? ` • Sent: ${fmtWhen(r.created_at)}` : ""}
-                            </div>
-                          </div>
-                        </div>
+                <div style={stackList}>
+                  {incomingInterests.map((r) => {
+                    const itemTitle = r.items?.title?.trim() ? r.items.title : "Unknown item";
+                    const who = niceNameFromProfile(r.requester, "Ashland user");
+                    const deleting = deletingNotifId === r.id;
 
-                        <div style={rowActions}>
-                          <button onClick={() => router.push(`/item/${r.item_id}`)} style={outlineBtn}>
-                            View
-                          </button>
-                        </div>
-                      </div>
+                    return (
+                      <RequestRowCard
+                        key={r.id}
+                        photoUrl={r.items?.photo_url ?? null}
+                        title={`${who} requested ${itemTitle}`}
+                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}${r.owner_seen_at ? "Seen" : "New"}`}
+                        chips={[
+                          { label: r.owner_seen_at ? "Seen" : "New", tone: r.owner_seen_at ? "gray" : "red" },
+                          { label: r.items?.status ?? "—", tone: statusTone(r.items?.status) as any },
+                        ]}
+                        primaryLabel="Open"
+                        onPrimary={() => router.push(`/manage/${r.item_id}`)}
+                        secondaryLabel={deleting ? "Removing…" : "Remove"}
+                        onSecondary={() => deleteNotification(r)}
+                        secondaryDanger
+                        secondaryDisabled={deleting}
+                      />
                     );
                   })}
                 </div>
               )}
             </section>
 
-            <section>
-              <div style={sectionTitle}>My offers</div>
-              <div style={sectionHint}>REQUEST posts where you offered help.</div>
+            <section style={panel}>
+              <div style={sectionHeaderRow}>
+                <div>
+                  <div style={subSectionTitle}>Incoming helper offers</div>
+                  <div style={sectionHint}>Accept one, pause others, or decline.</div>
+                </div>
+                <Chip label={`${incomingOffers.length}`} tone={incomingOffers.length ? "green" : "gray"} />
+              </div>
+
+              {incomingOffers.length === 0 ? (
+                <EmptyState
+                  title="No incoming help offers"
+                  body="When someone offers help on your request post, it will appear here."
+                  compact
+                />
+              ) : (
+                <div style={stackList}>
+                  {incomingOffers.map((o) => {
+                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
+                    const who = niceNameFromProfile(o.helper, "Ashland user");
+                    const st = (o.status ?? "pending") as OfferStatus;
+                    const acting = offerActingId === o.id;
+
+                    return (
+                      <OfferRowCard
+                        key={o.id}
+                        icon="🤝"
+                        title={`${who} offered help on ${title}`}
+                        subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
+                        note={o.note}
+                        statusLabel={st}
+                        onView={() => router.push(`/item/${o.request_id}`)}
+                        onAccept={() => updateOfferStatus(o, "accepted")}
+                        onHold={() => updateOfferStatus(o, "hold")}
+                        onDecline={() => updateOfferStatus(o, "declined")}
+                        onChat={() => startChatWithHelper(o)}
+                        busy={acting}
+                        accepted={st === "accepted"}
+                        completed={st === "completed"}
+                        declined={st === "declined"}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+
+        {tab === "activity" && (
+          <div style={{ marginTop: 14, display: "grid", gap: 14 }}>
+            <section style={panel}>
+              <div style={sectionHeaderRow}>
+                <div>
+                  <div style={sectionTitle}>My interests</div>
+                  <div style={sectionHint}>Give posts you requested.</div>
+                </div>
+                <Chip label={`${myRequests.length}`} tone={myRequests.length ? "green" : "gray"} />
+              </div>
+
+              {myRequests.length === 0 ? (
+                <EmptyState
+                  title="No interests yet"
+                  body="Go to the feed and request an item to see it here."
+                  actionLabel="Browse feed"
+                  onAction={() => router.push("/feed")}
+                  compact
+                />
+              ) : (
+                <div style={stackList}>
+                  {myRequests.map((r, i) => {
+                    const it = r.items;
+                    return (
+                      <RequestRowCard
+                        key={`${r.item_id}-${r.created_at ?? i}`}
+                        photoUrl={it?.photo_url ?? null}
+                        title={it?.title ?? "Unknown item"}
+                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${it?.status ?? "—"}`}
+                        chips={[
+                          { label: "Interest sent", tone: "green" },
+                          { label: it?.status ?? "—", tone: statusTone(it?.status) as any },
+                        ]}
+                        primaryLabel="View"
+                        onPrimary={() => router.push(`/item/${r.item_id}`)}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            <section style={panel}>
+              <div style={sectionHeaderRow}>
+                <div>
+                  <div style={sectionTitle}>My offers</div>
+                  <div style={sectionHint}>Request posts where you offered help.</div>
+                </div>
+                <Chip label={`${myOffers.length}`} tone={myOffers.length ? "green" : "gray"} />
+              </div>
 
               {myOffers.length === 0 ? (
-                <EmptyBox title="No offers yet." body="Find a request post in the feed and offer help.">
-                  <button onClick={() => router.push("/feed")} style={outlineBtn}>
-                    Browse feed
-                  </button>
-                </EmptyBox>
+                <EmptyState
+                  title="No offers yet"
+                  body="Find a request post in the feed and offer help."
+                  actionLabel="Browse feed"
+                  onAction={() => router.push("/feed")}
+                  compact
+                />
               ) : (
-                <div style={list}>
+                <div style={stackList}>
                   {myOffers.map((o) => {
                     const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
                     const st = (o.status ?? "pending") as OfferStatus;
                     const acting = myOfferActingId === o.id;
 
                     return (
-                      <div key={o.id} style={rowCard}>
-                        <div style={rowMain}>
-                          <div style={{ ...thumbWrap, fontSize: 20 }}>🤝</div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={rowTitle}>Offered help on {title}</div>
-                            <div style={rowMeta}>
-                              Status: <b>{st}</b>
-                              {o.created_at ? ` • Offered: ${fmtWhen(o.created_at)}` : ""}
-                              {o.availability ? ` • Availability: ${o.availability}` : ""}
-                            </div>
-                            {o.note ? <div style={noteText}>{o.note}</div> : null}
-                          </div>
-                        </div>
-
-                        <div style={rowActions}>
-                          <button onClick={() => router.push(`/item/${o.request_id}`)} style={outlineBtn}>
-                            View
-                          </button>
-
-                          <button
-                            onClick={() => startChatFromMyOffer(o)}
-                            disabled={acting || st !== "accepted"}
-                            style={softActionBtn(acting || st !== "accepted")}
-                          >
-                            {acting ? "Opening…" : "Start chat"}
-                          </button>
-
-                          <button
-                            onClick={() => withdrawMyOffer(o)}
-                            disabled={acting || st === "accepted" || st === "completed"}
-                            style={dangerBtn(acting || st === "accepted" || st === "completed")}
-                          >
-                            {acting ? "Working…" : "Withdraw"}
-                          </button>
-                        </div>
-                      </div>
+                      <OfferRowCard
+                        key={o.id}
+                        icon="🙌"
+                        title={`You offered help on ${title}`}
+                        subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
+                        note={o.note}
+                        statusLabel={st}
+                        onView={() => router.push(`/item/${o.request_id}`)}
+                        onChat={() => startChatFromMyOffer(o)}
+                        onDecline={() => withdrawMyOffer(o)}
+                        busy={acting}
+                        accepted={st === "accepted"}
+                        completed={st === "completed"}
+                        declined={false}
+                        customDeclineLabel={acting ? "Working…" : "Withdraw"}
+                        hideAccept
+                        hideHold
+                      />
                     );
                   })}
                 </div>
@@ -972,169 +1424,37 @@ export default function AccountPage() {
           </div>
         )}
 
-        {/* requests */}
-        {tab === "requests" && (
-          <div style={{ marginTop: 14, display: "grid", gap: 18 }}>
-            <section>
-              <div style={sectionTitle}>Incoming item requests</div>
-              <div style={sectionHint}>People who requested your GIVE listings.</div>
-
-              <div style={{ marginTop: 10 }}>
-                <button
-                  onClick={() => {
-                    if (userId) void loadIncomingAll(userId);
-                  }}
-                  disabled={incomingLoading}
-                  style={outlineBtn}
-                >
-                  {incomingLoading ? "Refreshing…" : "Refresh"}
-                </button>
-              </div>
-
-              {incomingInterests.length === 0 ? (
-                <EmptyBox title="No incoming item requests." body="When someone requests your item, it will appear here." />
-              ) : (
-                <div style={list}>
-                  {incomingInterests.map((r) => {
-                    const itemTitle = r.items?.title?.trim() ? r.items.title : "Unknown item";
-                    const who = niceNameFromProfile(r.requester, "Ashland user");
-                    const when = fmtWhen(r.created_at);
-                    const deleting = deletingNotifId === r.id;
-
-                    return (
-                      <div key={r.id} style={rowCard}>
-                        <div style={rowMain}>
-                          <Thumb photoUrl={r.items?.photo_url ?? null} label={itemTitle} />
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={rowTitle}>{who} requested {itemTitle}</div>
-                            <div style={rowMeta}>
-                              {when ? `Requested: ${when} • ` : ""}
-                              {r.owner_seen_at ? "Seen" : "New"}
-                              {r.status ? ` • ${r.status}` : ""}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div style={rowActions}>
-                          <button onClick={() => router.push(`/manage/${r.item_id}`)} style={outlineBtn}>
-                            Open
-                          </button>
-
-                          <button
-                            onClick={() => deleteNotification(r)}
-                            disabled={deleting}
-                            style={dangerBtn(deleting)}
-                          >
-                            {deleting ? "Deleting…" : "Delete"}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-
-            <section>
-              <div style={sectionTitle}>Incoming help offers</div>
-              <div style={sectionHint}>Accept one helper, hold others, or decline.</div>
-
-              {incomingOffers.length === 0 ? (
-                <EmptyBox title="No incoming offers." body="When someone offers help on your request post, it will appear here." />
-              ) : (
-                <div style={list}>
-                  {incomingOffers.map((o) => {
-                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
-                    const who = niceNameFromProfile(o.helper, "Ashland user");
-                    const when = fmtWhen(o.created_at);
-                    const st = (o.status ?? "pending") as OfferStatus;
-                    const acting = offerActingId === o.id;
-
-                    return (
-                      <div key={o.id} style={rowCard}>
-                        <div style={rowMain}>
-                          <div style={{ ...thumbWrap, fontSize: 20 }}>🤝</div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={rowTitle}>{who} offered help on {title}</div>
-                            <div style={rowMeta}>
-                              {when ? `Offered: ${when} • ` : ""}
-                              Status: <b>{st}</b>
-                              {o.availability ? ` • Availability: ${o.availability}` : ""}
-                            </div>
-                            {o.note ? <div style={noteText}>{o.note}</div> : null}
-                          </div>
-                        </div>
-
-                        <div style={rowActions}>
-                          <button onClick={() => router.push(`/item/${o.request_id}`)} style={outlineBtn}>
-                            View
-                          </button>
-
-                          <button
-                            onClick={() => updateOfferStatus(o, "accepted")}
-                            disabled={acting || st === "accepted" || st === "completed"}
-                            style={acceptBtn(acting || st === "accepted" || st === "completed")}
-                          >
-                            {acting ? "Working…" : "Accept"}
-                          </button>
-
-                          <button
-                            onClick={() => updateOfferStatus(o, "hold")}
-                            disabled={acting || st === "accepted" || st === "completed"}
-                            style={softActionBtn(acting || st === "accepted" || st === "completed")}
-                          >
-                            Hold
-                          </button>
-
-                          <button
-                            onClick={() => updateOfferStatus(o, "declined")}
-                            disabled={acting || st === "declined" || st === "completed"}
-                            style={dangerBtn(acting || st === "declined" || st === "completed")}
-                          >
-                            Decline
-                          </button>
-
-                          <button
-                            onClick={() => startChatWithHelper(o)}
-                            disabled={acting || st !== "accepted"}
-                            style={softActionBtn(acting || st !== "accepted")}
-                          >
-                            {acting ? "Opening…" : "Start chat"}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          </div>
-        )}
-
-        {/* history */}
         {tab === "history" && (
-          <div style={{ marginTop: 14 }}>
-            <div style={sectionTitle}>Completed listings</div>
-            <div style={sectionHint}>These were picked up and marked as claimed.</div>
+          <div style={{ marginTop: 14, display: "grid", gap: 14 }}>
+            <section style={panelSoft}>
+              <div style={sectionTitle}>Completed listings</div>
+              <div style={sectionHint}>These were picked up or finished and are now archived.</div>
+            </section>
 
             {completedListings.length === 0 ? (
-              <EmptyBox title="No completed listings yet." body="When a pickup is marked, it will move here." />
+              <EmptyState
+                title="No completed listings yet"
+                body="When a listing is claimed or completed, it moves here."
+                compact
+              />
             ) : (
               <div style={grid}>
                 {completedListings.map((item) => (
-                  <ItemCard key={item.id} item={item} variant="history" />
+                  <HistoryCard key={item.id} item={item} />
                 ))}
               </div>
             )}
           </div>
         )}
 
-        {/* drawer */}
         {drawerOpen && (
           <div onClick={() => setDrawerOpen(false)} style={backdrop}>
             <div onClick={(e) => e.stopPropagation()} style={drawer}>
               <div style={drawerTop}>
-                <div style={{ fontWeight: 950 }}>Menu</div>
+                <div>
+                  <div style={{ fontWeight: 950, fontSize: 18 }}>Account menu</div>
+                  <div style={{ color: "#6b7280", fontSize: 13, marginTop: 4 }}>{displayName}</div>
+                </div>
                 <button onClick={() => setDrawerOpen(false)} style={smallCloseBtn}>
                   ✕
                 </button>
@@ -1146,7 +1466,7 @@ export default function AccountPage() {
                     setDrawerOpen(false);
                     router.push("/create");
                   }}
-                  style={drawerBtn}
+                  style={drawerBtnPrimary}
                 >
                   Create post
                 </button>
@@ -1171,7 +1491,17 @@ export default function AccountPage() {
                   My pickups
                 </button>
 
-                <button onClick={signOut} style={{ ...drawerBtn, border: "1px solid rgba(185,28,28,0.55)", color: "#991b1b" }}>
+                <button
+                  onClick={() => {
+                    setDrawerOpen(false);
+                    router.push("/feed");
+                  }}
+                  style={drawerBtn}
+                >
+                  Browse feed
+                </button>
+
+                <button onClick={signOut} style={drawerDangerBtn}>
                   Sign out
                 </button>
               </div>
@@ -1179,7 +1509,6 @@ export default function AccountPage() {
           </div>
         )}
 
-        {/* confirm */}
         {confirm && (
           <ConfirmModal
             title={confirm.title}
@@ -1190,80 +1519,472 @@ export default function AccountPage() {
           />
         )}
 
-        {/* toast */}
         {toast && <Toast msg={toast.msg} kind={toast.kind} />}
       </div>
     </div>
   );
 }
 
-/* ---------------- Components ---------------- */
+/* ================================
+   COMPONENTS
+================================ */
 
-function StatCard({ label, value }: { label: string; value: number }) {
+function MetricCard({
+  label,
+  value,
+  hint,
+  onClick,
+  highlight,
+}: {
+  label: string;
+  value: number;
+  hint: string;
+  onClick?: () => void;
+  highlight?: boolean;
+}) {
   return (
-    <div style={panel}>
-      <div style={{ fontSize: 12, color: "#6b7280", fontWeight: 900 }}>{label}</div>
-      <div style={{ marginTop: 6, fontSize: 28, fontWeight: 950, color: "#111827" }}>{value}</div>
+    <button onClick={onClick} style={metricCard(highlight)} type="button">
+      <div style={{ fontSize: 12, fontWeight: 900, color: highlight ? "#065f46" : "#6b7280" }}>{label}</div>
+      <div style={{ marginTop: 8, fontSize: 30, fontWeight: 950, color: "#111827" }}>{value}</div>
+      <div style={{ marginTop: 6, fontSize: 12, color: "#6b7280", lineHeight: 1.35 }}>{hint}</div>
+    </button>
+  );
+}
+
+function AttentionCard({
+  title,
+  body,
+  cta,
+  onClick,
+}: {
+  title: string;
+  body: string;
+  cta: string;
+  onClick: () => void;
+}) {
+  return (
+    <div style={attentionCard}>
+      <div>
+        <div style={{ fontWeight: 950, fontSize: 18, color: "#111827" }}>{title}</div>
+        <div style={{ marginTop: 6, color: "#4b5563", lineHeight: 1.45 }}>{body}</div>
+      </div>
+
+      <div style={{ marginTop: 14 }}>
+        <button onClick={onClick} style={primaryInlineBtn}>
+          {cta}
+        </button>
+      </div>
     </div>
   );
 }
 
-function ItemCard({
+function QuickActionCard({
+  emoji,
+  title,
+  body,
+  actionLabel,
+  onClick,
+  primary,
+}: {
+  emoji: string;
+  title: string;
+  body: string;
+  actionLabel: string;
+  onClick: () => void;
+  primary?: boolean;
+}) {
+  return (
+    <div style={quickCard(primary)}>
+      <div style={quickEmoji}>{emoji}</div>
+      <div style={{ fontWeight: 950, fontSize: 16, color: "#111827", marginTop: 12 }}>{title}</div>
+      <div style={{ marginTop: 6, color: "#4b5563", lineHeight: 1.45 }}>{body}</div>
+      <button onClick={onClick} style={primary ? primaryInlineBtn : secondaryInlineBtn}>
+        {actionLabel}
+      </button>
+    </div>
+  );
+}
+
+function CompactItemRow({
+  title,
+  subtitle,
+  photoUrl,
+  chip1,
+  chip2,
+  onClick,
+  ctaLabel,
+}: {
+  title: string;
+  subtitle: string;
+  photoUrl: string | null;
+  chip1?: string;
+  chip2?: string;
+  onClick: () => void;
+  ctaLabel: string;
+}) {
+  return (
+    <div style={compactRow}>
+      <MediaThumb photoUrl={photoUrl} label={title} size={62} />
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={compactTitle}>{title}</div>
+        <div style={compactSub}>{subtitle}</div>
+        <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {chip1 ? <Chip label={chip1} tone="gray" /> : null}
+          {chip2 ? <Chip label={chip2} tone={statusTone(chip2) as any} /> : null}
+        </div>
+      </div>
+      <button onClick={onClick} style={secondaryInlineBtn}>
+        {ctaLabel}
+      </button>
+    </div>
+  );
+}
+
+function CompactTextRow({
+  icon,
+  title,
+  subtitle,
+  onClick,
+  ctaLabel,
+}: {
+  icon: string;
+  title: string;
+  subtitle: string;
+  onClick: () => void;
+  ctaLabel: string;
+}) {
+  return (
+    <div style={compactRow}>
+      <div style={iconPill}>{icon}</div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={compactTitle}>{title}</div>
+        <div style={compactSub}>{subtitle}</div>
+      </div>
+      <button onClick={onClick} style={secondaryInlineBtn}>
+        {ctaLabel}
+      </button>
+    </div>
+  );
+}
+
+function ListingCardModern({
   item,
-  variant,
-  onEdit,
-  onManage,
-  onDelete,
   deleting,
+  menuOpen,
+  onToggleMenu,
+  onOpen,
+  onEdit,
+  onDelete,
 }: {
   item: MyItemRow;
-  variant: "active" | "history";
-  onEdit?: () => void;
-  onManage?: () => void;
-  onDelete?: () => void;
-  deleting?: boolean;
+  deleting: boolean;
+  menuOpen: boolean;
+  onToggleMenu: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  onOpen: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
 }) {
-  const status = item.status ?? "—";
-  const type = (item.post_type ?? "give") as "give" | "request";
-
   return (
-    <div style={card}>
-      <div style={cardMediaWrap}>
+    <div style={listingCard}>
+      <div style={listingImageWrap}>
         {item.photo_url ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.photo_url} alt={item.title} style={cardImg} />
+          <img src={item.photo_url} alt={item.title} style={listingImg} />
         ) : (
-          <div style={noPhoto}>{type === "request" ? "Request" : "No photo"}</div>
+          <div style={listingImageFallback}>{item.post_type === "request" ? "Request" : "No image"}</div>
+        )}
+
+        <div style={listingTopBadgeWrap}>
+          <Chip label={itemVerb(item.post_type)} tone="gray" />
+          <Chip label={item.status ?? "—"} tone={statusTone(item.status) as any} />
+        </div>
+      </div>
+
+      <div style={{ padding: 14 }}>
+        <div style={cardTitleModern}>{item.title}</div>
+        <div style={cardSubModern}>{item.description || "No description provided yet."}</div>
+
+        <div style={{ marginTop: 12, fontSize: 12, color: "#6b7280", fontWeight: 800 }}>
+          Posted {fmtWhen(item.created_at)}
+        </div>
+
+        <div style={listingActionRow}>
+          <button onClick={onOpen} style={primaryInlineBtn}>
+            Manage
+          </button>
+          <button onClick={onEdit} style={secondaryInlineBtn}>
+            Edit
+          </button>
+
+          <div style={{ position: "relative" }}>
+            <button onClick={onToggleMenu} style={iconMenuBtn} type="button">
+              ⋯
+            </button>
+
+            {menuOpen ? (
+              <div
+                style={miniMenu}
+                onClick={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                <button onClick={onEdit} style={miniMenuBtn}>
+                  Edit post
+                </button>
+                <button onClick={onDelete} disabled={deleting} style={miniMenuDangerBtn}>
+                  {deleting ? "Deleting…" : "Delete post"}
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HistoryCard({ item }: { item: MyItemRow }) {
+  return (
+    <div style={historyCard}>
+      <div style={listingImageWrap}>
+        {item.photo_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={item.photo_url} alt={item.title} style={listingImg} />
+        ) : (
+          <div style={listingImageFallback}>Completed</div>
         )}
       </div>
 
-      <div style={{ marginTop: 10, minHeight: 44 }}>
-        <div style={cardTitle}>{item.title}</div>
-        <div style={cardSub}>{item.description ? item.description : "—"}</div>
-      </div>
+      <div style={{ padding: 14 }}>
+        <div style={cardTitleModern}>{item.title}</div>
+        <div style={cardSubModern}>{item.description || "No description provided."}</div>
 
-      <div style={cardMeta}>
-        Type: <b>{type}</b> • Status: <b>{status}</b>
-      </div>
-
-      {variant === "active" ? (
-        <div style={cardActions}>
-          <button onClick={onEdit} style={acceptBtn(false)}>Edit</button>
-          <button onClick={onManage} style={outlineBtn}>Manage</button>
-          <button onClick={onDelete} disabled={!!deleting} style={dangerBtn(!!deleting)}>
-            {deleting ? "Deleting…" : "Delete"}
-          </button>
+        <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <Chip label={itemVerb(item.post_type)} tone="gray" />
+          <Chip label="Completed" tone="green" />
         </div>
-      ) : (
-        <div style={{ marginTop: 10, color: "#374151", fontSize: 12 }}>Completed ✅</div>
-      )}
+
+        <div style={{ marginTop: 12, fontSize: 12, color: "#6b7280", fontWeight: 800 }}>
+          Posted {fmtWhen(item.created_at)}
+        </div>
+      </div>
     </div>
   );
 }
 
-function Thumb({ photoUrl, label }: { photoUrl: string | null; label: string }) {
+function RequestRowCard({
+  photoUrl,
+  title,
+  subtitle,
+  chips,
+  primaryLabel,
+  onPrimary,
+  secondaryLabel,
+  onSecondary,
+  secondaryDanger,
+  secondaryDisabled,
+}: {
+  photoUrl: string | null;
+  title: string;
+  subtitle: string;
+  chips?: Array<{ label: string; tone: "green" | "amber" | "red" | "gray" }>;
+  primaryLabel: string;
+  onPrimary: () => void;
+  secondaryLabel?: string;
+  onSecondary?: () => void;
+  secondaryDanger?: boolean;
+  secondaryDisabled?: boolean;
+}) {
   return (
-    <div style={thumbWrap}>
+    <div style={rowCardModern}>
+      <div style={rowMainModern}>
+        <MediaThumb photoUrl={photoUrl} label={title} size={68} />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={rowTitleModern}>{title}</div>
+          <div style={rowMetaModern}>{subtitle}</div>
+          {chips?.length ? (
+            <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {chips.map((chip, i) => (
+                <Chip key={`${chip.label}-${i}`} label={chip.label} tone={chip.tone} />
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div style={actionRowModern}>
+        <button onClick={onPrimary} style={primaryInlineBtn}>
+          {primaryLabel}
+        </button>
+
+        {secondaryLabel && onSecondary ? (
+          <button
+            onClick={onSecondary}
+            disabled={secondaryDisabled}
+            style={secondaryDanger ? dangerInlineBtn(!!secondaryDisabled) : secondaryInlineBtn}
+          >
+            {secondaryLabel}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function OfferRowCard({
+  icon,
+  title,
+  subtitle,
+  note,
+  statusLabel,
+  onView,
+  onAccept,
+  onHold,
+  onDecline,
+  onChat,
+  busy,
+  accepted,
+  completed,
+  declined,
+  customDeclineLabel,
+  hideAccept,
+  hideHold,
+}: {
+  icon: string;
+  title: string;
+  subtitle: string;
+  note?: string | null;
+  statusLabel: string;
+  onView: () => void;
+  onAccept?: () => void;
+  onHold?: () => void;
+  onDecline?: () => void;
+  onChat: () => void;
+  busy: boolean;
+  accepted: boolean;
+  completed: boolean;
+  declined: boolean;
+  customDeclineLabel?: string;
+  hideAccept?: boolean;
+  hideHold?: boolean;
+}) {
+  return (
+    <div style={rowCardModern}>
+      <div style={rowMainModern}>
+        <div style={offerIconPill}>{icon}</div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={rowTitleModern}>{title}</div>
+          <div style={rowMetaModern}>{subtitle}</div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Chip label={statusLabel} tone={statusTone(statusLabel) as any} />
+          </div>
+
+          {note ? <div style={noteTextModern}>{note}</div> : null}
+        </div>
+      </div>
+
+      <div style={actionRowModern}>
+        <button onClick={onView} style={secondaryInlineBtn}>
+          View
+        </button>
+
+        {!hideAccept && onAccept ? (
+          <button
+            onClick={onAccept}
+            disabled={busy || accepted || completed}
+            style={acceptInlineBtn(busy || accepted || completed)}
+          >
+            {busy ? "Working…" : "Accept"}
+          </button>
+        ) : null}
+
+        {!hideHold && onHold ? (
+          <button
+            onClick={onHold}
+            disabled={busy || accepted || completed}
+            style={secondaryBtnDisabledCapable(busy || accepted || completed)}
+          >
+            Hold
+          </button>
+        ) : null}
+
+        {onDecline ? (
+          <button
+            onClick={onDecline}
+            disabled={busy || completed || declined}
+            style={dangerInlineBtn(busy || completed || declined)}
+          >
+            {customDeclineLabel || "Decline"}
+          </button>
+        ) : null}
+
+        <button
+          onClick={onChat}
+          disabled={busy || !accepted}
+          style={secondaryBtnDisabledCapable(busy || !accepted)}
+        >
+          {busy ? "Opening…" : "Start chat"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({
+  title,
+  body,
+  actionLabel,
+  onAction,
+  compact,
+}: {
+  title: string;
+  body: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  compact?: boolean;
+}) {
+  return (
+    <div style={compact ? emptyCompact : emptyBox}>
+      <div style={{ fontWeight: 950, fontSize: compact ? 16 : 18, color: "#111827" }}>{title}</div>
+      <div style={{ marginTop: 6, color: "#4b5563", lineHeight: 1.5 }}>{body}</div>
+
+      {actionLabel && onAction ? (
+        <div style={{ marginTop: 12 }}>
+          <button onClick={onAction} style={secondaryInlineBtn}>
+            {actionLabel}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function MediaThumb({
+  photoUrl,
+  label,
+  size = 64,
+}: {
+  photoUrl: string | null;
+  label: string;
+  size?: number;
+}) {
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        borderRadius: 18,
+        border: "1px solid #e5e7eb",
+        background: "#f3f4f6",
+        overflow: "hidden",
+        flexShrink: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "#6b7280",
+      }}
+    >
       {photoUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img src={photoUrl} alt={label} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
@@ -1274,22 +1995,14 @@ function Thumb({ photoUrl, label }: { photoUrl: string | null; label: string }) 
   );
 }
 
-function EmptyBox({
-  title,
-  body,
-  children,
+function Chip({
+  label,
+  tone = "gray",
 }: {
-  title: string;
-  body: string;
-  children?: React.ReactNode;
+  label: string;
+  tone?: "green" | "amber" | "red" | "gray";
 }) {
-  return (
-    <div style={{ ...panel, marginTop: 14 }}>
-      <div style={{ fontWeight: 950, color: "#111827" }}>{title}</div>
-      <div style={{ color: "#374151", marginTop: 6 }}>{body}</div>
-      {children ? <div style={{ marginTop: 10 }}>{children}</div> : null}
-    </div>
-  );
+  return <span style={chipStyle(tone)}>{label}</span>;
 }
 
 function Toast({ msg, kind = "ok" }: { msg: string; kind?: "ok" | "err" }) {
@@ -1301,8 +2014,8 @@ function Toast({ msg, kind = "ok" }: { msg: string; kind?: "ok" | "err" }) {
         transform: "translateX(-50%)",
         bottom: "calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 16px)",
         zIndex: 99999,
-        borderRadius: 14,
-        padding: "10px 12px",
+        borderRadius: 16,
+        padding: "12px 14px",
         border: "1px solid #e5e7eb",
         background: "#ffffff",
         color: "#111827",
@@ -1311,9 +2024,7 @@ function Toast({ msg, kind = "ok" }: { msg: string; kind?: "ok" | "err" }) {
         maxWidth: "min(560px, calc(100vw - 24px))",
       }}
     >
-      <span style={{ color: kind === "err" ? "#b91c1c" : "#065f46" }}>
-        {kind === "err" ? "⚠ " : "✓ "}
-      </span>
+      <span style={{ color: kind === "err" ? "#b91c1c" : "#065f46" }}>{kind === "err" ? "⚠ " : "✓ "}</span>
       {msg}
     </div>
   );
@@ -1337,11 +2048,11 @@ function ConfirmModal({
   return (
     <div onClick={onCancel} style={backdrop} role="dialog" aria-modal="true">
       <div onClick={(e) => e.stopPropagation()} style={modal}>
-        <div style={{ fontWeight: 950, fontSize: 16 }}>{title}</div>
-        <div style={{ marginTop: 6, color: "#374151" }}>{body}</div>
+        <div style={{ fontWeight: 950, fontSize: 18 }}>{title}</div>
+        <div style={{ marginTop: 8, color: "#4b5563", lineHeight: 1.5 }}>{body}</div>
 
-        <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <button onClick={onCancel} disabled={busy} style={outlineBtn}>
+        <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <button onClick={onCancel} disabled={busy} style={secondaryBtn}>
             Cancel
           </button>
 
@@ -1365,230 +2076,243 @@ function ConfirmModal({
   );
 }
 
-/* ---------------- Styles ---------------- */
+/* ================================
+   STYLES
+================================ */
 
 const pageWrap: React.CSSProperties = {
   minHeight: "100vh",
-  background: "#f7f7f8",
+  background:
+    "linear-gradient(180deg, #f8fafc 0%, #f7f7f8 18%, #f3f4f6 100%)",
   color: "#111827",
 };
 
 const shell: React.CSSProperties = {
-  maxWidth: 1100,
+  maxWidth: 1120,
   margin: "0 auto",
   padding: 14,
-  paddingBottom: "calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 24px)",
+  paddingBottom: "calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 28px)",
 };
 
-const headerCard: React.CSSProperties = {
-  position: "sticky",
-  top: 0,
-  zIndex: 40,
-  background: "rgba(247,247,248,0.92)",
-  backdropFilter: "blur(12px)",
-  WebkitBackdropFilter: "blur(12px)",
-  border: "1px solid #e5e7eb",
-  borderRadius: 18,
+const shellNarrow: React.CSSProperties = {
+  maxWidth: 760,
+  margin: "0 auto",
   padding: 14,
-  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
+  paddingBottom: "calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 28px)",
 };
 
-const topRow: React.CSSProperties = {
+const heroCard: React.CSSProperties = {
+  borderRadius: 28,
+  border: "1px solid rgba(229,231,235,0.9)",
+  background: "linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(255,255,255,0.88) 100%)",
+  backdropFilter: "blur(14px)",
+  WebkitBackdropFilter: "blur(14px)",
+  boxShadow: "0 20px 60px rgba(15,23,42,0.08)",
+  padding: 18,
+};
+
+const heroTop: React.CSSProperties = {
   display: "flex",
-  alignItems: "center",
+  alignItems: "flex-start",
   justifyContent: "space-between",
-  gap: 12,
+  gap: 16,
+  flexWrap: "wrap",
 };
 
-const idWrap: React.CSSProperties = {
+const heroIdentity: React.CSSProperties = {
   display: "flex",
-  alignItems: "center",
-  gap: 10,
+  alignItems: "flex-start",
+  gap: 14,
   minWidth: 0,
+  flex: 1,
 };
 
-const avatar: React.CSSProperties = {
-  width: 44,
-  height: 44,
-  borderRadius: 16,
+const avatarLarge: React.CSSProperties = {
+  width: 76,
+  height: 76,
+  borderRadius: 24,
   border: "1px solid #e5e7eb",
-  background: "#ffffff",
+  background: "linear-gradient(180deg, #ffffff 0%, #f3f4f6 100%)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
   fontWeight: 950,
-  fontSize: 16,
+  fontSize: 28,
+  color: "#111827",
   flexShrink: 0,
 };
 
-const nameLine: React.CSSProperties = {
-  fontSize: 18,
-  fontWeight: 950,
-  lineHeight: 1.1,
-  whiteSpace: "nowrap",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
+const avatarLargeSkeleton: React.CSSProperties = {
+  width: 76,
+  height: 76,
+  borderRadius: 24,
+  background: "#e5e7eb",
+  flexShrink: 0,
 };
 
-const subLine: React.CSSProperties = {
+const eyebrow: React.CSSProperties = {
   fontSize: 12,
-  color: "#6b7280",
-  marginTop: 2,
-  whiteSpace: "nowrap",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
+  color: "#065f46",
+  fontWeight: 900,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
 };
 
-const iconBtn: React.CSSProperties = {
-  width: 42,
-  height: 42,
-  borderRadius: 14,
+const heroTitle: React.CSSProperties = {
+  fontSize: 30,
+  lineHeight: 1.05,
+  fontWeight: 950,
+  color: "#111827",
+  marginTop: 6,
+};
+
+const heroSub: React.CSSProperties = {
+  marginTop: 8,
+  color: "#4b5563",
+  fontSize: 14,
+  lineHeight: 1.5,
+  overflowWrap: "anywhere",
+};
+
+const heroActions: React.CSSProperties = {
+  display: "flex",
+  gap: 10,
+  flexWrap: "wrap",
+  alignItems: "center",
+};
+
+const primaryCtaBtn: React.CSSProperties = {
+  height: 46,
+  borderRadius: 16,
+  border: "1px solid rgba(16,185,129,0.35)",
+  background: "linear-gradient(180deg, rgba(16,185,129,0.18) 0%, rgba(16,185,129,0.10) 100%)",
+  color: "#065f46",
+  padding: "0 16px",
+  fontWeight: 950,
+  cursor: "pointer",
+};
+
+const secondaryCtaBtn: React.CSSProperties = {
+  height: 46,
+  borderRadius: 16,
   border: "1px solid #e5e7eb",
   background: "#ffffff",
   color: "#111827",
-  cursor: "pointer",
+  padding: "0 16px",
   fontWeight: 900,
+  cursor: "pointer",
 };
 
-const tabsRow: React.CSSProperties = {
+const metricGrid: React.CSSProperties = {
+  marginTop: 18,
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+  gap: 12,
+};
+
+function metricCard(highlight?: boolean): React.CSSProperties {
+  return {
+    textAlign: "left",
+    borderRadius: 22,
+    border: highlight ? "1px solid rgba(16,185,129,0.32)" : "1px solid #e5e7eb",
+    background: highlight ? "rgba(16,185,129,0.08)" : "#ffffff",
+    padding: 16,
+    cursor: "pointer",
+    boxShadow: highlight ? "0 10px 30px rgba(16,185,129,0.08)" : "0 8px 22px rgba(15,23,42,0.04)",
+  };
+}
+
+const attentionGrid: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+  gap: 12,
+  marginTop: 12,
+};
+
+const attentionCard: React.CSSProperties = {
+  borderRadius: 22,
+  border: "1px solid rgba(16,185,129,0.22)",
+  background: "linear-gradient(180deg, rgba(16,185,129,0.10) 0%, rgba(255,255,255,1) 100%)",
+  padding: 16,
+  boxShadow: "0 12px 30px rgba(16,185,129,0.06)",
+};
+
+const tabsShell: React.CSSProperties = {
   display: "flex",
   gap: 10,
   overflowX: "auto",
-  paddingTop: 12,
-};
-
-const statsRow: React.CSSProperties = {
-  display: "flex",
-  gap: 12,
-  flexWrap: "wrap",
-  marginTop: 10,
-  fontSize: 12,
-  color: "#6b7280",
-  fontWeight: 900,
-};
-
-const panel: React.CSSProperties = {
+  padding: 6,
   borderRadius: 18,
   border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  padding: 14,
-  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
+  background: "rgba(255,255,255,0.8)",
+  backdropFilter: "blur(10px)",
+  WebkitBackdropFilter: "blur(10px)",
 };
 
-const input: React.CSSProperties = {
-  width: "100%",
-  height: 44,
-  borderRadius: 14,
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  color: "#111827",
-  padding: "0 12px",
-  outline: "none",
-  fontWeight: 800,
-};
-
-function primaryBtn(disabled: boolean): React.CSSProperties {
-  return {
-    width: "100%",
-    height: 44,
-    borderRadius: 14,
-    border: "1px solid rgba(16,185,129,0.35)",
-    background: disabled ? "rgba(16,185,129,0.10)" : "rgba(16,185,129,0.14)",
-    color: "#065f46",
-    cursor: disabled ? "not-allowed" : "pointer",
-    fontWeight: 950,
-  };
-}
-
-function pillBtn(active: boolean): React.CSSProperties {
-  return {
-    borderRadius: 999,
-    border: active ? "1px solid rgba(16,185,129,0.35)" : "1px solid #e5e7eb",
-    background: active ? "rgba(16,185,129,0.12)" : "#ffffff",
-    color: active ? "#065f46" : "#111827",
-    padding: "10px 12px",
-    cursor: "pointer",
-    fontWeight: 900,
-  };
-}
-
-function tabPill(active: boolean): React.CSSProperties {
+function tabBtn(active: boolean): React.CSSProperties {
   return {
     flex: "0 0 auto",
-    borderRadius: 999,
-    border: active ? "1px solid rgba(16,185,129,0.35)" : "1px solid #e5e7eb",
-    background: active ? "rgba(16,185,129,0.12)" : "#ffffff",
+    minHeight: 42,
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    borderRadius: 14,
+    border: active ? "1px solid rgba(16,185,129,0.30)" : "1px solid transparent",
+    background: active ? "rgba(16,185,129,0.12)" : "transparent",
     color: active ? "#065f46" : "#111827",
-    padding: "10px 12px",
-    cursor: "pointer",
+    padding: "0 14px",
     fontWeight: 900,
+    cursor: "pointer",
     whiteSpace: "nowrap",
   };
 }
 
-const outlineBtn: React.CSSProperties = {
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  color: "#111827",
-  padding: "10px 12px",
-  borderRadius: 14,
-  cursor: "pointer",
+const badgeRed: React.CSSProperties = {
+  minWidth: 20,
+  height: 20,
+  borderRadius: 999,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "0 6px",
+  fontSize: 11,
+  background: "#ef4444",
+  color: "#ffffff",
   fontWeight: 900,
-  whiteSpace: "nowrap",
 };
 
-function acceptBtn(disabled: boolean): React.CSSProperties {
-  return {
-    border: "1px solid rgba(16,185,129,0.35)",
-    background: disabled ? "rgba(16,185,129,0.08)" : "rgba(16,185,129,0.12)",
-    color: "#065f46",
-    padding: "10px 12px",
-    borderRadius: 14,
-    cursor: disabled ? "not-allowed" : "pointer",
-    fontWeight: 900,
-    opacity: disabled ? 0.7 : 1,
-  };
-}
+const panel: React.CSSProperties = {
+  borderRadius: 24,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  padding: 16,
+  boxShadow: "0 12px 32px rgba(15,23,42,0.06)",
+};
 
-function softActionBtn(disabled: boolean): React.CSSProperties {
-  return {
-    border: "1px solid #e5e7eb",
-    background: "#ffffff",
-    color: "#111827",
-    padding: "10px 12px",
-    borderRadius: 14,
-    cursor: disabled ? "not-allowed" : "pointer",
-    fontWeight: 900,
-    opacity: disabled ? 0.65 : 1,
-  };
-}
+const panelSoft: React.CSSProperties = {
+  borderRadius: 22,
+  border: "1px solid #e5e7eb",
+  background: "rgba(255,255,255,0.7)",
+  padding: 16,
+};
 
-function dangerBtn(disabled: boolean): React.CSSProperties {
-  return {
-    border: "1px solid rgba(185,28,28,0.55)",
-    background: "#ffffff",
-    color: "#991b1b",
-    padding: "10px 12px",
-    borderRadius: 14,
-    cursor: disabled ? "not-allowed" : "pointer",
-    fontWeight: 900,
-    opacity: disabled ? 0.65 : 1,
-  };
-}
-
-const dot: React.CSSProperties = {
-  display: "inline-block",
-  width: 8,
-  height: 8,
-  borderRadius: 999,
-  background: "#ef4444",
-  marginLeft: 8,
-  boxShadow: "0 0 0 3px rgba(239,68,68,0.20)",
+const sectionHeaderRow: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: 12,
+  flexWrap: "wrap",
 };
 
 const sectionTitle: React.CSSProperties = {
   fontWeight: 950,
-  fontSize: 20,
+  fontSize: 22,
+  color: "#111827",
+};
+
+const subSectionTitle: React.CSSProperties = {
+  fontWeight: 950,
+  fontSize: 18,
   color: "#111827",
 };
 
@@ -1596,144 +2320,298 @@ const sectionHint: React.CSSProperties = {
   marginTop: 6,
   fontSize: 13,
   color: "#6b7280",
+  lineHeight: 1.45,
+};
+
+const quickActionGrid: React.CSSProperties = {
+  marginTop: 14,
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+  gap: 12,
+};
+
+function quickCard(primary?: boolean): React.CSSProperties {
+  return {
+    borderRadius: 22,
+    border: primary ? "1px solid rgba(16,185,129,0.32)" : "1px solid #e5e7eb",
+    background: primary ? "rgba(16,185,129,0.08)" : "#ffffff",
+    padding: 16,
+    minHeight: 190,
+    display: "flex",
+    flexDirection: "column",
+    boxShadow: primary ? "0 12px 28px rgba(16,185,129,0.06)" : "0 8px 22px rgba(15,23,42,0.04)",
+  };
+}
+
+const quickEmoji: React.CSSProperties = {
+  width: 46,
+  height: 46,
+  borderRadius: 16,
+  background: "#f3f4f6",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontSize: 22,
+};
+
+const doubleCol: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+  gap: 14,
+};
+
+const stackList: React.CSSProperties = {
+  marginTop: 14,
+  display: "grid",
+  gap: 12,
+};
+
+const compactRow: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  borderRadius: 18,
+  border: "1px solid #eef0f3",
+  background: "#ffffff",
+  padding: 12,
+};
+
+const compactTitle: React.CSSProperties = {
+  fontWeight: 950,
+  fontSize: 15,
+  color: "#111827",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+const compactSub: React.CSSProperties = {
+  marginTop: 4,
+  fontSize: 13,
+  color: "#6b7280",
+  lineHeight: 1.4,
+  overflowWrap: "anywhere",
+};
+
+const iconPill: React.CSSProperties = {
+  width: 62,
+  height: 62,
+  borderRadius: 18,
+  background: "#f3f4f6",
+  border: "1px solid #e5e7eb",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontSize: 24,
+  flexShrink: 0,
 };
 
 const grid: React.CSSProperties = {
-  marginTop: 14,
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-  gap: 12,
+  gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+  gap: 14,
 };
 
-const list: React.CSSProperties = {
-  marginTop: 12,
-  display: "grid",
-  gap: 12,
-};
-
-const card: React.CSSProperties = {
+const listingCard: React.CSSProperties = {
+  borderRadius: 24,
+  border: "1px solid #e5e7eb",
   background: "#ffffff",
-  padding: 14,
-  borderRadius: 18,
-  border: "1px solid #e5e7eb",
-  boxShadow: "0 10px 24px rgba(0,0,0,0.06)",
+  overflow: "hidden",
+  boxShadow: "0 14px 32px rgba(15,23,42,0.06)",
 };
 
-const cardMediaWrap: React.CSSProperties = {
-  width: "100%",
-  height: 150,
-  borderRadius: 16,
-  overflow: "hidden",
+const historyCard: React.CSSProperties = {
+  borderRadius: 24,
   border: "1px solid #e5e7eb",
+  background: "linear-gradient(180deg, #ffffff 0%, #f9fafb 100%)",
+  overflow: "hidden",
+  boxShadow: "0 12px 28px rgba(15,23,42,0.05)",
+};
+
+const listingImageWrap: React.CSSProperties = {
+  position: "relative",
+  width: "100%",
+  height: 180,
   background: "#f3f4f6",
 };
 
-const cardImg: React.CSSProperties = {
+const listingImg: React.CSSProperties = {
   width: "100%",
   height: "100%",
   objectFit: "cover",
   display: "block",
 };
 
-const noPhoto: React.CSSProperties = {
+const listingImageFallback: React.CSSProperties = {
   width: "100%",
   height: "100%",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
   color: "#6b7280",
+  fontWeight: 900,
 };
 
-const cardTitle: React.CSSProperties = {
+const listingTopBadgeWrap: React.CSSProperties = {
+  position: "absolute",
+  left: 12,
+  top: 12,
+  display: "flex",
+  gap: 8,
+  flexWrap: "wrap",
+};
+
+const cardTitleModern: React.CSSProperties = {
   fontSize: 18,
   fontWeight: 950,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
+  color: "#111827",
+  lineHeight: 1.25,
 };
 
-const cardSub: React.CSSProperties = {
-  marginTop: 6,
-  fontSize: 13,
-  color: "#374151",
+const cardSubModern: React.CSSProperties = {
+  marginTop: 8,
+  fontSize: 14,
+  color: "#4b5563",
+  lineHeight: 1.5,
   display: "-webkit-box",
-  WebkitLineClamp: 2,
+  WebkitLineClamp: 3,
   WebkitBoxOrient: "vertical" as any,
   overflow: "hidden",
 };
 
-const cardMeta: React.CSSProperties = {
-  marginTop: 10,
-  fontSize: 13,
-  color: "#374151",
+const listingActionRow: React.CSSProperties = {
+  marginTop: 14,
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  flexWrap: "wrap",
 };
 
-const cardActions: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: 10,
-  marginTop: 12,
-};
-
-const rowCard: React.CSSProperties = {
+const iconMenuBtn: React.CSSProperties = {
+  width: 42,
+  height: 42,
+  borderRadius: 14,
   border: "1px solid #e5e7eb",
   background: "#ffffff",
-  borderRadius: 18,
-  padding: 14,
-  boxShadow: "0 10px 24px rgba(0,0,0,0.05)",
+  color: "#111827",
+  cursor: "pointer",
+  fontWeight: 950,
+  fontSize: 20,
 };
 
-const rowMain: React.CSSProperties = {
+const miniMenu: React.CSSProperties = {
+  position: "absolute",
+  right: 0,
+  top: 48,
+  width: 180,
+  borderRadius: 16,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  boxShadow: "0 18px 40px rgba(15,23,42,0.14)",
+  padding: 8,
+  zIndex: 30,
+};
+
+const miniMenuBtn: React.CSSProperties = {
+  width: "100%",
+  textAlign: "left",
+  border: "none",
+  background: "transparent",
+  color: "#111827",
+  padding: "10px 10px",
+  borderRadius: 10,
+  cursor: "pointer",
+  fontWeight: 800,
+};
+
+const miniMenuDangerBtn: React.CSSProperties = {
+  width: "100%",
+  textAlign: "left",
+  border: "none",
+  background: "transparent",
+  color: "#991b1b",
+  padding: "10px 10px",
+  borderRadius: 10,
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const rowCardModern: React.CSSProperties = {
+  borderRadius: 22,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  padding: 14,
+  boxShadow: "0 10px 24px rgba(15,23,42,0.05)",
+};
+
+const rowMainModern: React.CSSProperties = {
   display: "flex",
   alignItems: "flex-start",
   gap: 12,
   minWidth: 0,
 };
 
-const rowTitle: React.CSSProperties = {
+const rowTitleModern: React.CSSProperties = {
   fontWeight: 950,
   fontSize: 16,
   color: "#111827",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const rowMeta: React.CSSProperties = {
-  color: "#374151",
-  fontSize: 12,
-  marginTop: 6,
   lineHeight: 1.35,
   overflowWrap: "anywhere",
 };
 
-const rowActions: React.CSSProperties = {
-  display: "flex",
-  gap: 10,
-  flexWrap: "wrap",
-  marginTop: 12,
+const rowMetaModern: React.CSSProperties = {
+  marginTop: 6,
+  color: "#6b7280",
+  fontSize: 13,
+  lineHeight: 1.45,
+  overflowWrap: "anywhere",
 };
 
-const thumbWrap: React.CSSProperties = {
-  width: 54,
-  height: 54,
-  borderRadius: 16,
-  border: "1px solid #e5e7eb",
-  background: "#f3f4f6",
-  overflow: "hidden",
+const actionRowModern: React.CSSProperties = {
+  marginTop: 14,
+  display: "flex",
+  gap: 8,
+  flexWrap: "wrap",
+};
+
+const offerIconPill: React.CSSProperties = {
+  width: 68,
+  height: 68,
+  borderRadius: 20,
+  background: "rgba(16,185,129,0.08)",
+  border: "1px solid rgba(16,185,129,0.18)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  color: "#6b7280",
+  fontSize: 26,
   flexShrink: 0,
 };
 
-const noteText: React.CSSProperties = {
-  marginTop: 8,
+const noteTextModern: React.CSSProperties = {
+  marginTop: 10,
+  padding: 12,
+  borderRadius: 14,
+  background: "#f9fafb",
+  border: "1px solid #eef0f3",
   fontSize: 13,
   color: "#374151",
+  lineHeight: 1.5,
   whiteSpace: "pre-wrap",
   overflowWrap: "anywhere",
+};
+
+const emptyBox: React.CSSProperties = {
+  borderRadius: 24,
+  border: "1px dashed #d1d5db",
+  background: "#ffffff",
+  padding: 18,
+};
+
+const emptyCompact: React.CSSProperties = {
+  borderRadius: 18,
+  border: "1px dashed #d1d5db",
+  background: "#ffffff",
+  padding: 14,
 };
 
 const backdrop: React.CSSProperties = {
@@ -1750,17 +2628,30 @@ const drawer: React.CSSProperties = {
   width: "min(360px, calc(100vw - 24px))",
   background: "#ffffff",
   border: "1px solid #e5e7eb",
-  borderRadius: 18,
+  borderRadius: 22,
   overflow: "hidden",
   boxShadow: "0 30px 80px rgba(0,0,0,0.12)",
 };
 
 const drawerTop: React.CSSProperties = {
-  padding: 14,
+  padding: 16,
   borderBottom: "1px solid #e5e7eb",
   display: "flex",
   justifyContent: "space-between",
-  alignItems: "center",
+  alignItems: "flex-start",
+  gap: 12,
+};
+
+const drawerBtnPrimary: React.CSSProperties = {
+  width: "100%",
+  border: "1px solid rgba(16,185,129,0.30)",
+  background: "rgba(16,185,129,0.10)",
+  color: "#065f46",
+  padding: "12px 14px",
+  borderRadius: 16,
+  cursor: "pointer",
+  fontWeight: 950,
+  textAlign: "left",
 };
 
 const drawerBtn: React.CSSProperties = {
@@ -1768,8 +2659,20 @@ const drawerBtn: React.CSSProperties = {
   border: "1px solid #e5e7eb",
   background: "#ffffff",
   color: "#111827",
-  padding: "10px 12px",
-  borderRadius: 14,
+  padding: "12px 14px",
+  borderRadius: 16,
+  cursor: "pointer",
+  fontWeight: 900,
+  textAlign: "left",
+};
+
+const drawerDangerBtn: React.CSSProperties = {
+  width: "100%",
+  border: "1px solid rgba(185,28,28,0.25)",
+  background: "rgba(185,28,28,0.05)",
+  color: "#991b1b",
+  padding: "12px 14px",
+  borderRadius: 16,
   cursor: "pointer",
   fontWeight: 900,
   textAlign: "left",
@@ -1780,7 +2683,7 @@ const smallCloseBtn: React.CSSProperties = {
   background: "#ffffff",
   color: "#111827",
   borderRadius: 14,
-  padding: "6px 10px",
+  padding: "8px 10px",
   cursor: "pointer",
   fontWeight: 900,
 };
@@ -1793,7 +2696,192 @@ const modal: React.CSSProperties = {
   width: "min(520px, calc(100vw - 24px))",
   background: "#ffffff",
   border: "1px solid #e5e7eb",
-  borderRadius: 18,
-  padding: 14,
+  borderRadius: 22,
+  padding: 16,
   boxShadow: "0 30px 80px rgba(0,0,0,0.12)",
+};
+
+const input: React.CSSProperties = {
+  width: "100%",
+  height: 48,
+  borderRadius: 16,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#111827",
+  padding: "0 14px",
+  outline: "none",
+  fontWeight: 800,
+};
+
+function primaryBtn(disabled: boolean): React.CSSProperties {
+  return {
+    width: "100%",
+    height: 46,
+    borderRadius: 16,
+    border: "1px solid rgba(16,185,129,0.35)",
+    background: disabled ? "rgba(16,185,129,0.10)" : "rgba(16,185,129,0.14)",
+    color: "#065f46",
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontWeight: 950,
+  };
+}
+
+const secondaryBtn: React.CSSProperties = {
+  width: "100%",
+  height: 46,
+  borderRadius: 16,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#111827",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+function segBtn(active: boolean): React.CSSProperties {
+  return {
+    borderRadius: 999,
+    border: active ? "1px solid rgba(16,185,129,0.35)" : "1px solid #e5e7eb",
+    background: active ? "rgba(16,185,129,0.12)" : "#ffffff",
+    color: active ? "#065f46" : "#111827",
+    padding: "10px 14px",
+    cursor: "pointer",
+    fontWeight: 900,
+  };
+}
+
+const iconBtn: React.CSSProperties = {
+  width: 46,
+  height: 46,
+  borderRadius: 16,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#111827",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const primaryInlineBtn: React.CSSProperties = {
+  height: 42,
+  borderRadius: 14,
+  border: "1px solid rgba(16,185,129,0.32)",
+  background: "rgba(16,185,129,0.12)",
+  color: "#065f46",
+  padding: "0 14px",
+  cursor: "pointer",
+  fontWeight: 950,
+};
+
+const secondaryInlineBtn: React.CSSProperties = {
+  height: 42,
+  borderRadius: 14,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#111827",
+  padding: "0 14px",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+function acceptInlineBtn(disabled: boolean): React.CSSProperties {
+  return {
+    height: 42,
+    borderRadius: 14,
+    border: "1px solid rgba(16,185,129,0.32)",
+    background: disabled ? "rgba(16,185,129,0.08)" : "rgba(16,185,129,0.12)",
+    color: "#065f46",
+    padding: "0 14px",
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontWeight: 950,
+    opacity: disabled ? 0.72 : 1,
+  };
+}
+
+function secondaryBtnDisabledCapable(disabled: boolean): React.CSSProperties {
+  return {
+    height: 42,
+    borderRadius: 14,
+    border: "1px solid #e5e7eb",
+    background: "#ffffff",
+    color: "#111827",
+    padding: "0 14px",
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontWeight: 900,
+    opacity: disabled ? 0.65 : 1,
+  };
+}
+
+function dangerInlineBtn(disabled: boolean): React.CSSProperties {
+  return {
+    height: 42,
+    borderRadius: 14,
+    border: "1px solid rgba(185,28,28,0.35)",
+    background: "#ffffff",
+    color: "#991b1b",
+    padding: "0 14px",
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontWeight: 900,
+    opacity: disabled ? 0.65 : 1,
+  };
+}
+
+function chipStyle(tone: "green" | "amber" | "red" | "gray"): React.CSSProperties {
+  const map = {
+    green: {
+      border: "1px solid rgba(16,185,129,0.25)",
+      background: "rgba(16,185,129,0.10)",
+      color: "#065f46",
+    },
+    amber: {
+      border: "1px solid rgba(245,158,11,0.25)",
+      background: "rgba(245,158,11,0.10)",
+      color: "#92400e",
+    },
+    red: {
+      border: "1px solid rgba(239,68,68,0.25)",
+      background: "rgba(239,68,68,0.10)",
+      color: "#991b1b",
+    },
+    gray: {
+      border: "1px solid #e5e7eb",
+      background: "#f9fafb",
+      color: "#374151",
+    },
+  } as const;
+
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 28,
+    borderRadius: 999,
+    padding: "0 10px",
+    fontSize: 12,
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+    ...map[tone],
+  };
+}
+
+const linkBtn: React.CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: "#065f46",
+  fontWeight: 900,
+  cursor: "pointer",
+  padding: 0,
+};
+
+function skel(width: any, height: number): React.CSSProperties {
+  return {
+    width,
+    height,
+    borderRadius: 12,
+    background: "#e5e7eb",
+  };
+}
+
+const skeletonCard: React.CSSProperties = {
+  height: 118,
+  borderRadius: 22,
+  background: "#e5e7eb",
 };
