@@ -7,7 +7,8 @@ import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { insertSystemMessage } from "@/lib/ensureThread";
 
-// ================= TYPES =================
+/* ================= TYPES ================= */
+
 type ProfileRow = {
   id: string;
   full_name: string | null;
@@ -77,19 +78,21 @@ type TradeRow = {
   created_at?: string;
 };
 
-// ================= CONFIG =================
+/* ================= CONFIG ================= */
+
 const PAGE_SIZE = 30;
 const MEDIA_BUCKET = "message-media";
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉"];
 
-// ================= HELPERS =================
+/* ================= HELPERS ================= */
+
 function isoToMs(iso: string) {
   const t = new Date(iso).getTime();
   return Number.isNaN(t) ? 0 : t;
 }
 
-function safeName(p: ProfileRow | null) {
-  const n = (p?.full_name ?? "").trim();
+function safeName(profile: ProfileRow | null) {
+  const n = (profile?.full_name ?? "").trim();
   return n || "Campus user";
 }
 
@@ -108,15 +111,14 @@ function fmtTime(iso: string) {
 function fmtDayLabel(iso: string) {
   const d = new Date(iso);
   const now = new Date();
-
   const sameDay = d.toDateString() === now.toDateString();
+
   const y = new Date(now);
   y.setDate(now.getDate() - 1);
   const isYesterday = d.toDateString() === y.toDateString();
 
   if (sameDay) return "Today";
   if (isYesterday) return "Yesterday";
-
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
@@ -167,7 +169,8 @@ function isImageAttachment(att: any) {
   return !!att && att.type === "image" && typeof att.url === "string" && att.url.trim().length > 0;
 }
 
-// ================= PAGE =================
+/* ================= PAGE ================= */
+
 export default function ThreadPage() {
   const router = useRouter();
   const params = useParams();
@@ -178,37 +181,36 @@ export default function ThreadPage() {
     return (id || "").trim();
   }, [params]);
 
-  // ---------- auth ----------
+  /* ---------- auth ---------- */
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // ---------- thread/item/profile ----------
+  /* ---------- thread/item/profile ---------- */
   const [thread, setThread] = useState<ThreadRow | null>(null);
   const [item, setItem] = useState<ItemRow | null>(null);
   const [otherProfile, setOtherProfile] = useState<ProfileRow | null>(null);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
 
-  // ---------- trade ----------
+  /* ---------- trade ---------- */
   const [trade, setTrade] = useState<TradeRow | null>(null);
   const [tradeLoading, setTradeLoading] = useState(false);
   const [tradeErr, setTradeErr] = useState<string | null>(null);
-  const [showDealSheet, setShowDealSheet] = useState(false);
 
-  // ---------- messages + reactions ----------
+  /* ---------- messages + reactions ---------- */
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [reactions, setReactions] = useState<Record<string, Record<string, number>>>({});
   const [myReactions, setMyReactions] = useState<Record<string, Record<string, boolean>>>({});
 
-  // ---------- read receipts ----------
+  /* ---------- read receipts ---------- */
   const [myLastSeenAt, setMyLastSeenAt] = useState<string | null>(null);
   const [otherLastSeenAt, setOtherLastSeenAt] = useState<string | null>(null);
 
-  // ---------- presence ----------
+  /* ---------- presence ---------- */
   const [otherTyping, setOtherTyping] = useState(false);
   const typingTimeoutRef = useRef<any>(null);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
-  // ---------- UI ----------
+  /* ---------- UI ---------- */
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -220,6 +222,7 @@ export default function ThreadPage() {
   const [editingText, setEditingText] = useState("");
 
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
+  const [showOptionsSheet, setShowOptionsSheet] = useState(false);
 
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -229,20 +232,26 @@ export default function ThreadPage() {
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
 
-  const [bottomNavH, setBottomNavH] = useState(86);
+  // critical: read actual bottom nav height so sheet/composer sit above it on phone
+  const [bottomNavH, setBottomNavH] = useState(96);
 
   useEffect(() => {
-    const update = () => {
+    const updateBottomNavHeight = () => {
       const nav = document.querySelector("nav");
-      const h = nav ? (nav as HTMLElement).getBoundingClientRect().height : 86;
-      setBottomNavH(Math.max(72, Math.min(120, Math.round(h || 86))));
+      const navH = nav ? Math.round((nav as HTMLElement).getBoundingClientRect().height) : 96;
+      setBottomNavH(Math.max(84, Math.min(140, navH || 96)));
     };
-    update();
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
+
+    updateBottomNavHeight();
+    window.addEventListener("resize", updateBottomNavHeight);
+    window.addEventListener("orientationchange", updateBottomNavHeight);
+
+    return () => {
+      window.removeEventListener("resize", updateBottomNavHeight);
+      window.removeEventListener("orientationchange", updateBottomNavHeight);
+    };
   }, []);
 
-  // ---------- derived ----------
   const isAshland = useMemo(() => {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
@@ -262,6 +271,10 @@ export default function ThreadPage() {
 
   const otherName = safeName(otherProfile);
 
+  const COMPOSER_H = 82;
+  const BANNER_H = replyTo || editingId ? 66 : 0;
+  const reservedBottom = bottomNavH + COMPOSER_H + BANNER_H + 28;
+
   function scrollToBottom(force = false) {
     if (!stickToBottom && !force) return;
     requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
@@ -274,15 +287,31 @@ export default function ThreadPage() {
     el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   }
 
-  function stopTypingNow() {
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    if (!userId) return;
+  async function trackTyping(isTyping: boolean) {
     const ch = channelRef.current as any;
-    if (!ch) return;
-    ch.track({ user_id: userId, typing: false }).catch(() => {});
+    if (!ch || !userId) return;
+    try {
+      await ch.track({ user_id: userId, typing: isTyping });
+    } catch {}
   }
 
-  // ================= AUTH =================
+  function stopTypingNow() {
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    trackTyping(false);
+  }
+
+  function onTextChange(v: string) {
+    setText(v);
+    if (!userId || mustConfirmBeforeChat) return;
+
+    trackTyping(true);
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => trackTyping(false), 900);
+  }
+
+  /* ================= AUTH ================= */
+
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
     const session = data.session;
@@ -293,7 +322,8 @@ export default function ThreadPage() {
     return { uid, email };
   }
 
-  // ================= LOAD THREAD/ITEM/PROFILE =================
+  /* ================= LOAD THREAD / ITEM / PROFILE ================= */
+
   async function loadThreadAndItem(uid: string) {
     const { data: hidden } = await supabase
       .from("user_hidden_threads")
@@ -345,6 +375,7 @@ export default function ThreadPage() {
         .select("id,full_name,user_role")
         .eq("id", other)
         .single();
+
       setOtherProfile((pData as any) ?? null);
     } else {
       setOtherProfile(null);
@@ -370,7 +401,8 @@ export default function ThreadPage() {
     else setMyInterest(null);
   }
 
-  // ================= MESSAGES (PAGED) =================
+  /* ================= MESSAGES ================= */
+
   async function fetchMessagesPage(before?: string | null) {
     let q = supabase
       .from("messages")
@@ -391,7 +423,7 @@ export default function ThreadPage() {
     const page = await fetchMessagesPage(null);
     setMessages(page);
     setHasMore(page.length === PAGE_SIZE);
-    setTimeout(() => scrollToBottom(true), 30);
+    setTimeout(() => scrollToBottom(true), 40);
   }
 
   async function loadOlder() {
@@ -411,7 +443,8 @@ export default function ThreadPage() {
     }
   }
 
-  // ================= READ RECEIPTS =================
+  /* ================= READS ================= */
+
   async function loadReads(uid: string) {
     try {
       const { data: mine } = await supabase
@@ -443,7 +476,6 @@ export default function ThreadPage() {
 
   async function markSeenNow(uid: string) {
     if (mustConfirmBeforeChat) return;
-
     const nowIso = new Date().toISOString();
 
     try {
@@ -454,7 +486,8 @@ export default function ThreadPage() {
     } catch {}
   }
 
-  // ================= REACTIONS =================
+  /* ================= REACTIONS ================= */
+
   async function loadReactions(uid: string, msgIds: string[]) {
     if (msgIds.length === 0) return;
 
@@ -511,7 +544,8 @@ export default function ThreadPage() {
     }
   }
 
-  // ================= SEND / EDIT / DELETE MSG =================
+  /* ================= SEND / EDIT / DELETE MSG ================= */
+
   async function sendMessage(payload: { body: string; attachments?: any | null }) {
     if (!isAshland || !userId) return router.push("/me");
     if (mustConfirmBeforeChat) return;
@@ -595,7 +629,6 @@ export default function ThreadPage() {
 
   async function saveEdit() {
     if (!userId || !editingId) return;
-
     const body = editingText.trim();
     if (!body) return;
 
@@ -631,11 +664,12 @@ export default function ThreadPage() {
     if (error) setErr(error.message || "Delete failed.");
   }
 
-  // ================= DELETE THREAD FOR ME =================
+  /* ================= DELETE THREAD FOR ME ================= */
+
   async function deleteThreadForMe() {
     if (!userId || !threadId) return;
 
-    const ok = confirm("Delete this conversation for you? The other user will still keep it.");
+    const ok = confirm("Delete this conversation for you? The other person will still keep it.");
     if (!ok) return;
 
     setErr(null);
@@ -646,7 +680,7 @@ export default function ThreadPage() {
     );
 
     if (error) {
-      setErr(error.message || "Could not delete this conversation for you.");
+      setErr(error.message || "Could not delete this conversation.");
       return;
     }
 
@@ -654,7 +688,8 @@ export default function ThreadPage() {
     router.push("/messages");
   }
 
-  // ================= IMAGE UPLOAD =================
+  /* ================= IMAGE UPLOAD ================= */
+
   async function uploadImage(file: File) {
     if (!userId) return null;
 
@@ -702,7 +737,8 @@ export default function ThreadPage() {
     await sendMessage({ body: "", attachments: { type: "image", url } });
   }
 
-  // ================= PICKUP CONFIRM =================
+  /* ================= PICKUP CONFIRM ================= */
+
   async function confirmPickupFromChat() {
     if (!isAshland || !userId) return router.push("/me");
     if (!thread?.item_id || !myInterest?.id) return;
@@ -727,7 +763,8 @@ export default function ThreadPage() {
     }
   }
 
-  // ================= TRADE =================
+  /* ================= TRADE ================= */
+
   async function loadTrade() {
     if (!threadId) return;
 
@@ -905,27 +942,8 @@ export default function ThreadPage() {
     }
   }
 
-  // ================= PRESENCE / TYPING =================
-  async function trackTyping(isTyping: boolean) {
-    const ch = channelRef.current as any;
-    if (!ch || !userId) return;
-    try {
-      await ch.track({ user_id: userId, typing: isTyping });
-    } catch {}
-  }
+  /* ================= EFFECTS ================= */
 
-  function onTextChange(v: string) {
-    setText(v);
-    if (!userId) return;
-    if (mustConfirmBeforeChat) return;
-
-    trackTyping(true);
-
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => trackTyping(false), 900);
-  }
-
-  // scroll detect
   useEffect(() => {
     const el = listRef.current;
     if (!el) return;
@@ -940,12 +958,10 @@ export default function ThreadPage() {
     return () => node.removeEventListener("scroll", onScroll);
   }, []);
 
-  // textarea auto-grow
   useEffect(() => {
     autoGrowComposer();
   }, [text]);
 
-  // realtime
   useEffect(() => {
     if (!threadId || !userId) return;
 
@@ -1025,7 +1041,6 @@ export default function ThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, userId, stickToBottom, mustConfirmBeforeChat]);
 
-  // ================= INITIAL LOAD =================
   useEffect(() => {
     if (!threadId) return;
 
@@ -1046,7 +1061,7 @@ export default function ThreadPage() {
         const th = await loadThreadAndItem(uid);
         if (!th) return;
 
-        await loadMyInterest(uid, th?.item_id ?? null);
+        await loadMyInterest(uid, th.item_id ?? null);
         await loadInitialMessages();
         await loadReads(uid);
         await markSeenNow(uid);
@@ -1070,7 +1085,6 @@ export default function ThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
-  // reactions load
   useEffect(() => {
     if (!userId) return;
     if (messages.length === 0) return;
@@ -1083,7 +1097,8 @@ export default function ThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ================= UI DERIVED =================
+  /* ================= UI DERIVED ================= */
+
   const unseenCount = useMemo(() => {
     if (!myLastSeenAt) return 0;
 
@@ -1134,10 +1149,6 @@ export default function ThreadPage() {
   const canCompleteDeal = !!trade && trade.state === "confirmed" && isParticipant(trade, userId);
   const canCancelDeal = !!trade && (trade.state === "proposed" || trade.state === "confirmed") && isParticipant(trade, userId);
 
-  const COMPOSER_MIN_H = 74;
-  const BANNER_H = replyTo || editingId ? 62 : 0;
-  const reservedBottom = bottomNavH + COMPOSER_MIN_H + BANNER_H + 22;
-
   if (!threadId) {
     return <div style={{ minHeight: "100vh", padding: 18 }}>Invalid thread.</div>;
   }
@@ -1151,7 +1162,7 @@ export default function ThreadPage() {
       className="page"
       onClick={() => {
         setSelectedMessageId(null);
-        if (showDealSheet) setShowDealSheet(false);
+        setShowOptionsSheet(false);
       }}
     >
       <header className="header" onClick={(e) => e.stopPropagation()}>
@@ -1170,9 +1181,7 @@ export default function ThreadPage() {
 
             <div className="identityText">
               <div className="identityName">{otherName}</div>
-              <div className="identitySub">
-                {otherTyping ? "Typing…" : item?.title ? item.title : "Conversation"}
-              </div>
+              <div className="identitySub">{otherTyping ? "Typing…" : item?.title || "Conversation"}</div>
             </div>
           </button>
 
@@ -1211,7 +1220,7 @@ export default function ThreadPage() {
               </div>
             </button>
 
-            <button className="dealPillBtn" type="button" onClick={() => setShowDealSheet((v) => !v)}>
+            <button className="dealPillBtn" type="button" onClick={() => setShowOptionsSheet(true)}>
               <span className={`dealChip ${dealTone}`}>{tradeLoading ? "Loading…" : dealLabel}</span>
               {unseenCount > 0 ? <span className="notifDot">{unseenCount}</span> : null}
             </button>
@@ -1222,54 +1231,13 @@ export default function ThreadPage() {
 
         {mustConfirmBeforeChat && (
           <div className="gateBar">
-            <div className="gateText">
-              Seller accepted your request. Confirm pickup to unlock chat.
-            </div>
+            <div className="gateText">Seller accepted your request. Confirm pickup to unlock chat.</div>
             <button className="gateAction" type="button" onClick={confirmPickupFromChat}>
               Confirm pickup
             </button>
           </div>
         )}
       </header>
-
-      {showDealSheet && (
-        <div className="sheetWrap" onClick={(e) => e.stopPropagation()}>
-          <div className="sheet">
-            <div className="sheetHandle" />
-            <div className="sheetTitle">Conversation options</div>
-            <div className="sheetSub">Keep the thread clean. Manage deal actions here.</div>
-
-            <div className="sheetActions">
-              {canProposeDeal && (
-                <button className="sheetPrimary" type="button" onClick={proposeTrade}>
-                  Propose deal
-                </button>
-              )}
-              {canConfirmDeal && (
-                <button className="sheetPrimary" type="button" onClick={confirmTrade}>
-                  Confirm deal
-                </button>
-              )}
-              {canCompleteDeal && (
-                <button className="sheetGood" type="button" onClick={markFulfilled}>
-                  Mark completed
-                </button>
-              )}
-              {canCancelDeal && (
-                <button className="sheetGhost" type="button" onClick={cancelTrade}>
-                  Cancel deal
-                </button>
-              )}
-
-              <button className="sheetDanger" type="button" onClick={deleteThreadForMe}>
-                Delete for me
-              </button>
-            </div>
-
-            {tradeErr ? <div className="sheetErr">{tradeErr}</div> : null}
-          </div>
-        </div>
-      )}
 
       <main className="thread" style={{ paddingBottom: reservedBottom }} onClick={(e) => e.stopPropagation()}>
         <div ref={listRef} className="threadInner">
@@ -1343,9 +1311,7 @@ export default function ThreadPage() {
                           Replying to {replyTarget.sender_id === userId ? "you" : otherName}
                         </div>
                         <div className="replyPreview">
-                          {replyTarget.deleted_at
-                            ? "Message deleted"
-                            : (replyTarget.body || "").slice(0, 120) || "Attachment"}
+                          {replyTarget.deleted_at ? "Message deleted" : (replyTarget.body || "").slice(0, 120) || "Attachment"}
                         </div>
                       </button>
                     )}
@@ -1396,9 +1362,7 @@ export default function ThreadPage() {
                     <div className={`metaLine ${mine ? "mine" : "theirs"}`}>
                       <span>{time}</span>
                       {m.edited_at && m.edited_at !== "FAILED" && !deleted ? <span>Edited</span> : null}
-                      {mine && lastMyMessage?.id === m.id && !deleted ? (
-                        <span>{lastMyMessageSeen ? "Seen" : "Sent"}</span>
-                      ) : null}
+                      {mine && lastMyMessage?.id === m.id && !deleted ? <span>{lastMyMessageSeen ? "Seen" : "Sent"}</span> : null}
                     </div>
 
                     {isSelected && !deleted && (
@@ -1476,7 +1440,7 @@ export default function ThreadPage() {
       </main>
 
       {replyTo && (
-        <div className="floatingBanner" style={{ bottom: bottomNavH + COMPOSER_MIN_H + 10 }}>
+        <div className="floatingBanner" style={{ bottom: bottomNavH + COMPOSER_H + 10 }}>
           <div className="floatingInner">
             <div className="floatingLabel">Replying to</div>
             <div className="floatingBody">
@@ -1490,7 +1454,7 @@ export default function ThreadPage() {
       )}
 
       {editingId && (
-        <div className="floatingBanner" style={{ bottom: bottomNavH + COMPOSER_MIN_H + 10 }}>
+        <div className="floatingBanner" style={{ bottom: bottomNavH + COMPOSER_H + 10 }}>
           <div className="floatingInner editMode">
             <input className="editField" value={editingText} onChange={(e) => setEditingText(e.target.value)} />
             <button className="floatingSave" type="button" onClick={saveEdit} disabled={!editingText.trim()}>
@@ -1499,6 +1463,55 @@ export default function ThreadPage() {
             <button className="floatingGhost" type="button" onClick={() => setEditingId(null)}>
               Cancel
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* FIXED: this sheet now sits ABOVE both composer and bottom nav */}
+      {showOptionsSheet && (
+        <div
+          className="sheetOverlay"
+          onClick={() => setShowOptionsSheet(false)}
+          style={{
+            paddingBottom: bottomNavH + COMPOSER_H + 18,
+          }}
+        >
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheetHandle" />
+            <div className="sheetTitle">Conversation options</div>
+            <div className="sheetSub">Keep the thread clean. Manage deal actions here.</div>
+
+            <div className="sheetActions">
+              {canProposeDeal && (
+                <button className="sheetPrimary" type="button" onClick={proposeTrade}>
+                  Propose deal
+                </button>
+              )}
+
+              {canConfirmDeal && (
+                <button className="sheetPrimary" type="button" onClick={confirmTrade}>
+                  Confirm deal
+                </button>
+              )}
+
+              {canCompleteDeal && (
+                <button className="sheetGood" type="button" onClick={markFulfilled}>
+                  Mark completed
+                </button>
+              )}
+
+              {canCancelDeal && (
+                <button className="sheetGhost" type="button" onClick={cancelTrade}>
+                  Cancel deal
+                </button>
+              )}
+
+              <button className="sheetDanger" type="button" onClick={deleteThreadForMe}>
+                Delete for me
+              </button>
+            </div>
+
+            {tradeErr ? <div className="sheetErr">{tradeErr}</div> : null}
           </div>
         </div>
       )}
@@ -1561,7 +1574,7 @@ export default function ThreadPage() {
           position: sticky;
           top: 0;
           z-index: 20;
-          background: rgba(248, 250, 252, 0.92);
+          background: rgba(248, 250, 252, 0.94);
           backdrop-filter: blur(14px);
           border-bottom: 1px solid rgba(15, 23, 42, 0.06);
           padding: 10px 12px 12px;
@@ -1579,9 +1592,9 @@ export default function ThreadPage() {
           height: 44px;
           border-radius: 14px;
           border: 1px solid rgba(15, 23, 42, 0.08);
-          background: rgba(255, 255, 255, 0.9);
+          background: rgba(255, 255, 255, 0.92);
           color: #0f172a;
-          font-weight: 900;
+          font-weight: 950;
           font-size: 18px;
           cursor: pointer;
         }
@@ -1652,7 +1665,7 @@ export default function ThreadPage() {
           padding: 8px;
           border: 1px solid rgba(15, 23, 42, 0.08);
           border-radius: 18px;
-          background: rgba(255, 255, 255, 0.9);
+          background: rgba(255, 255, 255, 0.92);
           cursor: pointer;
           text-align: left;
         }
@@ -1674,7 +1687,6 @@ export default function ThreadPage() {
           width: 100%;
           height: 100%;
           object-fit: cover;
-          display: block;
         }
 
         .listingMeta {
@@ -1710,9 +1722,9 @@ export default function ThreadPage() {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          height: 24px;
+          height: 26px;
           border-radius: 999px;
-          padding: 0 10px;
+          padding: 0 11px;
           font-size: 11px;
           font-weight: 950;
           border: 1px solid rgba(15, 23, 42, 0.1);
@@ -1808,93 +1820,6 @@ export default function ThreadPage() {
           white-space: nowrap;
         }
 
-        .sheetWrap {
-          position: fixed;
-          inset: 0;
-          z-index: 40;
-          background: rgba(15, 23, 42, 0.22);
-          display: flex;
-          align-items: flex-end;
-          justify-content: center;
-          padding: 12px;
-        }
-
-        .sheet {
-          width: min(560px, 100%);
-          background: #ffffff;
-          border-radius: 24px 24px 18px 18px;
-          padding: 10px 14px 16px;
-          box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
-        }
-
-        .sheetHandle {
-          width: 46px;
-          height: 5px;
-          border-radius: 999px;
-          background: #d1d5db;
-          margin: 0 auto 12px;
-        }
-
-        .sheetTitle {
-          font-size: 17px;
-          font-weight: 950;
-          color: #0f172a;
-        }
-
-        .sheetSub {
-          margin-top: 4px;
-          font-size: 13px;
-          color: #64748b;
-          font-weight: 700;
-        }
-
-        .sheetActions {
-          margin-top: 14px;
-          display: grid;
-          gap: 10px;
-        }
-
-        .sheetPrimary,
-        .sheetGood,
-        .sheetGhost,
-        .sheetDanger {
-          height: 48px;
-          border-radius: 16px;
-          font-weight: 950;
-          cursor: pointer;
-        }
-
-        .sheetPrimary {
-          border: 1px solid rgba(16, 185, 129, 0.24);
-          background: rgba(16, 185, 129, 0.12);
-          color: #047857;
-        }
-
-        .sheetGood {
-          border: 1px solid rgba(34, 197, 94, 0.24);
-          background: rgba(34, 197, 94, 0.12);
-          color: #166534;
-        }
-
-        .sheetGhost {
-          border: 1px solid rgba(15, 23, 42, 0.08);
-          background: #ffffff;
-          color: #0f172a;
-        }
-
-        .sheetDanger {
-          border: 1px solid rgba(239, 68, 68, 0.22);
-          background: rgba(239, 68, 68, 0.08);
-          color: #b91c1c;
-        }
-
-        .sheetErr {
-          margin-top: 10px;
-          color: #b91c1c;
-          font-size: 13px;
-          font-weight: 900;
-        }
-
         .thread {
           padding: 10px 12px 0;
         }
@@ -1912,7 +1837,7 @@ export default function ThreadPage() {
 
         .olderBtn {
           border: 1px solid rgba(15, 23, 42, 0.08);
-          background: rgba(255, 255, 255, 0.86);
+          background: rgba(255, 255, 255, 0.9);
           height: 38px;
           padding: 0 14px;
           border-radius: 999px;
@@ -1941,7 +1866,7 @@ export default function ThreadPage() {
           height: 28px;
           padding: 0 12px;
           border-radius: 999px;
-          background: rgba(255, 255, 255, 0.85);
+          background: rgba(255, 255, 255, 0.9);
           border: 1px solid rgba(15, 23, 42, 0.06);
           color: #64748b;
           font-size: 12px;
@@ -2045,7 +1970,7 @@ export default function ThreadPage() {
           max-width: 100%;
           padding: 12px 14px;
           border-radius: 22px;
-          transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease;
+          transition: box-shadow 120ms ease;
         }
 
         .bubble.selected {
@@ -2125,7 +2050,7 @@ export default function ThreadPage() {
           border-radius: 999px;
           padding: 0 10px;
           border: 1px solid rgba(15, 23, 42, 0.08);
-          background: rgba(255, 255, 255, 0.92);
+          background: rgba(255, 255, 255, 0.94);
           font-size: 12px;
           font-weight: 900;
           cursor: pointer;
@@ -2174,7 +2099,7 @@ export default function ThreadPage() {
         .quickReactions {
           display: flex;
           gap: 6px;
-          background: rgba(255, 255, 255, 0.96);
+          background: rgba(255, 255, 255, 0.98);
           border: 1px solid rgba(15, 23, 42, 0.08);
           border-radius: 999px;
           padding: 6px;
@@ -2202,7 +2127,7 @@ export default function ThreadPage() {
           padding: 0 12px;
           border-radius: 999px;
           border: 1px solid rgba(15, 23, 42, 0.08);
-          background: rgba(255, 255, 255, 0.96);
+          background: rgba(255, 255, 255, 0.98);
           color: #0f172a;
           font-size: 12px;
           font-weight: 900;
@@ -2266,24 +2191,24 @@ export default function ThreadPage() {
         .jumpBtn {
           position: fixed;
           right: 14px;
-          bottom: calc(${bottomNavH}px + 88px);
+          bottom: calc(${bottomNavH}px + ${COMPOSER_H + 14}px);
           height: 42px;
           padding: 0 14px;
           border-radius: 999px;
           border: 1px solid rgba(15, 23, 42, 0.08);
-          background: rgba(255, 255, 255, 0.96);
+          background: rgba(255, 255, 255, 0.98);
           box-shadow: 0 16px 36px rgba(15, 23, 42, 0.12);
           color: #0f172a;
           font-weight: 950;
           cursor: pointer;
-          z-index: 25;
+          z-index: 35;
         }
 
         .floatingBanner {
           position: fixed;
           left: 12px;
           right: 12px;
-          z-index: 45;
+          z-index: 46;
         }
 
         .floatingInner {
@@ -2294,7 +2219,7 @@ export default function ThreadPage() {
           gap: 10px;
           border-radius: 18px;
           border: 1px solid rgba(15, 23, 42, 0.08);
-          background: rgba(255, 255, 255, 0.96);
+          background: rgba(255, 255, 255, 0.98);
           box-shadow: 0 18px 40px rgba(15, 23, 42, 0.1);
           padding: 10px 12px;
           backdrop-filter: blur(10px);
@@ -2369,6 +2294,98 @@ export default function ThreadPage() {
           font-weight: 800;
         }
 
+        /* This is the actual fix */
+        .sheetOverlay {
+          position: fixed;
+          inset: 0;
+          z-index: 48;
+          background: rgba(15, 23, 42, 0.22);
+          display: flex;
+          align-items: flex-end;
+          justify-content: center;
+          padding-left: 12px;
+          padding-right: 12px;
+          padding-top: 24px;
+        }
+
+        .sheet {
+          width: min(560px, 100%);
+          max-height: min(60vh, 520px);
+          overflow: auto;
+          background: #ffffff;
+          border-radius: 24px 24px 18px 18px;
+          padding: 10px 14px 16px;
+          box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+        }
+
+        .sheetHandle {
+          width: 46px;
+          height: 5px;
+          border-radius: 999px;
+          background: #d1d5db;
+          margin: 0 auto 12px;
+        }
+
+        .sheetTitle {
+          font-size: 17px;
+          font-weight: 950;
+          color: #0f172a;
+        }
+
+        .sheetSub {
+          margin-top: 4px;
+          font-size: 13px;
+          color: #64748b;
+          font-weight: 700;
+        }
+
+        .sheetActions {
+          margin-top: 14px;
+          display: grid;
+          gap: 10px;
+        }
+
+        .sheetPrimary,
+        .sheetGood,
+        .sheetGhost,
+        .sheetDanger {
+          height: 48px;
+          border-radius: 16px;
+          font-weight: 950;
+          cursor: pointer;
+        }
+
+        .sheetPrimary {
+          border: 1px solid rgba(16, 185, 129, 0.24);
+          background: rgba(16, 185, 129, 0.12);
+          color: #047857;
+        }
+
+        .sheetGood {
+          border: 1px solid rgba(34, 197, 94, 0.24);
+          background: rgba(34, 197, 94, 0.12);
+          color: #166534;
+        }
+
+        .sheetGhost {
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: #ffffff;
+          color: #0f172a;
+        }
+
+        .sheetDanger {
+          border: 1px solid rgba(239, 68, 68, 0.22);
+          background: rgba(239, 68, 68, 0.08);
+          color: #b91c1c;
+        }
+
+        .sheetErr {
+          margin-top: 10px;
+          color: #b91c1c;
+          font-size: 13px;
+          font-weight: 900;
+        }
+
         .composerDock {
           position: fixed;
           left: 0;
@@ -2376,7 +2393,7 @@ export default function ThreadPage() {
           z-index: 44;
           padding: 10px 12px;
           padding-bottom: calc(10px + env(safe-area-inset-bottom));
-          background: linear-gradient(to top, rgba(248, 250, 252, 0.98), rgba(248, 250, 252, 0.88));
+          background: linear-gradient(to top, rgba(248, 250, 252, 0.98), rgba(248, 250, 252, 0.9));
           backdrop-filter: blur(12px);
           border-top: 1px solid rgba(15, 23, 42, 0.06);
         }
@@ -2478,6 +2495,11 @@ export default function ThreadPage() {
           }
 
           .composerDock {
+            padding-left: 18px;
+            padding-right: 18px;
+          }
+
+          .sheetOverlay {
             padding-left: 18px;
             padding-right: 18px;
           }
