@@ -274,6 +274,14 @@ export default function ThreadPage() {
     el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   }
 
+  function stopTypingNow() {
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    if (!userId) return;
+    const ch = channelRef.current as any;
+    if (!ch) return;
+    ch.track({ user_id: userId, typing: false }).catch(() => {});
+  }
+
   // ================= AUTH =================
   async function syncAuth() {
     const { data } = await supabase.auth.getSession();
@@ -287,6 +295,18 @@ export default function ThreadPage() {
 
   // ================= LOAD THREAD/ITEM/PROFILE =================
   async function loadThreadAndItem(uid: string) {
+    const { data: hidden } = await supabase
+      .from("user_hidden_threads")
+      .select("id")
+      .eq("user_id", uid)
+      .eq("thread_id", threadId)
+      .maybeSingle();
+
+    if (hidden) {
+      router.push("/messages");
+      return null;
+    }
+
     const { data: th, error: thErr } = await supabase
       .from("threads")
       .select("id,item_id,owner_id,requester_id,created_at")
@@ -491,7 +511,7 @@ export default function ThreadPage() {
     }
   }
 
-  // ================= SEND / EDIT / DELETE =================
+  // ================= SEND / EDIT / DELETE MSG =================
   async function sendMessage(payload: { body: string; attachments?: any | null }) {
     if (!isAshland || !userId) return router.push("/me");
     if (mustConfirmBeforeChat) return;
@@ -500,6 +520,7 @@ export default function ThreadPage() {
     const hasAttachment = payload.attachments && Object.keys(payload.attachments).length > 0;
     if (!body && !hasAttachment) return;
 
+    stopTypingNow();
     setErr(null);
 
     const client_id = makeClientId();
@@ -610,6 +631,29 @@ export default function ThreadPage() {
     if (error) setErr(error.message || "Delete failed.");
   }
 
+  // ================= DELETE THREAD FOR ME =================
+  async function deleteThreadForMe() {
+    if (!userId || !threadId) return;
+
+    const ok = confirm("Delete this conversation for you? The other user will still keep it.");
+    if (!ok) return;
+
+    setErr(null);
+
+    const { error } = await supabase.from("user_hidden_threads").upsert(
+      [{ user_id: userId, thread_id: threadId }],
+      { onConflict: "user_id,thread_id" }
+    );
+
+    if (error) {
+      setErr(error.message || "Could not delete this conversation for you.");
+      return;
+    }
+
+    stopTypingNow();
+    router.push("/messages");
+  }
+
   // ================= IMAGE UPLOAD =================
   async function uploadImage(file: File) {
     if (!userId) return null;
@@ -658,7 +702,7 @@ export default function ThreadPage() {
     await sendMessage({ body: "", attachments: { type: "image", url } });
   }
 
-  // ================= PICKUP CONFIRM (gate) =================
+  // ================= PICKUP CONFIRM =================
   async function confirmPickupFromChat() {
     if (!isAshland || !userId) return router.push("/me");
     if (!thread?.item_id || !myInterest?.id) return;
@@ -887,7 +931,6 @@ export default function ThreadPage() {
     if (!el) return;
 
     const node = el;
-
     function onScroll() {
       const dist = node.scrollHeight - node.scrollTop - node.clientHeight;
       setStickToBottom(dist < 180);
@@ -902,7 +945,7 @@ export default function ThreadPage() {
     autoGrowComposer();
   }, [text]);
 
-  // realtime subscription
+  // realtime
   useEffect(() => {
     if (!threadId || !userId) return;
 
@@ -914,11 +957,14 @@ export default function ThreadPage() {
     const ch = supabase
       .channel(`thread:${threadId}`)
       .on("presence", { event: "sync" }, () => {
-        const state = (ch.presenceState() as any) || {};
-        const keys = Object.keys(state);
-        const otherKeys = keys.filter((k) => k !== userId);
-        const typing = otherKeys.some((k) => (state?.[k] || []).some((x: any) => !!x?.typing)) || false;
-        setOtherTyping(typing);
+        const state = (ch.presenceState() as Record<string, any[]>) || {};
+        const allPresences = Object.values(state).flat();
+
+        const otherIsTyping = allPresences.some((entry: any) => {
+          return entry?.user_id && entry.user_id !== userId && entry.typing === true;
+        });
+
+        setOtherTyping(otherIsTyping);
       })
       .on(
         "postgres_changes",
@@ -970,6 +1016,7 @@ export default function ThreadPage() {
     channelRef.current = ch;
 
     return () => {
+      stopTypingNow();
       if (channelRef.current) {
         supabase.removeChannel(channelRef.current);
         channelRef.current = null;
@@ -997,6 +1044,8 @@ export default function ThreadPage() {
 
       try {
         const th = await loadThreadAndItem(uid);
+        if (!th) return;
+
         await loadMyInterest(uid, th?.item_id ?? null);
         await loadInitialMessages();
         await loadReads(uid);
@@ -1028,6 +1077,11 @@ export default function ThreadPage() {
     loadReactions(userId, messages.map((m) => m.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length, userId]);
+
+  useEffect(() => {
+    return () => stopTypingNow();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ================= UI DERIVED =================
   const unseenCount = useMemo(() => {
@@ -1080,11 +1134,6 @@ export default function ThreadPage() {
   const canCompleteDeal = !!trade && trade.state === "confirmed" && isParticipant(trade, userId);
   const canCancelDeal = !!trade && (trade.state === "proposed" || trade.state === "confirmed") && isParticipant(trade, userId);
 
-  const selectedMessage = useMemo(
-    () => messages.find((m) => m.id === selectedMessageId) ?? null,
-    [messages, selectedMessageId]
-  );
-
   const COMPOSER_MIN_H = 74;
   const BANNER_H = replyTo || editingId ? 62 : 0;
   const reservedBottom = bottomNavH + COMPOSER_MIN_H + BANNER_H + 22;
@@ -1105,7 +1154,6 @@ export default function ThreadPage() {
         if (showDealSheet) setShowDealSheet(false);
       }}
     >
-      {/* HEADER */}
       <header className="header" onClick={(e) => e.stopPropagation()}>
         <div className="headerRow">
           <button className="iconGhost" type="button" onClick={() => router.push("/messages")} aria-label="Back">
@@ -1123,11 +1171,7 @@ export default function ThreadPage() {
             <div className="identityText">
               <div className="identityName">{otherName}</div>
               <div className="identitySub">
-                {otherTyping
-                  ? "Typing…"
-                  : item?.title
-                    ? item.title
-                    : "Conversation"}
+                {otherTyping ? "Typing…" : item?.title ? item.title : "Conversation"}
               </div>
             </div>
           </button>
@@ -1188,13 +1232,12 @@ export default function ThreadPage() {
         )}
       </header>
 
-      {/* DEAL SHEET */}
       {showDealSheet && (
         <div className="sheetWrap" onClick={(e) => e.stopPropagation()}>
           <div className="sheet">
             <div className="sheetHandle" />
-            <div className="sheetTitle">Deal actions</div>
-            <div className="sheetSub">Keep the conversation clean. Manage the workflow here.</div>
+            <div className="sheetTitle">Conversation options</div>
+            <div className="sheetSub">Keep the thread clean. Manage deal actions here.</div>
 
             <div className="sheetActions">
               {canProposeDeal && (
@@ -1217,6 +1260,10 @@ export default function ThreadPage() {
                   Cancel deal
                 </button>
               )}
+
+              <button className="sheetDanger" type="button" onClick={deleteThreadForMe}>
+                Delete for me
+              </button>
             </div>
 
             {tradeErr ? <div className="sheetErr">{tradeErr}</div> : null}
@@ -1224,7 +1271,6 @@ export default function ThreadPage() {
         </div>
       )}
 
-      {/* THREAD */}
       <main className="thread" style={{ paddingBottom: reservedBottom }} onClick={(e) => e.stopPropagation()}>
         <div ref={listRef} className="threadInner">
           {hasMore && (
@@ -1257,7 +1303,9 @@ export default function ThreadPage() {
               const replyTarget = m.reply_to ? messages.find((z) => z.id === m.reply_to) : null;
 
               const prevMessage =
-                index > 0 && grouped[index - 1]?.kind === "msg" ? (grouped[index - 1] as { kind: "msg"; msg: MessageRow }).msg : null;
+                index > 0 && grouped[index - 1]?.kind === "msg"
+                  ? (grouped[index - 1] as { kind: "msg"; msg: MessageRow }).msg
+                  : null;
 
               const groupedWithPrev =
                 !!prevMessage &&
@@ -1427,7 +1475,6 @@ export default function ThreadPage() {
         )}
       </main>
 
-      {/* REPLY / EDIT BANNER */}
       {replyTo && (
         <div className="floatingBanner" style={{ bottom: bottomNavH + COMPOSER_MIN_H + 10 }}>
           <div className="floatingInner">
@@ -1456,12 +1503,7 @@ export default function ThreadPage() {
         </div>
       )}
 
-      {/* COMPOSER */}
-      <div
-        className="composerDock"
-        style={{ bottom: bottomNavH }}
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="composerDock" style={{ bottom: bottomNavH }} onClick={(e) => e.stopPropagation()}>
         <div className="composerShell">
           <label className={`attachBtn ${uploading || mustConfirmBeforeChat ? "disabled" : ""}`} title="Upload image">
             ＋
@@ -1480,6 +1522,7 @@ export default function ThreadPage() {
               className="composerInput"
               value={text}
               onChange={(e) => onTextChange(e.target.value)}
+              onBlur={stopTypingNow}
               onFocus={() => userId && markSeenNow(userId)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -1813,7 +1856,8 @@ export default function ThreadPage() {
 
         .sheetPrimary,
         .sheetGood,
-        .sheetGhost {
+        .sheetGhost,
+        .sheetDanger {
           height: 48px;
           border-radius: 16px;
           font-weight: 950;
@@ -1836,6 +1880,12 @@ export default function ThreadPage() {
           border: 1px solid rgba(15, 23, 42, 0.08);
           background: #ffffff;
           color: #0f172a;
+        }
+
+        .sheetDanger {
+          border: 1px solid rgba(239, 68, 68, 0.22);
+          background: rgba(239, 68, 68, 0.08);
+          color: #b91c1c;
         }
 
         .sheetErr {
