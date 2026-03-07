@@ -3,7 +3,7 @@
 export const dynamic = "force-dynamic";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { ensureThread } from "@/lib/ensureThread";
 
@@ -347,6 +347,24 @@ function getFriendlyError(e: unknown) {
   return "Something went wrong.";
 }
 
+function readTabFromUrl(): TabKey | null {
+  if (typeof window === "undefined") return null;
+
+  const raw = new URLSearchParams(window.location.search).get("tab");
+
+  if (
+    raw === "overview" ||
+    raw === "listings" ||
+    raw === "requests" ||
+    raw === "activity" ||
+    raw === "history"
+  ) {
+    return raw;
+  }
+
+  return null;
+}
+
 /* ==============================
    PAGE
 ============================== */
@@ -354,7 +372,6 @@ function getFriendlyError(e: unknown) {
 export default function AccountPage() {
   const router = useRouter();
   const pathname = usePathname();
-  const searchParams = useSearchParams();
 
   const mountedRef = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -715,7 +732,7 @@ export default function AccountPage() {
       });
 
       if (notifRows.length === 0 && incomingReqRows.length === 0 && incomingOfferRows.length === 0) {
-        // no-op, just keeps the page calm
+        // intentionally quiet
       }
     } catch (e) {
       if (!mountedRef.current) return;
@@ -974,6 +991,9 @@ export default function AccountPage() {
     mountedRef.current = true;
 
     async function boot() {
+      const initialTab = readTabFromUrl();
+      if (initialTab) setTab(initialTab);
+
       const { data } = await supabase.auth.getSession();
       if (!mountedRef.current) return;
 
@@ -1020,11 +1040,16 @@ export default function AccountPage() {
   }, [clearAll, loadAllFor]);
 
   useEffect(() => {
-    const q = searchParams.get("tab");
-    if (q === "overview" || q === "listings" || q === "requests" || q === "activity" || q === "history") {
-      setTab(q);
+    function syncTabFromUrl() {
+      const nextTab = readTabFromUrl();
+      if (nextTab) setTab(nextTab);
     }
-  }, [searchParams]);
+
+    syncTabFromUrl();
+
+    window.addEventListener("popstate", syncTabFromUrl);
+    return () => window.removeEventListener("popstate", syncTabFromUrl);
+  }, []);
 
   const overviewHighlights = useMemo(() => {
     const rows: Array<{ key: string; title: string; body: string; cta: string; onClick: () => void }> = [];
