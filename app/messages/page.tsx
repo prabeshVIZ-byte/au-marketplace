@@ -37,7 +37,11 @@ type MessageRow = {
   deleted_at?: string | null;
 };
 
-type ThreadReadRow = { thread_id: string; user_id: string; last_seen_at: string };
+type ThreadReadRow = {
+  thread_id: string;
+  user_id: string;
+  last_seen_at: string;
+};
 
 type ThreadCard = {
   thread: ThreadRow;
@@ -46,34 +50,90 @@ type ThreadCard = {
   unread: number;
 };
 
+function isoToMs(iso?: string | null) {
+  if (!iso) return 0;
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
 function fmtWhen(ts: string) {
   const d = new Date(ts);
   const now = new Date();
-  const sameDay =
-    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
 
-  return sameDay
-    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : d.toLocaleDateString([], { month: "short", day: "numeric" });
-}
+  const isToday =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
 
-function isoToMs(iso: string) {
-  const t = new Date(iso).getTime();
-  return Number.isNaN(t) ? 0 : t;
+  const yesterday = new Date();
+  yesterday.setDate(now.getDate() - 1);
+
+  const isYesterday =
+    d.getFullYear() === yesterday.getFullYear() &&
+    d.getMonth() === yesterday.getMonth() &&
+    d.getDate() === yesterday.getDate();
+
+  if (isToday) {
+    return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+
+  if (isYesterday) return "Yesterday";
+
+  const diff = now.getTime() - d.getTime();
+  const withinWeek = diff < 1000 * 60 * 60 * 24 * 7;
+
+  if (withinWeek) {
+    return d.toLocaleDateString([], { weekday: "short" });
+  }
+
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
 function normStatus(s: string | null | undefined) {
   return (s ?? "").toLowerCase().trim();
 }
 
-function statusPill(status: string | null | undefined) {
+function statusMeta(status: string | null | undefined) {
   const st = normStatus(status);
+
   if (!st) return { label: "Active", tone: "neutral" as const };
-  if (st.includes("complete") || st === "completed") return { label: "Completed", tone: "done" as const };
-  if (st.includes("claim") || st === "claimed") return { label: "Claimed", tone: "done" as const };
-  if (st.includes("reserve") || st === "reserved") return { label: "In talks", tone: "warn" as const };
-  if (st.includes("available")) return { label: "Available", tone: "good" as const };
+  if (st.includes("complete") || st === "completed")
+    return { label: "Completed", tone: "done" as const };
+  if (st.includes("claim") || st === "claimed")
+    return { label: "Claimed", tone: "done" as const };
+  if (st.includes("reserve") || st === "reserved")
+    return { label: "Reserved", tone: "warn" as const };
+  if (st.includes("available"))
+    return { label: "Available", tone: "good" as const };
+
   return { label: "Active", tone: "neutral" as const };
+}
+
+function initialsOf(name?: string | null) {
+  const clean = (name || "").trim();
+  if (!clean) return "AU";
+  const parts = clean.split(/\s+/).slice(0, 2);
+  return parts.map((p) => p[0]?.toUpperCase() || "").join("") || "AU";
+}
+
+function safeName(profile: ProfileRow | null) {
+  const n = (profile?.full_name ?? "").trim();
+  return n || "Campus user";
+}
+
+function cleanRole(role?: string | null) {
+  const v = (role || "").trim().toLowerCase();
+  if (!v) return "";
+  return v;
+}
+
+function messagePreview(last: MessageRow | null, currentUserId?: string | null) {
+  if (!last) return "Start the conversation";
+  if (last.deleted_at) return "Message deleted";
+
+  const clean = (last.body || "").trim() || "Sent an attachment";
+  if (currentUserId && last.sender_id === currentUserId) return `You: ${clean}`;
+  return clean;
 }
 
 export default function MessagesPage() {
@@ -88,7 +148,7 @@ export default function MessagesPage() {
   const [err, setErr] = useState<string | null>(null);
 
   const [query, setQuery] = useState("");
-  const [tab, setTab] = useState<"active" | "all" | "unread">("active");
+  const [tab, setTab] = useState<"all" | "unread" | "active">("all");
 
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -102,40 +162,45 @@ export default function MessagesPage() {
     const session = data.session;
     setUserId(session?.user?.id ?? null);
     setUserEmail(session?.user?.email ?? null);
-    return { uid: session?.user?.id ?? null, email: session?.user?.email ?? null };
+
+    return {
+      uid: session?.user?.id ?? null,
+      email: session?.user?.email ?? null,
+    };
   }
 
   async function loadInbox(opts?: { silent?: boolean }) {
     const silent = !!opts?.silent;
+
     if (!silent) setLoading(true);
     else setRefreshing(true);
 
     setErr(null);
 
-    const { data: s } = await supabase.auth.getSession();
-    const uid = s.session?.user?.id ?? null;
-    const email = s.session?.user?.email ?? null;
+    const { data: sessionData } = await supabase.auth.getSession();
+    const uid = sessionData.session?.user?.id ?? null;
+    const email = sessionData.session?.user?.email ?? null;
 
     if (!uid || !email || !email.toLowerCase().endsWith("@ashland.edu")) {
       router.push("/me");
       return;
     }
 
-    const { data: tData, error: tErr } = await supabase
+    const { data: threadData, error: threadErr } = await supabase
       .from("threads")
       .select("id,item_id,owner_id,requester_id,created_at, items:items(id,title,photo_url,status)")
       .or(`owner_id.eq.${uid},requester_id.eq.${uid}`)
       .order("created_at", { ascending: false });
 
-    if (tErr) {
-      setErr(tErr.message || "Error loading conversations.");
+    if (threadErr) {
+      setErr(threadErr.message || "Error loading conversations.");
       setCards([]);
       setLoading(false);
       setRefreshing(false);
       return;
     }
 
-    const threads = ((tData as unknown as ThreadRow[]) || []).filter(Boolean);
+    const threads = ((threadData as unknown as ThreadRow[]) || []).filter(Boolean);
 
     if (threads.length === 0) {
       setCards([]);
@@ -146,48 +211,50 @@ export default function MessagesPage() {
 
     const threadIds = threads.map((t) => t.id);
 
-    // last messages
-    const { data: mData, error: mErr } = await supabase
+    const { data: messageData, error: messageErr } = await supabase
       .from("messages")
       .select("id,thread_id,sender_id,body,created_at,deleted_at")
       .in("thread_id", threadIds)
       .order("created_at", { ascending: false });
 
-    if (mErr) {
-      setErr(mErr.message || "Error loading messages.");
+    if (messageErr) {
+      setErr(messageErr.message || "Error loading messages.");
       setCards([]);
       setLoading(false);
       setRefreshing(false);
       return;
     }
 
-    const msgs = (mData as MessageRow[]) || [];
+    const msgs = (messageData as MessageRow[]) || [];
     const lastByThread: Record<string, MessageRow> = {};
+
     for (const m of msgs) {
       if (!lastByThread[m.thread_id]) lastByThread[m.thread_id] = m;
     }
 
-    // reads for me
-    const { data: rData } = await supabase
+    const { data: readData } = await supabase
       .from("thread_reads")
       .select("thread_id,user_id,last_seen_at")
       .in("thread_id", threadIds)
       .eq("user_id", uid);
 
-    const reads = (rData as ThreadReadRow[]) || [];
+    const reads = (readData as ThreadReadRow[]) || [];
     const readMap: Record<string, string> = {};
     for (const r of reads) readMap[r.thread_id] = r.last_seen_at;
 
-    // profiles (other side)
-    const otherIds = Array.from(new Set(threads.map((t) => (t.owner_id === uid ? t.requester_id : t.owner_id))));
+    const otherIds = Array.from(
+      new Set(threads.map((t) => (t.owner_id === uid ? t.requester_id : t.owner_id)).filter(Boolean)),
+    );
 
-    const { data: pData } = await supabase.from("profiles").select("id,full_name,user_role").in("id", otherIds);
+    const { data: profileData } = await supabase
+      .from("profiles")
+      .select("id,full_name,user_role")
+      .in("id", otherIds);
 
-    const profiles = ((pData as ProfileRow[]) || []);
+    const profiles = (profileData as ProfileRow[]) || [];
     const profileMap: Record<string, ProfileRow> = {};
     for (const p of profiles) profileMap[p.id] = p;
 
-    // unread counts (compute from already fetched msgs)
     const unreadByThread: Record<string, number> = {};
     for (const tId of threadIds) unreadByThread[tId] = 0;
 
@@ -196,15 +263,13 @@ export default function MessagesPage() {
       if (m.deleted_at) continue;
 
       const seenAt = readMap[m.thread_id] || null;
-      if (!seenAt) {
-        unreadByThread[m.thread_id] += 1;
-      } else {
-        if (isoToMs(m.created_at) > isoToMs(seenAt)) unreadByThread[m.thread_id] += 1;
-      }
+      if (!seenAt) unreadByThread[m.thread_id] += 1;
+      else if (isoToMs(m.created_at) > isoToMs(seenAt)) unreadByThread[m.thread_id] += 1;
     }
 
     const built: ThreadCard[] = threads.map((t) => {
       const otherId = t.owner_id === uid ? t.requester_id : t.owner_id;
+
       return {
         thread: t,
         other: profileMap[otherId] || null,
@@ -214,6 +279,7 @@ export default function MessagesPage() {
     });
 
     built.sort((a, b) => {
+      if ((a.unread > 0) !== (b.unread > 0)) return a.unread > 0 ? -1 : 1;
       const at = isoToMs(a.last?.created_at || a.thread.created_at);
       const bt = isoToMs(b.last?.created_at || b.thread.created_at);
       return bt - at;
@@ -224,7 +290,6 @@ export default function MessagesPage() {
     setRefreshing(false);
   }
 
-  // Initial load
   useEffect(() => {
     (async () => {
       await syncAuth();
@@ -240,7 +305,6 @@ export default function MessagesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Realtime refresh (lightweight)
   useEffect(() => {
     if (!userId) return;
 
@@ -250,11 +314,14 @@ export default function MessagesPage() {
     }
 
     const ch = supabase
-      .channel("inbox")
+      .channel(`inbox-${userId}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => {
         loadInbox({ silent: true });
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "thread_reads" }, () => {
+        loadInbox({ silent: true });
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "threads" }, () => {
         loadInbox({ silent: true });
       })
       .subscribe();
@@ -268,14 +335,20 @@ export default function MessagesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-  // keyboard shortcut: "/" focuses search
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "/") {
-        e.preventDefault();
-        searchRef.current?.focus();
-      }
+      if (window.innerWidth < 768) return;
+      if (e.key !== "/") return;
+
+      const active = document.activeElement as HTMLElement | null;
+      const tag = active?.tagName?.toLowerCase();
+
+      if (tag === "input" || tag === "textarea") return;
+
+      e.preventDefault();
+      searchRef.current?.focus();
     }
+
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
@@ -285,23 +358,25 @@ export default function MessagesPage() {
 
     let list = cards.filter((c) => {
       if (tab === "unread" && c.unread <= 0) return false;
+
       if (tab === "active") {
         const st = normStatus(c.thread.items?.status);
-        if (st.includes("complete") || st === "completed" || st.includes("claim") || st === "claimed") return false;
+        if (st.includes("complete") || st === "completed" || st.includes("claim") || st === "claimed") {
+          return false;
+        }
       }
 
       if (!q) return true;
 
+      const person = safeName(c.other);
+      const role = c.other?.user_role ?? "";
       const itemTitle = c.thread.items?.title ?? "";
-      const otherName = c.other?.full_name ?? "";
-      const otherRole = c.other?.user_role ?? "";
-      const lastBody = c.last?.deleted_at ? "" : c.last?.body ?? "";
+      const preview = messagePreview(c.last, userId);
 
-      const blob = `${itemTitle} ${otherName} ${otherRole} ${lastBody}`.toLowerCase();
+      const blob = `${person} ${role} ${itemTitle} ${preview}`.toLowerCase();
       return blob.includes(q);
     });
 
-    // keep unread at top, then recency
     list = [...list].sort((a, b) => {
       if ((a.unread > 0) !== (b.unread > 0)) return a.unread > 0 ? -1 : 1;
       const at = isoToMs(a.last?.created_at || a.thread.created_at);
@@ -310,13 +385,21 @@ export default function MessagesPage() {
     });
 
     return list;
-  }, [cards, query, tab]);
+  }, [cards, query, tab, userId]);
 
-  const unreadTotal = useMemo(() => cards.reduce((s, c) => s + (c.unread || 0), 0), [cards]);
+  const unreadTotal = useMemo(() => cards.reduce((sum, c) => sum + c.unread, 0), [cards]);
 
   if (!isAshland) {
     return (
-      <div style={{ minHeight: "100vh", background: "#f7f7f8", color: "#0f172a", padding: 18 }}>
+      <div
+        style={{
+          minHeight: "100vh",
+          background: "#f8fafc",
+          color: "#0f172a",
+          padding: 18,
+          fontWeight: 700,
+        }}
+      >
         Checking access…
       </div>
     );
@@ -324,152 +407,166 @@ export default function MessagesPage() {
 
   return (
     <div className="page">
-      {/* top header */}
-      <header className="top">
-        <div className="topRow">
-          <button className="backBtn" onClick={() => router.push("/feed")} type="button">
-            <span aria-hidden>←</span> Back
+      <header className="header">
+        <div className="topBar">
+          <button
+            className="topIconBtn"
+            onClick={() => router.push("/feed")}
+            type="button"
+            aria-label="Back to feed"
+          >
+            ←
           </button>
 
-          <div className="brand">
-            <div className="brandName">ScholarSwap</div>
-            <div className="brandSub">Messages</div>
+          <div className="titleBlock">
+            <div className="title">Messages</div>
+            <div className="subtitle">{unreadTotal > 0 ? `${unreadTotal} unread` : "All caught up"}</div>
           </div>
 
-          <button className="refreshBtn" type="button" onClick={() => loadInbox()} aria-label="Refresh">
+          <button
+            className="topIconBtn"
+            type="button"
+            onClick={() => loadInbox({ silent: true })}
+            aria-label="Refresh messages"
+          >
             {refreshing ? "…" : "↻"}
           </button>
         </div>
 
-        <div className="tabs">
-          <button className={`tab ${tab === "active" ? "on" : ""}`} onClick={() => setTab("active")} type="button">
-            Active
-          </button>
-          <button className={`tab ${tab === "all" ? "on" : ""}`} onClick={() => setTab("all")} type="button">
-            All
-          </button>
-          <button className={`tab ${tab === "unread" ? "on" : ""}`} onClick={() => setTab("unread")} type="button">
-            Unread {unreadTotal > 0 ? `(${unreadTotal})` : ""}
-          </button>
-          <span className={`tabIndicator ${tab}`} aria-hidden="true" />
-        </div>
-
         <div className="searchWrap">
           <div className="search">
-            <span className="searchIcon" aria-hidden>
-              🔎
-            </span>
+            <span className="searchIcon">⌕</span>
+
             <input
               ref={searchRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder='Search by item, person, or text… (press "/")'
+              placeholder="Search conversations"
               autoCorrect="off"
               autoCapitalize="none"
               spellCheck={false}
             />
+
             {query ? (
-              <button className="clear" onClick={() => setQuery("")} type="button" aria-label="Clear search">
+              <button className="clearBtn" type="button" onClick={() => setQuery("")} aria-label="Clear search">
                 ✕
               </button>
             ) : (
-              <span className="kbd" aria-hidden>
-                /
-              </span>
+              <span className="searchHint">/</span>
             )}
           </div>
         </div>
 
-        {err && <div className="err">{err}</div>}
+        <div className="segmentedWrap" aria-label="Conversation filters">
+          <button
+            className={`segment ${tab === "all" ? "active" : ""}`}
+            type="button"
+            onClick={() => setTab("all")}
+          >
+            All
+          </button>
 
-        <div className="hintRow">
-          <div className="hintText">
-            Conversations appear after an accepted offer. This is your deal hub — not just chat.
-          </div>
-          {loading ? <div className="mini">Loading…</div> : <div className="mini">{filtered.length} chats</div>}
+          <button
+            className={`segment ${tab === "unread" ? "active" : ""}`}
+            type="button"
+            onClick={() => setTab("unread")}
+          >
+            Unread
+            {unreadTotal > 0 ? <span className="segmentCount">{unreadTotal}</span> : null}
+          </button>
+
+          <button
+            className={`segment ${tab === "active" ? "active" : ""}`}
+            type="button"
+            onClick={() => setTab("active")}
+          >
+            Active
+          </button>
         </div>
+
+        {err ? <div className="errorBox">{err}</div> : null}
       </header>
 
-      {/* body */}
       <main className="main">
         {!loading && filtered.length === 0 ? (
-          <div className="empty">
-            <div className="emptyTitle">No conversations yet.</div>
-            <div className="emptySub">
-              Once a seller accepts your request (or you accept a requester), the chat shows here.
+          <div className="emptyState">
+            <div className="emptyBubble">💬</div>
+            <div className="emptyTitle">No conversations yet</div>
+            <div className="emptyText">
+              When someone replies to your listing or request, your chats will appear here.
             </div>
-            <div className="emptyActions">
-              <button className="ghost" onClick={() => router.push("/feed")} type="button">
-                Browse feed
-              </button>
-              <button className="primary" onClick={() => router.push("/create")} type="button">
-                Create post
-              </button>
-            </div>
+
+            <button className="emptyPrimaryBtn" type="button" onClick={() => router.push("/feed")}>
+              Browse feed
+            </button>
           </div>
         ) : (
-          <div className="list">
-            {filtered.map((c) => {
-              const item = c.thread.items;
-              const otherName = c.other?.full_name || "Campus user";
-              const otherRole = c.other?.user_role || "student";
-
-              const lastText = c.last?.deleted_at ? "Message deleted" : c.last?.body || "No messages yet.";
-              const when = c.last?.created_at ? fmtWhen(c.last.created_at) : fmtWhen(c.thread.created_at);
-
-              const pill = statusPill(item?.status);
-
-              return (
-                <button
-                  key={c.thread.id}
-                  className="card"
-                  type="button"
-                  onClick={() => router.push(`/messages/${c.thread.id}`)}
-                >
-                  <div className="thumb">
-                    {item?.photo_url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={item.photo_url} alt={item.title || "Item"} />
-                    ) : (
-                      <div className="noThumb">
-                        <span aria-hidden>📦</span>
-                      </div>
-                    )}
-                    {c.unread > 0 && <span className="dot" aria-label={`${c.unread} unread`} />}
+          <div className="threadList">
+            {loading &&
+              Array.from({ length: 7 }).map((_, i) => (
+                <div key={i} className="skeletonRow">
+                  <div className="skAvatar" />
+                  <div className="skContent">
+                    <div className="skLine skLineName" />
+                    <div className="skLine skLineMessage" />
+                    <div className="skLine skLineMeta" />
                   </div>
+                </div>
+              ))}
 
-                  <div className="content">
-                    <div className="topLine">
-                      <div className="title">
-                        <span className="titleText">{item?.title || "Listing"}</span>
-                        <span className={`pill ${pill.tone}`}>{pill.label}</span>
-                      </div>
-                      <div className="when">{when}</div>
+            {!loading &&
+              filtered.map((c) => {
+                const otherName = safeName(c.other);
+                const role = cleanRole(c.other?.user_role);
+                const item = c.thread.items;
+                const unread = c.unread > 0;
+                const preview = messagePreview(c.last, userId);
+                const time = c.last?.created_at ? fmtWhen(c.last.created_at) : fmtWhen(c.thread.created_at);
+                const status = statusMeta(item?.status);
+
+                return (
+                  <button
+                    key={c.thread.id}
+                    type="button"
+                    className={`threadRow ${unread ? "unread" : ""}`}
+                    onClick={() => router.push(`/messages/${c.thread.id}`)}
+                  >
+                    <div className="avatarWrap">
+                      <div className="avatar">{initialsOf(otherName)}</div>
                     </div>
 
-                    <div className="subLine">
-                      <span className="with">
-                        with <b>{otherName}</b>
-                      </span>
-                      <span className="sep">•</span>
-                      <span className="role">{otherRole}</span>
-                      {c.unread > 0 && (
-                        <>
-                          <span className="sep">•</span>
-                          <span className="unreadText">{c.unread} new</span>
-                        </>
-                      )}
+                    <div className="threadMain">
+                      <div className="rowTop">
+                        <div className="nameWrap">
+                          <span className={`nameText ${unread ? "strong" : ""}`}>{otherName}</span>
+                          {role ? <span className="roleText">{role}</span> : null}
+                        </div>
+
+                        <div className={`timeText ${unread ? "strong" : ""}`}>{time}</div>
+                      </div>
+
+                      <div className="rowMiddle">
+                        <div className={`messageText ${unread ? "strong" : ""}`}>{preview}</div>
+                        {unread ? <div className="unreadBadge">{c.unread}</div> : null}
+                      </div>
+
+                      <div className="rowBottom">
+                        {item?.photo_url ? (
+                          <span className="itemThumb">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={item.photo_url} alt={item.title || "Listing"} />
+                          </span>
+                        ) : (
+                          <span className="itemThumb fallback">📦</span>
+                        )}
+
+                        <span className="itemMetaText">{item?.title || "Listing"}</span>
+                        <span className={`itemStatus ${status.tone}`}>{status.label}</span>
+                      </div>
                     </div>
-
-                    <div className="preview">{lastText}</div>
-                  </div>
-
-                  <div className="chev" aria-hidden>
-                    ›
-                  </div>
-                </button>
-              );
-            })}
+                  </button>
+                );
+              })}
           </div>
         )}
       </main>
@@ -477,444 +574,525 @@ export default function MessagesPage() {
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background: #f7f7f8;
+          background: #f8fafc;
           color: #0f172a;
           padding-bottom: 110px;
         }
 
-        .top {
+        .header {
           position: sticky;
           top: 0;
-          z-index: 20;
-          background: rgba(247, 247, 248, 0.92);
-          backdrop-filter: blur(12px);
-          border-bottom: 1px solid #e5e7eb;
+          z-index: 30;
+          padding: 10px 12px 12px;
+          background: rgba(248, 250, 252, 0.9);
+          backdrop-filter: blur(18px);
+          border-bottom: 1px solid rgba(15, 23, 42, 0.05);
         }
 
-        .topRow {
+        .topBar {
           display: grid;
-          grid-template-columns: 88px 1fr 44px;
+          grid-template-columns: 44px 1fr 44px;
           align-items: center;
           gap: 10px;
-          padding: 14px 14px 10px;
         }
 
-        .backBtn {
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
+        .topIconBtn {
+          width: 44px;
+          height: 44px;
+          border: none;
           border-radius: 999px;
-          padding: 10px 12px;
+          background: rgba(255, 255, 255, 0.82);
+          color: #0f172a;
+          font-size: 18px;
+          font-weight: 900;
+          display: grid;
+          place-items: center;
           cursor: pointer;
-          font-weight: 950;
-          color: #111827;
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+          transition: transform 0.12s ease, background 0.12s ease;
         }
 
-        .brand {
+        .topIconBtn:active {
+          transform: scale(0.96);
+        }
+
+        .titleBlock {
           min-width: 0;
           text-align: center;
         }
 
-        .brandName {
-          font-weight: 950;
-          letter-spacing: -0.4px;
-          font-size: 16px;
-          line-height: 1.1;
-        }
-
-        .brandSub {
-          font-size: 12px;
-          color: #6b7280;
+        .title {
+          font-size: 21px;
+          line-height: 1.05;
           font-weight: 900;
-          margin-top: 2px;
+          letter-spacing: -0.03em;
         }
 
-        .refreshBtn {
-          width: 44px;
-          height: 44px;
-          border-radius: 16px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          cursor: pointer;
-          font-weight: 950;
-          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
-        }
-
-        .tabs {
-          position: relative;
-          margin: 0 14px 10px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          border-radius: 999px;
-          display: grid;
-          grid-template-columns: 1fr 1fr 1fr;
-          overflow: hidden;
-        }
-
-        .tab {
-          border: none;
-          background: transparent;
-          padding: 12px 10px;
-          cursor: pointer;
-          font-weight: 950;
-          color: #6b7280;
-          z-index: 2;
-        }
-
-        .tab.on {
-          color: #065f46;
-        }
-
-        .tabIndicator {
-          position: absolute;
-          top: 3px;
-          bottom: 3px;
-          width: calc(33.333% - 6px);
-          border-radius: 999px;
-          background: rgba(16, 185, 129, 0.12);
-          border: 1px solid rgba(16, 185, 129, 0.25);
-          z-index: 1;
-          transition: transform 180ms ease;
-        }
-
-        .tabIndicator.active {
-          transform: translateX(3px);
-        }
-        .tabIndicator.all {
-          transform: translateX(calc(100% + 3px));
-        }
-        .tabIndicator.unread {
-          transform: translateX(calc(200% + 3px));
+        .subtitle {
+          margin-top: 3px;
+          font-size: 12px;
+          color: #64748b;
+          font-weight: 700;
         }
 
         .searchWrap {
-          padding: 0 14px 12px;
+          margin-top: 12px;
         }
 
         .search {
           height: 46px;
           border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
+          background: rgba(15, 23, 42, 0.045);
           display: grid;
-          grid-template-columns: 40px 1fr 40px;
+          grid-template-columns: 38px 1fr 38px;
           align-items: center;
-          padding: 0 6px;
-          gap: 8px;
-          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+          gap: 4px;
+          padding: 0 8px;
         }
 
-        .searchIcon {
-          width: 40px;
-          text-align: center;
-          opacity: 0.8;
+        .searchIcon,
+        .searchHint {
+          display: grid;
+          place-items: center;
+          color: #94a3b8;
+          font-size: 13px;
+          font-weight: 900;
         }
 
         .search input {
           width: 100%;
+          min-width: 0;
           border: none;
           outline: none;
           background: transparent;
-          color: #111827;
-          font-weight: 900;
+          color: #0f172a;
           font-size: 14px;
-          min-width: 0;
+          font-weight: 700;
         }
 
         .search input::placeholder {
-          color: #9ca3af;
-          font-weight: 800;
+          color: #94a3b8;
         }
 
-        .clear,
-        .kbd {
-          width: 40px;
-          height: 40px;
+        .clearBtn {
+          width: 30px;
+          height: 30px;
+          border: none;
           border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fbfbfc;
+          background: rgba(15, 23, 42, 0.08);
+          color: #475569;
+          font-size: 12px;
+          font-weight: 900;
           display: grid;
           place-items: center;
-          font-weight: 950;
-          color: #111827;
-        }
-
-        .clear {
           cursor: pointer;
         }
 
-        .kbd {
-          color: #9ca3af;
-          background: #ffffff;
+        .segmentedWrap {
+          margin-top: 12px;
+          width: 100%;
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 6px;
+          padding: 4px;
+          border-radius: 16px;
+          background: rgba(15, 23, 42, 0.045);
         }
 
-        .err {
-          padding: 0 14px 10px;
-          color: #b91c1c;
-          font-weight: 900;
-        }
-
-        .hintRow {
-          padding: 0 14px 12px;
-          display: flex;
-          justify-content: space-between;
-          gap: 12px;
-          align-items: baseline;
-        }
-
-        .hintText {
-          font-size: 12px;
-          color: #6b7280;
+        .segment {
+          height: 38px;
+          border: none;
+          border-radius: 12px;
+          background: transparent;
+          color: #64748b;
+          font-size: 13px;
           font-weight: 800;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          cursor: pointer;
+          transition: all 0.14s ease;
         }
 
-        .mini {
-          font-size: 12px;
-          color: #6b7280;
+        .segment.active {
+          background: #ffffff;
+          color: #0f172a;
+          box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+        }
+
+        .segmentCount {
+          min-width: 18px;
+          height: 18px;
+          border-radius: 999px;
+          padding: 0 5px;
+          background: #10b981;
+          color: #ffffff;
+          font-size: 10px;
           font-weight: 900;
-          white-space: nowrap;
+          display: grid;
+          place-items: center;
+        }
+
+        .errorBox {
+          margin-top: 10px;
+          padding: 11px 12px;
+          border-radius: 14px;
+          background: rgba(239, 68, 68, 0.08);
+          color: #b91c1c;
+          font-size: 13px;
+          font-weight: 800;
         }
 
         .main {
-          padding: 14px;
-          max-width: 860px;
+          max-width: 820px;
           margin: 0 auto;
+          padding: 6px 10px 0;
         }
 
-        .empty {
-          background: #ffffff;
-          border: 1px solid #e5e7eb;
-          border-radius: 20px;
-          padding: 18px;
-          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
-        }
-
-        .emptyTitle {
-          font-weight: 950;
-          font-size: 18px;
-          color: #111827;
-        }
-
-        .emptySub {
-          margin-top: 6px;
-          color: #6b7280;
-          font-weight: 700;
-          line-height: 1.35;
-        }
-
-        .emptyActions {
-          margin-top: 12px;
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 10px;
-        }
-
-        .ghost {
-          height: 44px;
-          border-radius: 14px;
-          border: 1px solid #e5e7eb;
-          background: #ffffff;
-          color: #111827;
-          font-weight: 950;
-          cursor: pointer;
-        }
-
-        .primary {
-          height: 44px;
-          border-radius: 14px;
-          border: 1px solid rgba(16, 185, 129, 0.25);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
-          font-weight: 950;
-          cursor: pointer;
-        }
-
-        .list {
+        .threadList {
           display: flex;
           flex-direction: column;
+        }
+
+        .threadRow {
+          width: 100%;
+          border: none;
+          background: transparent;
+          text-align: left;
+          display: grid;
+          grid-template-columns: 60px 1fr;
+          gap: 12px;
+          padding: 14px 8px;
+          border-radius: 18px;
+          cursor: pointer;
+          transition: background 0.14s ease, transform 0.12s ease;
+        }
+
+        .threadRow:active {
+          transform: scale(0.995);
+        }
+
+        .threadRow:hover {
+          background: rgba(255, 255, 255, 0.72);
+        }
+
+        .threadRow.unread {
+          background: rgba(255, 255, 255, 0.82);
+        }
+
+        .avatarWrap {
+          display: flex;
+          justify-content: center;
+          align-items: flex-start;
+          padding-top: 2px;
+        }
+
+        .avatar {
+          width: 52px;
+          height: 52px;
+          border-radius: 999px;
+          background: linear-gradient(135deg, #0f172a, #334155);
+          color: white;
+          display: grid;
+          place-items: center;
+          font-size: 14px;
+          font-weight: 900;
+          letter-spacing: 0.02em;
+        }
+
+        .threadMain {
+          min-width: 0;
+          padding-top: 1px;
+        }
+
+        .rowTop {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
           gap: 10px;
         }
 
-        .card {
-          width: 100%;
-          text-align: left;
-          background: #ffffff;
-          border: 1px solid #e5e7eb;
-          border-radius: 18px;
-          padding: 12px;
-          display: grid;
-          grid-template-columns: 64px 1fr 16px;
-          gap: 12px;
+        .nameWrap {
+          min-width: 0;
+          display: flex;
+          align-items: baseline;
+          gap: 7px;
+          flex-wrap: wrap;
+        }
+
+        .nameText {
+          min-width: 0;
+          font-size: 15px;
+          color: #0f172a;
+          font-weight: 800;
+          letter-spacing: -0.01em;
+        }
+
+        .nameText.strong,
+        .messageText.strong,
+        .timeText.strong {
+          font-weight: 900;
+        }
+
+        .roleText {
+          font-size: 12px;
+          color: #94a3b8;
+          font-weight: 700;
+          text-transform: capitalize;
+        }
+
+        .timeText {
+          flex-shrink: 0;
+          font-size: 12px;
+          color: #64748b;
+          font-weight: 700;
+          white-space: nowrap;
+        }
+
+        .rowMiddle {
+          margin-top: 4px;
+          display: flex;
           align-items: center;
-          cursor: pointer;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
-          transition: transform 120ms ease, box-shadow 120ms ease;
+          gap: 10px;
+          min-width: 0;
         }
 
-        .card:active {
-          transform: translateY(1px);
-          box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
-        }
-
-        .thumb {
-          position: relative;
-          width: 64px;
-          height: 64px;
-          border-radius: 16px;
+        .messageText {
+          min-width: 0;
+          flex: 1;
+          color: #475569;
+          font-size: 14px;
+          font-weight: 700;
           overflow: hidden;
-          border: 1px solid #e5e7eb;
-          background: #fbfbfc;
+          white-space: nowrap;
+          text-overflow: ellipsis;
+        }
+
+        .unreadBadge {
+          min-width: 22px;
+          height: 22px;
+          padding: 0 7px;
+          border-radius: 999px;
+          background: #10b981;
+          color: #ffffff;
+          font-size: 11px;
+          font-weight: 900;
+          display: grid;
+          place-items: center;
           flex-shrink: 0;
         }
 
-        .thumb img {
+        .rowBottom {
+          margin-top: 7px;
+          min-width: 0;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .itemThumb {
+          width: 20px;
+          height: 20px;
+          border-radius: 6px;
+          overflow: hidden;
+          background: #e2e8f0;
+          flex-shrink: 0;
+          display: grid;
+          place-items: center;
+          font-size: 10px;
+        }
+
+        .itemThumb img {
           width: 100%;
           height: 100%;
           object-fit: cover;
           display: block;
         }
 
-        .noThumb {
-          width: 100%;
-          height: 100%;
+        .fallback {
+          color: #64748b;
+        }
+
+        .itemMetaText {
+          min-width: 0;
+          overflow: hidden;
+          white-space: nowrap;
+          text-overflow: ellipsis;
+          color: #64748b;
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .itemStatus {
+          flex-shrink: 0;
+          font-size: 11px;
+          font-weight: 800;
+          padding: 0 0 0 2px;
+        }
+
+        .itemStatus.neutral {
+          color: #64748b;
+        }
+
+        .itemStatus.good {
+          color: #047857;
+        }
+
+        .itemStatus.warn {
+          color: #b45309;
+        }
+
+        .itemStatus.done {
+          color: #2563eb;
+        }
+
+        .emptyState {
+          margin-top: 22px;
+          border-radius: 28px;
+          background: rgba(255, 255, 255, 0.82);
+          padding: 34px 20px 28px;
+          text-align: center;
+          box-shadow: 0 12px 40px rgba(15, 23, 42, 0.05);
+        }
+
+        .emptyBubble {
+          width: 68px;
+          height: 68px;
+          border-radius: 999px;
+          margin: 0 auto;
           display: grid;
           place-items: center;
-          color: #6b7280;
-          font-weight: 950;
-          font-size: 18px;
+          font-size: 30px;
+          background: rgba(15, 23, 42, 0.05);
         }
 
-        .dot {
-          position: absolute;
-          top: 8px;
-          right: 8px;
-          width: 10px;
-          height: 10px;
-          border-radius: 999px;
-          background: #ef4444;
-          box-shadow: 0 0 0 2px #ffffff;
-        }
-
-        .content {
-          min-width: 0;
-        }
-
-        .topLine {
-          display: flex;
-          justify-content: space-between;
-          align-items: baseline;
-          gap: 10px;
-        }
-
-        .title {
-          display: flex;
-          gap: 8px;
-          align-items: center;
-          min-width: 0;
-        }
-
-        .titleText {
-          font-weight: 950;
-          font-size: 16px;
-          color: #111827;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          max-width: 520px;
-        }
-
-        .pill {
-          flex-shrink: 0;
-          font-size: 12px;
-          font-weight: 950;
-          padding: 6px 10px;
-          border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fbfbfc;
-          color: #6b7280;
-        }
-
-        .pill.good {
-          background: rgba(16, 185, 129, 0.12);
-          border-color: rgba(16, 185, 129, 0.25);
-          color: #065f46;
-        }
-
-        .pill.warn {
-          background: rgba(245, 158, 11, 0.12);
-          border-color: rgba(245, 158, 11, 0.25);
-          color: #92400e;
-        }
-
-        .pill.done {
-          background: rgba(59, 130, 246, 0.12);
-          border-color: rgba(59, 130, 246, 0.25);
-          color: #1e3a8a;
-        }
-
-        .when {
-          color: #6b7280;
+        .emptyTitle {
+          margin-top: 14px;
+          font-size: 22px;
+          line-height: 1.1;
           font-weight: 900;
-          font-size: 12px;
-          white-space: nowrap;
+          letter-spacing: -0.03em;
+          color: #0f172a;
         }
 
-        .subLine {
-          margin-top: 4px;
-          display: flex;
-          flex-wrap: wrap;
-          align-items: center;
-          gap: 6px;
-          color: #6b7280;
-          font-size: 12px;
-          font-weight: 800;
-        }
-
-        .sep {
-          opacity: 0.6;
-        }
-
-        .unreadText {
-          color: #b91c1c;
-          font-weight: 950;
-        }
-
-        .preview {
-          margin-top: 8px;
-          color: #374151;
+        .emptyText {
+          margin: 8px auto 0;
+          max-width: 420px;
+          font-size: 14px;
+          line-height: 1.5;
+          color: #64748b;
           font-weight: 700;
-          font-size: 13px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
         }
 
-        .chev {
-          color: #9ca3af;
-          font-weight: 950;
-          font-size: 20px;
-          text-align: right;
+        .emptyPrimaryBtn {
+          margin-top: 18px;
+          height: 48px;
+          border: none;
+          border-radius: 16px;
+          padding: 0 18px;
+          background: #0f172a;
+          color: #ffffff;
+          font-size: 14px;
+          font-weight: 900;
+          cursor: pointer;
         }
 
-        @media (min-width: 860px) {
-          .topRow {
-            padding-left: 18px;
-            padding-right: 18px;
+        .skeletonRow {
+          display: grid;
+          grid-template-columns: 60px 1fr;
+          gap: 12px;
+          padding: 14px 8px;
+        }
+
+        .skAvatar,
+        .skLine {
+          background: linear-gradient(
+            90deg,
+            rgba(226, 232, 240, 0.8),
+            rgba(241, 245, 249, 1),
+            rgba(226, 232, 240, 0.8)
+          );
+          background-size: 200% 100%;
+          animation: shimmer 1.35s linear infinite;
+        }
+
+        .skAvatar {
+          width: 52px;
+          height: 52px;
+          border-radius: 999px;
+        }
+
+        .skContent {
+          display: grid;
+          gap: 9px;
+          align-content: center;
+        }
+
+        .skLine {
+          height: 12px;
+          border-radius: 999px;
+        }
+
+        .skLineName {
+          width: 38%;
+        }
+
+        .skLineMessage {
+          width: 72%;
+        }
+
+        .skLineMeta {
+          width: 46%;
+        }
+
+        @keyframes shimmer {
+          from {
+            background-position: 200% 0;
           }
-          .searchWrap,
-          .hintRow {
-            padding-left: 18px;
-            padding-right: 18px;
+          to {
+            background-position: -200% 0;
           }
-          .tabs {
-            margin-left: 18px;
-            margin-right: 18px;
+        }
+
+        @media (max-width: 767px) {
+          .searchHint {
+            display: none;
           }
+
           .main {
-            padding: 16px 18px;
+            padding-left: 8px;
+            padding-right: 8px;
+          }
+
+          .threadRow {
+            padding-left: 8px;
+            padding-right: 8px;
+          }
+        }
+
+        @media (min-width: 768px) {
+          .header {
+            padding-left: 18px;
+            padding-right: 18px;
+          }
+
+          .main {
+            padding-left: 18px;
+            padding-right: 18px;
+          }
+
+          .title {
+            font-size: 24px;
+          }
+
+          .threadRow {
+            grid-template-columns: 64px 1fr;
+            padding: 15px 10px;
+          }
+
+          .avatar {
+            width: 56px;
+            height: 56px;
           }
         }
       `}</style>
