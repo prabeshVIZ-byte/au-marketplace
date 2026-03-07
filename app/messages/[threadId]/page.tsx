@@ -8,7 +8,11 @@ import { supabase } from "@/lib/supabaseClient";
 import { insertSystemMessage } from "@/lib/ensureThread";
 
 // ================= TYPES =================
-type ProfileRow = { id: string; full_name: string | null; user_role: string | null };
+type ProfileRow = {
+  id: string;
+  full_name: string | null;
+  user_role: string | null;
+};
 
 type ThreadRow = {
   id: string;
@@ -26,7 +30,10 @@ type ItemRow = {
   owner_id: string | null;
 };
 
-type MyInterestRow = { id: string; status: string | null };
+type MyInterestRow = {
+  id: string;
+  status: string | null;
+};
 
 type MessageRow = {
   id: string;
@@ -34,7 +41,6 @@ type MessageRow = {
   sender_id: string | null;
   body: string;
   created_at: string;
-
   client_id?: string | null;
   edited_at?: string | null;
   deleted_at?: string | null;
@@ -50,7 +56,11 @@ type ReactionRow = {
   created_at: string;
 };
 
-type ThreadReadRow = { thread_id: string; user_id: string; last_seen_at: string };
+type ThreadReadRow = {
+  thread_id: string;
+  user_id: string;
+  last_seen_at: string;
+};
 
 type TradeRow = {
   id: string;
@@ -70,6 +80,7 @@ type TradeRow = {
 // ================= CONFIG =================
 const PAGE_SIZE = 30;
 const MEDIA_BUCKET = "message-media";
+const QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉"];
 
 // ================= HELPERS =================
 function isoToMs(iso: string) {
@@ -79,23 +90,33 @@ function isoToMs(iso: string) {
 
 function safeName(p: ProfileRow | null) {
   const n = (p?.full_name ?? "").trim();
-  return n || "Ashland user";
+  return n || "Campus user";
+}
+
+function initialsOf(name?: string | null) {
+  const clean = (name || "").trim();
+  if (!clean) return "AU";
+  const parts = clean.split(/\s+/).slice(0, 2);
+  return parts.map((p) => p[0]?.toUpperCase() || "").join("") || "AU";
 }
 
 function fmtTime(iso: string) {
   const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function fmtDayLabel(iso: string) {
   const d = new Date(iso);
   const now = new Date();
+
   const sameDay = d.toDateString() === now.toDateString();
   const y = new Date(now);
   y.setDate(now.getDate() - 1);
   const isYesterday = d.toDateString() === y.toDateString();
+
   if (sameDay) return "Today";
   if (isYesterday) return "Yesterday";
+
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
@@ -142,6 +163,10 @@ function isParticipant(t: TradeRow, uid: string | null) {
   return t.seller_id === uid || t.buyer_id === uid;
 }
 
+function isImageAttachment(att: any) {
+  return !!att && att.type === "image" && typeof att.url === "string" && att.url.trim().length > 0;
+}
+
 // ================= PAGE =================
 export default function ThreadPage() {
   const router = useRouter();
@@ -167,6 +192,7 @@ export default function ThreadPage() {
   const [trade, setTrade] = useState<TradeRow | null>(null);
   const [tradeLoading, setTradeLoading] = useState(false);
   const [tradeErr, setTradeErr] = useState<string | null>(null);
+  const [showDealSheet, setShowDealSheet] = useState(false);
 
   // ---------- messages + reactions ----------
   const [messages, setMessages] = useState<MessageRow[]>([]);
@@ -193,17 +219,18 @@ export default function ThreadPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
 
-  const [openMenuFor, setOpenMenuFor] = useState<string | null>(null);
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
 
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
 
-  // ✅ FIX: keep composer ABOVE your bottom nav
   const [bottomNavH, setBottomNavH] = useState(86);
+
   useEffect(() => {
     const update = () => {
       const nav = document.querySelector("nav");
@@ -233,9 +260,18 @@ export default function ThreadPage() {
     return ownerId === userId ? requesterId : ownerId;
   }, [userId, thread]);
 
+  const otherName = safeName(otherProfile);
+
   function scrollToBottom(force = false) {
     if (!stickToBottom && !force) return;
     requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
+  }
+
+  function autoGrowComposer() {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   }
 
   // ================= AUTH =================
@@ -258,6 +294,7 @@ export default function ThreadPage() {
       .single();
 
     if (thErr) throw new Error(thErr.message || "Error loading thread.");
+
     const threadRow = th as ThreadRow;
     setThread(threadRow);
 
@@ -274,6 +311,7 @@ export default function ThreadPage() {
       .single();
 
     if (itErr) throw new Error(itErr.message || "Error loading item.");
+
     const itemRow = it as ItemRow;
     setItem(itemRow);
 
@@ -300,6 +338,7 @@ export default function ThreadPage() {
       setMyInterest(null);
       return;
     }
+
     const { data } = await supabase
       .from("interests")
       .select("id,status")
@@ -339,13 +378,14 @@ export default function ThreadPage() {
     if (!hasMore || loadingMore || messages.length === 0) return;
     setLoadingMore(true);
     setErr(null);
+
     try {
       const oldest = messages[0]?.created_at ?? null;
       const page = await fetchMessagesPage(oldest);
       setMessages((prev) => [...page, ...prev]);
       setHasMore(page.length === PAGE_SIZE);
     } catch (e: any) {
-      setErr(e?.message || "Could not load older.");
+      setErr(e?.message || "Could not load older messages.");
     } finally {
       setLoadingMore(false);
     }
@@ -360,6 +400,7 @@ export default function ThreadPage() {
         .eq("thread_id", threadId)
         .eq("user_id", uid)
         .maybeSingle();
+
       setMyLastSeenAt((mine as ThreadReadRow | null)?.last_seen_at ?? null);
 
       if (otherId) {
@@ -369,6 +410,7 @@ export default function ThreadPage() {
           .eq("thread_id", threadId)
           .eq("user_id", otherId)
           .maybeSingle();
+
         setOtherLastSeenAt((oth as ThreadReadRow | null)?.last_seen_at ?? null);
       } else {
         setOtherLastSeenAt(null);
@@ -381,7 +423,9 @@ export default function ThreadPage() {
 
   async function markSeenNow(uid: string) {
     if (mustConfirmBeforeChat) return;
+
     const nowIso = new Date().toISOString();
+
     try {
       await supabase.from("thread_reads").upsert([{ thread_id: threadId, user_id: uid, last_seen_at: nowIso }], {
         onConflict: "thread_id,user_id",
@@ -393,10 +437,12 @@ export default function ThreadPage() {
   // ================= REACTIONS =================
   async function loadReactions(uid: string, msgIds: string[]) {
     if (msgIds.length === 0) return;
+
     const { data, error } = await supabase
       .from("message_reactions")
       .select("id,message_id,user_id,emoji,created_at")
       .in("message_id", msgIds);
+
     if (error) return;
 
     const counts: Record<string, Record<string, number>> = {};
@@ -405,6 +451,7 @@ export default function ThreadPage() {
     for (const r of (data as ReactionRow[]) || []) {
       counts[r.message_id] ??= {};
       counts[r.message_id][r.emoji] = (counts[r.message_id][r.emoji] || 0) + 1;
+
       if (r.user_id === uid) {
         mine[r.message_id] ??= {};
         mine[r.message_id][r.emoji] = true;
@@ -417,6 +464,7 @@ export default function ThreadPage() {
 
   async function toggleReaction(messageId: string, emoji: string) {
     if (!userId) return;
+
     const already = !!myReactions?.[messageId]?.[emoji];
 
     setMyReactions((prev) => {
@@ -476,6 +524,8 @@ export default function ThreadPage() {
     setMessages((prev) => [...prev, optimistic]);
     setReplyTo(null);
     setText("");
+    setSelectedMessageId(null);
+    setTimeout(() => autoGrowComposer(), 0);
     scrollToBottom(true);
 
     const { data, error } = await supabase
@@ -516,13 +566,15 @@ export default function ThreadPage() {
     if (m.sender_id !== userId) return;
     if (m.deleted_at) return;
     if (String(m.id).startsWith("temp-")) return;
+
     setEditingId(m.id);
     setEditingText(m.body || "");
-    setOpenMenuFor(null);
+    setSelectedMessageId(null);
   }
 
   async function saveEdit() {
     if (!userId || !editingId) return;
+
     const body = editingText.trim();
     if (!body) return;
 
@@ -539,6 +591,7 @@ export default function ThreadPage() {
 
   async function deleteMessage(id: string) {
     if (!userId) return;
+
     const m = messages.find((x) => x.id === id);
     if (!m) return;
     if (m.sender_id !== userId) return;
@@ -548,10 +601,11 @@ export default function ThreadPage() {
     if (!ok) return;
 
     setErr(null);
-    setOpenMenuFor(null);
+    setSelectedMessageId(null);
 
     const deletedAt = new Date().toISOString();
     setMessages((prev) => prev.map((x) => (x.id === id ? { ...x, deleted_at: deletedAt } : x)));
+
     const { error } = await supabase.from("messages").update({ deleted_at: deletedAt }).eq("id", id);
     if (error) setErr(error.message || "Delete failed.");
   }
@@ -564,6 +618,7 @@ export default function ThreadPage() {
       setErr("Please upload an image file.");
       return null;
     }
+
     if (!isAllowedImage(file)) {
       setErr("Upload JPG, PNG, or WEBP.");
       return null;
@@ -610,6 +665,7 @@ export default function ThreadPage() {
     if (!mustConfirmBeforeChat) return;
 
     setErr(null);
+
     try {
       const { error: rpcErr } = await supabase.rpc("confirm_pickup", { p_interest_id: myInterest.id });
       if (rpcErr) throw new Error(rpcErr.message);
@@ -630,6 +686,7 @@ export default function ThreadPage() {
   // ================= TRADE =================
   async function loadTrade() {
     if (!threadId) return;
+
     setTradeLoading(true);
     setTradeErr(null);
 
@@ -689,6 +746,7 @@ export default function ThreadPage() {
     if (!trade || !userId) return;
     if (!isParticipant(trade, userId)) return;
     if (trade.state !== "proposed") return;
+
     if (trade.proposed_by === userId) {
       setTradeErr("Waiting for the other person to confirm.");
       return;
@@ -715,12 +773,14 @@ export default function ThreadPage() {
     });
 
     await loadTrade();
+
     if (thread?.item_id) {
       const { data: it } = await supabase
         .from("items")
         .select("id,title,photo_url,status,owner_id")
         .eq("id", thread.item_id)
         .single();
+
       if (it) setItem(it as any);
     }
   }
@@ -751,12 +811,14 @@ export default function ThreadPage() {
     });
 
     await loadTrade();
+
     if (thread?.item_id) {
       const { data: it } = await supabase
         .from("items")
         .select("id,title,photo_url,status,owner_id")
         .eq("id", thread.item_id)
         .single();
+
       if (it) setItem(it as any);
     }
   }
@@ -787,12 +849,14 @@ export default function ThreadPage() {
     });
 
     setTrade(null);
+
     if (thread?.item_id) {
       const { data: it } = await supabase
         .from("items")
         .select("id,title,photo_url,status,owner_id")
         .eq("id", thread.item_id)
         .single();
+
       if (it) setItem(it as any);
     }
   }
@@ -812,6 +876,7 @@ export default function ThreadPage() {
     if (mustConfirmBeforeChat) return;
 
     trackTyping(true);
+
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     typingTimeoutRef.current = setTimeout(() => trackTyping(false), 900);
   }
@@ -822,6 +887,7 @@ export default function ThreadPage() {
     if (!el) return;
 
     const node = el;
+
     function onScroll() {
       const dist = node.scrollHeight - node.scrollTop - node.clientHeight;
       setStickToBottom(dist < 180);
@@ -830,6 +896,11 @@ export default function ThreadPage() {
     node.addEventListener("scroll", onScroll);
     return () => node.removeEventListener("scroll", onScroll);
   }, []);
+
+  // textarea auto-grow
+  useEffect(() => {
+    autoGrowComposer();
+  }, [text]);
 
   // realtime subscription
   useEffect(() => {
@@ -961,7 +1032,9 @@ export default function ThreadPage() {
   // ================= UI DERIVED =================
   const unseenCount = useMemo(() => {
     if (!myLastSeenAt) return 0;
+
     const seenMs = isoToMs(myLastSeenAt);
+
     return messages.filter((m) => {
       if (!m.sender_id) return false;
       if (m.sender_id === userId) return false;
@@ -985,6 +1058,7 @@ export default function ThreadPage() {
   const grouped = useMemo(() => {
     const out: Array<{ kind: "day"; key: string; label: string } | { kind: "msg"; msg: MessageRow }> = [];
     let lastDay = "";
+
     for (const m of messages) {
       const dayKey = new Date(m.created_at).toDateString();
       if (dayKey !== lastDay) {
@@ -993,6 +1067,7 @@ export default function ThreadPage() {
       }
       out.push({ kind: "msg", msg: m });
     }
+
     return out;
   }, [messages]);
 
@@ -1001,14 +1076,18 @@ export default function ThreadPage() {
   const dealTone = dealToneOf(trade);
 
   const canProposeDeal = !trade && !!thread?.item_id && !!thread?.owner_id && !!thread?.requester_id && !mustConfirmBeforeChat;
-  const canConfirmDeal = trade?.state === "proposed" && trade?.proposed_by !== userId && isParticipant(trade, userId);
-  const canCompleteDeal = trade?.state === "confirmed" && isParticipant(trade, userId);
+  const canConfirmDeal = !!trade && trade.state === "proposed" && trade.proposed_by !== userId && isParticipant(trade, userId);
+  const canCompleteDeal = !!trade && trade.state === "confirmed" && isParticipant(trade, userId);
   const canCancelDeal = !!trade && (trade.state === "proposed" || trade.state === "confirmed") && isParticipant(trade, userId);
 
-  // ✅ FIX: reserve space so the message box NEVER gets hidden
-  const COMPOSER_H = 76;
-  const BANNER_H = replyTo || editingId ? 58 : 0;
-  const reservedBottom = bottomNavH + COMPOSER_H + BANNER_H + 18;
+  const selectedMessage = useMemo(
+    () => messages.find((m) => m.id === selectedMessageId) ?? null,
+    [messages, selectedMessageId]
+  );
+
+  const COMPOSER_MIN_H = 74;
+  const BANNER_H = replyTo || editingId ? 62 : 0;
+  const reservedBottom = bottomNavH + COMPOSER_MIN_H + BANNER_H + 22;
 
   if (!threadId) {
     return <div style={{ minHeight: "100vh", padding: 18 }}>Invalid thread.</div>;
@@ -1019,254 +1098,243 @@ export default function ThreadPage() {
   }
 
   return (
-    <div className="wrap" onClick={() => openMenuFor && setOpenMenuFor(null)}>
-      {/* Sticky header */}
-      <header className="top" onClick={(e) => e.stopPropagation()}>
-        <div className="topRow">
-          <button className="backBtn" type="button" onClick={() => router.push("/messages")}>
-            ← Back
+    <div
+      className="page"
+      onClick={() => {
+        setSelectedMessageId(null);
+        if (showDealSheet) setShowDealSheet(false);
+      }}
+    >
+      {/* HEADER */}
+      <header className="header" onClick={(e) => e.stopPropagation()}>
+        <div className="headerRow">
+          <button className="iconGhost" type="button" onClick={() => router.push("/messages")} aria-label="Back">
+            ←
           </button>
 
-          <div className="brand">
-            <div className="brandName">ScholarSwap</div>
-            <div className="brandSub">
-              {otherProfile ? safeName(otherProfile) : "Conversation"}
-              {otherTyping ? <span className="typing"> • typing…</span> : null}
+          <button
+            className="identity"
+            type="button"
+            onClick={() => item?.id && router.push(`/item/${item.id}`)}
+            title={item?.title || "Conversation"}
+          >
+            <div className="avatar">{initialsOf(otherName)}</div>
+
+            <div className="identityText">
+              <div className="identityName">{otherName}</div>
+              <div className="identitySub">
+                {otherTyping
+                  ? "Typing…"
+                  : item?.title
+                    ? item.title
+                    : "Conversation"}
+              </div>
             </div>
-          </div>
+          </button>
 
           <button
-            className="miniBtn"
+            className="iconGhost"
             type="button"
             onClick={() => {
               if (userId) loadReads(userId);
               loadTrade();
             }}
-            title="Refresh"
+            aria-label="Refresh"
           >
             ↻
           </button>
         </div>
 
-        {err && <div className="err">{err}</div>}
-
-        {!loading && item && (
-          <div className="meta">
-            <button className="itemCard" type="button" onClick={() => router.push(`/item/${item.id}`)}>
-              <div className="thumb">
+        {item && (
+          <div className="contextStrip">
+            <button className="listingPill" type="button" onClick={() => router.push(`/item/${item.id}`)}>
+              <div className="listingThumb">
                 {item.photo_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={item.photo_url} alt={item.title} />
                 ) : (
-                  <div className="noThumb">📦</div>
+                  <span>📦</span>
                 )}
               </div>
 
-              <div className="itemInfo">
-                <div className="itemTitle">{item.title}</div>
-                <div className="itemSub">
-                  <span className={`badge ${st.tone}`}>{st.label}</span>
-                  {myInterest?.status ? <span className="dotSep">•</span> : null}
-                  {myInterest?.status ? <span className="muted">Interest: {myInterest.status}</span> : null}
+              <div className="listingMeta">
+                <div className="listingTitle">{item.title}</div>
+                <div className="listingSub">
+                  <span className={`statusChip ${st.tone}`}>{st.label}</span>
+                  {myInterest?.status ? <span className="tinyDot">•</span> : null}
+                  {myInterest?.status ? <span>Interest: {myInterest.status}</span> : null}
                 </div>
               </div>
-
-              <div className="chev">›</div>
             </button>
 
-            <div className="dealBar">
-              <div className="dealLeft">
-                <div className="dealTitle">Deal</div>
-                <div className="dealSub">
-                  <span className={`dealPill ${dealTone}`}>{tradeLoading ? "Loading…" : dealLabel}</span>
-                  {unseenCount > 0 ? <span className="unseen">Unseen {unseenCount}</span> : null}
-                </div>
-              </div>
+            <button className="dealPillBtn" type="button" onClick={() => setShowDealSheet((v) => !v)}>
+              <span className={`dealChip ${dealTone}`}>{tradeLoading ? "Loading…" : dealLabel}</span>
+              {unseenCount > 0 ? <span className="notifDot">{unseenCount}</span> : null}
+            </button>
+          </div>
+        )}
 
-              <div className="dealActions">
-                {canProposeDeal && (
-                  <button className="actionPrimary" type="button" onClick={proposeTrade}>
-                    Propose
-                  </button>
-                )}
-                {canConfirmDeal && (
-                  <button className="actionPrimary" type="button" onClick={confirmTrade}>
-                    Confirm
-                  </button>
-                )}
-                {canCompleteDeal && (
-                  <button className="actionGood" type="button" onClick={markFulfilled}>
-                    Complete
-                  </button>
-                )}
-                {canCancelDeal && (
-                  <button className="actionGhost" type="button" onClick={cancelTrade}>
-                    Cancel
-                  </button>
-                )}
-              </div>
+        {err ? <div className="errorBox">{err}</div> : null}
 
-              {tradeErr && <div className="tradeErr">{tradeErr}</div>}
+        {mustConfirmBeforeChat && (
+          <div className="gateBar">
+            <div className="gateText">
+              Seller accepted your request. Confirm pickup to unlock chat.
             </div>
-
-            {mustConfirmBeforeChat && (
-              <div className="gate">
-                <div className="gateText">
-                  Seller accepted your request. <span className="muted">Confirm pickup to start chatting.</span>
-                </div>
-                <button className="gateBtn" type="button" onClick={confirmPickupFromChat}>
-                  Confirm pickup ✅
-                </button>
-              </div>
-            )}
+            <button className="gateAction" type="button" onClick={confirmPickupFromChat}>
+              Confirm pickup
+            </button>
           </div>
         )}
       </header>
 
-      {/* Messages list */}
-      <main className="main" onClick={(e) => e.stopPropagation()} style={{ paddingBottom: reservedBottom }}>
-        <div ref={listRef} className="list">
+      {/* DEAL SHEET */}
+      {showDealSheet && (
+        <div className="sheetWrap" onClick={(e) => e.stopPropagation()}>
+          <div className="sheet">
+            <div className="sheetHandle" />
+            <div className="sheetTitle">Deal actions</div>
+            <div className="sheetSub">Keep the conversation clean. Manage the workflow here.</div>
+
+            <div className="sheetActions">
+              {canProposeDeal && (
+                <button className="sheetPrimary" type="button" onClick={proposeTrade}>
+                  Propose deal
+                </button>
+              )}
+              {canConfirmDeal && (
+                <button className="sheetPrimary" type="button" onClick={confirmTrade}>
+                  Confirm deal
+                </button>
+              )}
+              {canCompleteDeal && (
+                <button className="sheetGood" type="button" onClick={markFulfilled}>
+                  Mark completed
+                </button>
+              )}
+              {canCancelDeal && (
+                <button className="sheetGhost" type="button" onClick={cancelTrade}>
+                  Cancel deal
+                </button>
+              )}
+            </div>
+
+            {tradeErr ? <div className="sheetErr">{tradeErr}</div> : null}
+          </div>
+        </div>
+      )}
+
+      {/* THREAD */}
+      <main className="thread" style={{ paddingBottom: reservedBottom }} onClick={(e) => e.stopPropagation()}>
+        <div ref={listRef} className="threadInner">
           {hasMore && (
-            <button className="loadMore" onClick={loadOlder} disabled={loadingMore} type="button">
-              {loadingMore ? "Loading…" : "Load older"}
-            </button>
+            <div className="olderWrap">
+              <button className="olderBtn" onClick={loadOlder} disabled={loadingMore} type="button">
+                {loadingMore ? "Loading…" : "Load older messages"}
+              </button>
+            </div>
           )}
 
-          {loading && <div className="loading">Loading…</div>}
+          {loading && <div className="loadingState">Loading conversation…</div>}
 
           {!loading &&
-            grouped.map((x) => {
-              if (x.kind === "day") {
+            grouped.map((entry, index) => {
+              if (entry.kind === "day") {
                 return (
-                  <div key={x.key} className="day">
-                    <span>{x.label}</span>
+                  <div key={entry.key} className="dayDivider">
+                    <span>{entry.label}</span>
                   </div>
                 );
               }
 
-              const m = x.msg;
+              const m = entry.msg;
               const mine = !!userId && m.sender_id === userId;
               const deleted = !!m.deleted_at;
               const isTemp = String(m.id).startsWith("temp-");
               const failed = m.edited_at === "FAILED";
               const time = fmtTime(m.created_at);
               const att = m.attachments || null;
-
               const replyTarget = m.reply_to ? messages.find((z) => z.id === m.reply_to) : null;
 
+              const prevMessage =
+                index > 0 && grouped[index - 1]?.kind === "msg" ? (grouped[index - 1] as { kind: "msg"; msg: MessageRow }).msg : null;
+
+              const groupedWithPrev =
+                !!prevMessage &&
+                prevMessage.sender_id === m.sender_id &&
+                new Date(prevMessage.created_at).toDateString() === new Date(m.created_at).toDateString() &&
+                isoToMs(m.created_at) - isoToMs(prevMessage.created_at) < 5 * 60 * 1000;
+
+              const showAvatar = !mine && !groupedWithPrev;
+              const isSelected = selectedMessageId === m.id;
+
               return (
-                <div key={m.id} className={`row ${mine ? "mine" : "theirs"}`}>
-                  <div className={`bubble ${mine ? "bMine" : "bTheirs"} ${deleted ? "deleted" : ""}`}>
+                <div
+                  key={m.id}
+                  className={`messageRow ${mine ? "mine" : "theirs"} ${groupedWithPrev ? "tight" : ""}`}
+                  id={`msg-${m.id}`}
+                >
+                  {!mine ? (
+                    <div className="avatarSlot">
+                      {showAvatar ? <div className="miniAvatar">{initialsOf(otherName)}</div> : <div className="avatarSpacer" />}
+                    </div>
+                  ) : null}
+
+                  <div className={`messageStack ${mine ? "mine" : "theirs"}`}>
                     {replyTarget && !deleted && (
                       <button
-                        className="replyPeek"
+                        className={`replyCard ${mine ? "mine" : "theirs"}`}
                         type="button"
                         onClick={() => {
                           const el = document.getElementById(`msg-${replyTarget.id}`);
                           el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                          setSelectedMessageId(null);
                         }}
                       >
-                        <div className="replyPeekTop">
-                          Replying to <b>{replyTarget.sender_id === userId ? "you" : safeName(otherProfile)}</b>
+                        <div className="replyLabel">
+                          Replying to {replyTarget.sender_id === userId ? "you" : otherName}
                         </div>
-                        <div className="replyPeekBody">
-                          {replyTarget.deleted_at ? "Message deleted" : (replyTarget.body || "").slice(0, 90)}
+                        <div className="replyPreview">
+                          {replyTarget.deleted_at
+                            ? "Message deleted"
+                            : (replyTarget.body || "").slice(0, 120) || "Attachment"}
                         </div>
                       </button>
                     )}
 
-                    <div id={`msg-${m.id}`} className="body">
+                    <button
+                      className={`bubble ${mine ? "mine" : "theirs"} ${deleted ? "deleted" : ""} ${isSelected ? "selected" : ""}`}
+                      type="button"
+                      onClick={() => setSelectedMessageId((cur) => (cur === m.id ? null : m.id))}
+                    >
                       {deleted ? (
-                        <span className="deletedText">Message deleted</span>
+                        <div className="deletedText">Message deleted</div>
                       ) : (
                         <>
-                          {att?.type === "image" && att?.url ? (
+                          {isImageAttachment(att) ? (
                             // eslint-disable-next-line @next/next/no-img-element
-                            <img className="img" src={att.url} alt="attachment" />
+                            <img className="bubbleImage" src={att.url} alt="attachment" />
                           ) : null}
 
-                          {m.body ? <div className="text">{m.body}</div> : null}
+                          {m.body ? <div className="bubbleText">{m.body}</div> : null}
 
                           {failed ? (
-                            <button className="fail" type="button" onClick={() => failed && isTemp && retrySend(m)}>
+                            <button className="failedBtn" type="button" onClick={() => failed && isTemp && retrySend(m)}>
                               Send failed — tap to retry
                             </button>
                           ) : null}
                         </>
                       )}
-                    </div>
-
-                    <div className="metaRow">
-                      <span className="time">{time}</span>
-                      {m.edited_at && m.edited_at !== "FAILED" && !deleted ? <span className="metaTiny">Edited</span> : null}
-                      {mine && lastMyMessage?.id === m.id && !deleted ? (
-                        <span className="metaTiny">{lastMyMessageSeen ? "Seen" : "Sent"}</span>
-                      ) : null}
-
-                      {!deleted && (
-                        <button
-                          className="menuBtn"
-                          type="button"
-                          onClick={() => setOpenMenuFor(openMenuFor === m.id ? null : m.id)}
-                          title="Actions"
-                        >
-                          ⋯
-                        </button>
-                      )}
-                    </div>
-
-                    {!deleted && (
-                      <div className="actions">
-                        <button className="rx" type="button" onClick={() => toggleReaction(m.id, "👍")}>
-                          👍
-                        </button>
-                        <button className="rx" type="button" onClick={() => toggleReaction(m.id, "❤️")}>
-                          ❤️
-                        </button>
-                        <button className="act" type="button" onClick={() => setReplyTo(m)}>
-                          Reply
-                        </button>
-
-                        {openMenuFor === m.id && (
-                          <div className={`menu ${mine ? "right" : "left"}`} onClick={(e) => e.stopPropagation()}>
-                            <div className="menuGrid">
-                              <button
-                                className="menuItem"
-                                type="button"
-                                onClick={() => {
-                                  navigator.clipboard.writeText(m.body || "");
-                                  setOpenMenuFor(null);
-                                }}
-                              >
-                                Copy
-                              </button>
-                              {mine && !String(m.id).startsWith("temp-") ? (
-                                <>
-                                  <button className="menuItem" type="button" onClick={() => startEdit(m)}>
-                                    Edit
-                                  </button>
-                                  <button className="menuItem danger" type="button" onClick={() => deleteMessage(m.id)}>
-                                    Delete
-                                  </button>
-                                </>
-                              ) : null}
-                              <button className="menuItem" type="button" onClick={() => setOpenMenuFor(null)}>
-                                Close
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
+                    </button>
 
                     {!deleted && Object.keys(reactions[m.id] || {}).length > 0 && (
-                      <div className={`chips ${mine ? "chipsMine" : "chipsTheirs"}`}>
+                      <div className={`reactionRow ${mine ? "mine" : "theirs"}`}>
                         {Object.entries(reactions[m.id] || {}).map(([emoji, count]) => {
                           const active = !!myReactions?.[m.id]?.[emoji];
                           return (
                             <button
                               key={emoji}
-                              className={`chip ${active ? "on" : ""}`}
+                              className={`reactionChip ${active ? "active" : ""}`}
                               type="button"
                               onClick={() => toggleReaction(m.id, emoji)}
                             >
@@ -1276,61 +1344,127 @@ export default function ThreadPage() {
                         })}
                       </div>
                     )}
+
+                    <div className={`metaLine ${mine ? "mine" : "theirs"}`}>
+                      <span>{time}</span>
+                      {m.edited_at && m.edited_at !== "FAILED" && !deleted ? <span>Edited</span> : null}
+                      {mine && lastMyMessage?.id === m.id && !deleted ? (
+                        <span>{lastMyMessageSeen ? "Seen" : "Sent"}</span>
+                      ) : null}
+                    </div>
+
+                    {isSelected && !deleted && (
+                      <div className={`actionTray ${mine ? "mine" : "theirs"}`}>
+                        <div className="quickReactions">
+                          {QUICK_REACTIONS.map((emoji) => (
+                            <button key={emoji} className="quickReactionBtn" type="button" onClick={() => toggleReaction(m.id, emoji)}>
+                              {emoji}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="trayButtons">
+                          <button
+                            className="trayBtn"
+                            type="button"
+                            onClick={() => {
+                              setReplyTo(m);
+                              setSelectedMessageId(null);
+                            }}
+                          >
+                            Reply
+                          </button>
+
+                          <button
+                            className="trayBtn"
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(m.body || "");
+                              setSelectedMessageId(null);
+                            }}
+                          >
+                            Copy
+                          </button>
+
+                          {mine && !String(m.id).startsWith("temp-") ? (
+                            <>
+                              <button className="trayBtn" type="button" onClick={() => startEdit(m)}>
+                                Edit
+                              </button>
+                              <button className="trayBtn danger" type="button" onClick={() => deleteMessage(m.id)}>
+                                Delete
+                              </button>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
             })}
 
+          {otherTyping && !mustConfirmBeforeChat && (
+            <div className="typingRow">
+              <div className="avatarSlot">
+                <div className="miniAvatar">{initialsOf(otherName)}</div>
+              </div>
+              <div className="typingBubble">
+                <span />
+                <span />
+                <span />
+              </div>
+            </div>
+          )}
+
           <div ref={bottomRef} />
         </div>
 
         {!stickToBottom && (
-          <button className="toBottom" type="button" onClick={() => scrollToBottom(true)} aria-label="Scroll to latest">
-            ↓ New
+          <button className="jumpBtn" type="button" onClick={() => scrollToBottom(true)} aria-label="Jump to latest">
+            ↓ Latest
           </button>
         )}
       </main>
 
-      {/* ✅ Reply banner (fixed, above composer) */}
+      {/* REPLY / EDIT BANNER */}
       {replyTo && (
-        <div className="fixedBanner" style={{ bottom: bottomNavH + COMPOSER_H + 10 }}>
-          <div className="bannerInner">
-            <div className="bannerText">
-              Replying to: <b>{replyTo.deleted_at ? "Message deleted" : (replyTo.body || "").slice(0, 110)}</b>
+        <div className="floatingBanner" style={{ bottom: bottomNavH + COMPOSER_MIN_H + 10 }}>
+          <div className="floatingInner">
+            <div className="floatingLabel">Replying to</div>
+            <div className="floatingBody">
+              {replyTo.deleted_at ? "Message deleted" : (replyTo.body || "").slice(0, 140) || "Attachment"}
             </div>
-            <button className="bannerX" type="button" onClick={() => setReplyTo(null)}>
+            <button className="floatingClose" type="button" onClick={() => setReplyTo(null)}>
               ✕
             </button>
           </div>
         </div>
       )}
 
-      {/* ✅ Edit banner (fixed, above composer) */}
       {editingId && (
-        <div className="fixedBanner" style={{ bottom: bottomNavH + COMPOSER_H + 10 }}>
-          <div className="bannerInner">
-            <input className="editInput" value={editingText} onChange={(e) => setEditingText(e.target.value)} />
-            <button className="saveBtn" type="button" onClick={saveEdit} disabled={!editingText.trim()}>
+        <div className="floatingBanner" style={{ bottom: bottomNavH + COMPOSER_MIN_H + 10 }}>
+          <div className="floatingInner editMode">
+            <input className="editField" value={editingText} onChange={(e) => setEditingText(e.target.value)} />
+            <button className="floatingSave" type="button" onClick={saveEdit} disabled={!editingText.trim()}>
               Save
             </button>
-            <button className="ghostBtn" type="button" onClick={() => setEditingId(null)}>
+            <button className="floatingGhost" type="button" onClick={() => setEditingId(null)}>
               Cancel
             </button>
           </div>
         </div>
       )}
 
-      {/* ✅ THE MESSAGE BOX (fixed, always visible) */}
+      {/* COMPOSER */}
       <div
-        className="composerWrap"
-        style={{
-          bottom: bottomNavH,
-        }}
+        className="composerDock"
+        style={{ bottom: bottomNavH }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="composer">
-          <label className={`iconBtn ${uploading || mustConfirmBeforeChat ? "disabled" : ""}`} title="Upload image">
-            📷
+        <div className="composerShell">
+          <label className={`attachBtn ${uploading || mustConfirmBeforeChat ? "disabled" : ""}`} title="Upload image">
+            ＋
             <input
               type="file"
               accept="image/jpeg,image/png,image/webp"
@@ -1340,720 +1474,960 @@ export default function ThreadPage() {
             />
           </label>
 
-          <input
-            className="msgInput"
-            value={text}
-            onChange={(e) => onTextChange(e.target.value)}
-            onFocus={() => userId && markSeenNow(userId)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage({ body: text, attachments: null });
-              }
-            }}
-            disabled={mustConfirmBeforeChat}
-            placeholder={mustConfirmBeforeChat ? "Confirm pickup above to start chatting…" : "Message…"}
-          />
+          <div className="composerBox">
+            <textarea
+              ref={composerRef}
+              className="composerInput"
+              value={text}
+              onChange={(e) => onTextChange(e.target.value)}
+              onFocus={() => userId && markSeenNow(userId)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  sendMessage({ body: text, attachments: null });
+                }
+              }}
+              disabled={mustConfirmBeforeChat}
+              placeholder={mustConfirmBeforeChat ? "Confirm pickup above to start chatting…" : "Message"}
+              rows={1}
+            />
+          </div>
 
           <button
-            className={`sendBtn ${!text.trim() || uploading || mustConfirmBeforeChat ? "disabled" : ""}`}
+            className={`sendFab ${!text.trim() || uploading || mustConfirmBeforeChat ? "disabled" : ""}`}
             type="button"
             onClick={() => sendMessage({ body: text, attachments: null })}
             disabled={!text.trim() || uploading || mustConfirmBeforeChat}
+            aria-label="Send"
           >
-            Send
+            ↑
           </button>
         </div>
       </div>
 
       <style jsx>{`
-        .wrap {
+        .page {
           min-height: 100vh;
-          background: #f6f7f9;
+          background:
+            radial-gradient(circle at top, rgba(16, 185, 129, 0.08), transparent 24%),
+            #f8fafc;
           color: #0f172a;
         }
 
-        /* Sticky header */
-        .top {
+        .header {
           position: sticky;
           top: 0;
           z-index: 20;
-          padding: 12px 12px 10px;
-          background: rgba(246, 247, 249, 0.86);
-          backdrop-filter: blur(10px);
-          border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+          background: rgba(248, 250, 252, 0.92);
+          backdrop-filter: blur(14px);
+          border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+          padding: 10px 12px 12px;
         }
-        .topRow {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
+
+        .headerRow {
+          display: grid;
+          grid-template-columns: 44px 1fr 44px;
           gap: 10px;
+          align-items: center;
         }
-        .backBtn {
-          border: 1px solid rgba(15, 23, 42, 0.14);
-          background: #ffffff;
-          border-radius: 999px;
-          padding: 10px 12px;
-          font-weight: 800;
+
+        .iconGhost {
+          width: 44px;
+          height: 44px;
+          border-radius: 14px;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: rgba(255, 255, 255, 0.9);
+          color: #0f172a;
+          font-weight: 900;
+          font-size: 18px;
           cursor: pointer;
         }
-        .miniBtn {
+
+        .identity {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          min-width: 0;
+          border: none;
+          background: transparent;
+          text-align: left;
+          cursor: pointer;
+          padding: 2px 0;
+        }
+
+        .avatar {
           width: 42px;
           height: 42px;
           border-radius: 999px;
-          border: 1px solid rgba(15, 23, 42, 0.14);
-          background: #ffffff;
-          font-weight: 900;
-          cursor: pointer;
-        }
-        .brand {
-          flex: 1;
-          min-width: 0;
-          text-align: center;
-        }
-        .brandName {
-          font-weight: 900;
-          letter-spacing: -0.02em;
-        }
-        .brandSub {
-          font-size: 12px;
-          color: rgba(15, 23, 42, 0.65);
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-        .typing {
-          color: rgba(22, 163, 74, 0.9);
-          font-weight: 800;
-        }
-        .err {
-          margin-top: 10px;
-          padding: 10px 12px;
-          border-radius: 14px;
-          background: rgba(239, 68, 68, 0.1);
-          border: 1px solid rgba(239, 68, 68, 0.25);
-          color: #991b1b;
-          font-weight: 800;
-          font-size: 13px;
-        }
-
-        .meta {
-          margin-top: 10px;
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-        }
-        .itemCard {
-          width: 100%;
-          display: flex;
-          gap: 12px;
-          align-items: center;
-          padding: 12px;
-          border-radius: 18px;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: #ffffff;
-          cursor: pointer;
-          box-shadow: 0 10px 26px rgba(2, 6, 23, 0.06);
-          text-align: left;
-        }
-        .thumb {
-          width: 48px;
-          height: 48px;
-          border-radius: 14px;
-          overflow: hidden;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: #f3f4f6;
-          flex-shrink: 0;
           display: grid;
           place-items: center;
+          background: linear-gradient(135deg, #10b981, #34d399);
+          color: white;
+          font-size: 13px;
+          font-weight: 950;
+          flex-shrink: 0;
+          box-shadow: 0 8px 20px rgba(16, 185, 129, 0.22);
         }
-        .thumb img {
-          width: 100%;
-          height: 100%;
-          object-fit: cover;
-        }
-        .noThumb {
-          font-size: 18px;
-          opacity: 0.7;
-        }
-        .itemInfo {
+
+        .identityText {
           min-width: 0;
-          flex: 1;
         }
-        .itemTitle {
+
+        .identityName {
+          font-size: 15px;
           font-weight: 950;
           letter-spacing: -0.02em;
+          color: #0f172a;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        .itemSub {
-          margin-top: 4px;
-          font-size: 12px;
-          color: rgba(15, 23, 42, 0.65);
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          flex-wrap: wrap;
-        }
-        .chev {
-          font-size: 22px;
-          opacity: 0.5;
-          font-weight: 900;
-        }
 
-        .badge {
-          display: inline-flex;
-          padding: 6px 10px;
-          border-radius: 999px;
-          font-weight: 900;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          background: rgba(2, 6, 23, 0.03);
-          color: rgba(15, 23, 42, 0.85);
-        }
-        .badge.good {
-          background: rgba(22, 163, 74, 0.1);
-          border-color: rgba(22, 163, 74, 0.25);
-          color: rgba(22, 163, 74, 0.95);
-        }
-        .badge.warn {
-          background: rgba(234, 179, 8, 0.12);
-          border-color: rgba(234, 179, 8, 0.26);
-          color: rgba(161, 98, 7, 0.95);
-        }
-        .badge.done {
-          background: rgba(59, 130, 246, 0.12);
-          border-color: rgba(59, 130, 246, 0.25);
-          color: rgba(29, 78, 216, 0.95);
-        }
-        .badge.neutral {
-          background: rgba(2, 6, 23, 0.03);
-          border-color: rgba(15, 23, 42, 0.12);
-          color: rgba(15, 23, 42, 0.85);
-        }
-
-        .dotSep {
-          opacity: 0.5;
-        }
-        .muted {
-          color: rgba(15, 23, 42, 0.65);
-          font-weight: 800;
-        }
-
-        .dealBar {
-          padding: 12px;
-          border-radius: 18px;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: #ffffff;
-          box-shadow: 0 10px 26px rgba(2, 6, 23, 0.06);
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          flex-wrap: wrap;
-        }
-        .dealLeft {
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        }
-        .dealTitle {
-          font-weight: 950;
-        }
-        .dealSub {
-          display: flex;
-          gap: 10px;
-          align-items: center;
-          flex-wrap: wrap;
-        }
-        .dealPill {
-          display: inline-flex;
-          padding: 6px 10px;
-          border-radius: 999px;
-          font-weight: 900;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          background: rgba(2, 6, 23, 0.03);
-          color: rgba(15, 23, 42, 0.85);
+        .identitySub {
+          margin-top: 1px;
           font-size: 12px;
-        }
-        .dealPill.good {
-          background: rgba(22, 163, 74, 0.1);
-          border-color: rgba(22, 163, 74, 0.25);
-          color: rgba(22, 163, 74, 0.95);
-        }
-        .dealPill.warn {
-          background: rgba(234, 179, 8, 0.12);
-          border-color: rgba(234, 179, 8, 0.26);
-          color: rgba(161, 98, 7, 0.95);
-        }
-        .dealPill.done {
-          background: rgba(59, 130, 246, 0.12);
-          border-color: rgba(59, 130, 246, 0.25);
-          color: rgba(29, 78, 216, 0.95);
-        }
-        .dealPill.neutral {
-          background: rgba(2, 6, 23, 0.03);
-          border-color: rgba(15, 23, 42, 0.12);
-          color: rgba(15, 23, 42, 0.85);
-        }
-        .unseen {
-          font-size: 12px;
-          font-weight: 900;
-          color: rgba(220, 38, 38, 0.9);
-          background: rgba(220, 38, 38, 0.08);
-          border: 1px solid rgba(220, 38, 38, 0.18);
-          padding: 6px 10px;
-          border-radius: 999px;
-        }
-        .dealActions {
-          display: flex;
-          gap: 8px;
-          flex-wrap: wrap;
-        }
-        .actionPrimary {
-          border: 1px solid rgba(22, 163, 74, 0.25);
-          background: rgba(22, 163, 74, 0.12);
-          color: rgba(22, 163, 74, 0.95);
-          padding: 10px 12px;
-          border-radius: 999px;
-          font-weight: 950;
-          cursor: pointer;
-        }
-        .actionGood {
-          border: 1px solid rgba(22, 163, 74, 0.25);
-          background: rgba(22, 163, 74, 0.18);
-          color: rgba(22, 163, 74, 0.98);
-          padding: 10px 12px;
-          border-radius: 999px;
-          font-weight: 950;
-          cursor: pointer;
-        }
-        .actionGhost {
-          border: 1px solid rgba(15, 23, 42, 0.14);
-          background: transparent;
-          color: rgba(15, 23, 42, 0.9);
-          padding: 10px 12px;
-          border-radius: 999px;
-          font-weight: 950;
-          cursor: pointer;
-        }
-        .tradeErr {
-          width: 100%;
-          margin-top: 8px;
-          font-size: 12px;
-          font-weight: 800;
-          color: #991b1b;
-        }
-
-        .gate {
-          padding: 12px;
-          border-radius: 18px;
-          border: 1px solid rgba(22, 163, 74, 0.2);
-          background: rgba(22, 163, 74, 0.08);
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          flex-wrap: wrap;
-        }
-        .gateText {
-          font-weight: 950;
-        }
-        .gateBtn {
-          border: 1px solid rgba(22, 163, 74, 0.25);
-          background: rgba(22, 163, 74, 0.18);
-          color: rgba(22, 163, 74, 0.98);
-          padding: 10px 12px;
-          border-radius: 999px;
-          font-weight: 950;
-          cursor: pointer;
-          white-space: nowrap;
-        }
-
-        /* List */
-        .main {
-          padding: 12px;
-        }
-        .list {
-          min-height: calc(100vh - 240px);
-        }
-        .loadMore {
-          width: 100%;
-          border-radius: 14px;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: #ffffff;
-          padding: 12px;
-          font-weight: 900;
-          cursor: pointer;
-          box-shadow: 0 10px 26px rgba(2, 6, 23, 0.05);
-        }
-        .loading {
-          margin-top: 12px;
-          opacity: 0.7;
-          font-weight: 800;
-        }
-        .day {
-          margin: 14px 0 8px;
-          display: flex;
-          justify-content: center;
-        }
-        .day span {
-          font-size: 12px;
-          font-weight: 950;
-          color: rgba(15, 23, 42, 0.55);
-          background: rgba(2, 6, 23, 0.04);
-          border: 1px solid rgba(15, 23, 42, 0.08);
-          padding: 6px 10px;
-          border-radius: 999px;
-        }
-        .row {
-          display: flex;
-          margin-top: 10px;
-        }
-        .row.mine {
-          justify-content: flex-end;
-        }
-        .row.theirs {
-          justify-content: flex-start;
-        }
-        .bubble {
-          max-width: min(720px, 88vw);
-          border-radius: 18px;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: #ffffff;
-          box-shadow: 0 10px 26px rgba(2, 6, 23, 0.05);
-          overflow: hidden;
-        }
-        .bMine {
-          border-top-right-radius: 10px;
-        }
-        .bTheirs {
-          border-top-left-radius: 10px;
-        }
-        .deleted {
-          opacity: 0.65;
-        }
-        .body {
-          padding: 12px 12px 6px;
-        }
-        .text {
-          white-space: pre-wrap;
-          word-break: break-word;
-          font-weight: 650;
-          color: rgba(15, 23, 42, 0.92);
-        }
-        .deletedText {
-          font-style: italic;
-          color: rgba(15, 23, 42, 0.65);
+          color: #64748b;
           font-weight: 700;
-        }
-        .img {
-          width: 100%;
-          max-height: 360px;
-          object-fit: cover;
-          border-radius: 14px;
-          margin-bottom: 10px;
-        }
-
-        .replyPeek {
-          width: calc(100% - 16px);
-          margin: 10px 8px 0;
-          border-radius: 14px;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: rgba(2, 6, 23, 0.03);
-          padding: 10px 10px;
-          text-align: left;
-          cursor: pointer;
-        }
-        .replyPeekTop {
-          font-size: 12px;
-          font-weight: 900;
-          color: rgba(15, 23, 42, 0.75);
-        }
-        .replyPeekBody {
-          margin-top: 4px;
-          font-size: 12px;
-          font-weight: 750;
-          color: rgba(15, 23, 42, 0.7);
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
 
-        .metaRow {
-          padding: 6px 10px 10px;
-          display: flex;
-          gap: 10px;
-          justify-content: flex-end;
-          align-items: center;
-          color: rgba(15, 23, 42, 0.55);
-          font-size: 12px;
-          font-weight: 800;
-        }
-        .time {
-          margin-right: auto;
-          opacity: 0.75;
-        }
-        .metaTiny {
-          opacity: 0.75;
-        }
-        .menuBtn {
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: rgba(2, 6, 23, 0.03);
-          border-radius: 10px;
-          padding: 4px 8px;
-          cursor: pointer;
-          font-weight: 950;
-        }
-
-        .actions {
-          padding: 0 10px 10px;
-          display: flex;
-          gap: 8px;
-          flex-wrap: wrap;
-          align-items: center;
-        }
-        .rx {
-          border-radius: 999px;
-          padding: 7px 10px;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: rgba(2, 6, 23, 0.03);
-          cursor: pointer;
-          font-weight: 900;
-        }
-        .act {
-          border-radius: 999px;
-          padding: 7px 10px;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: #ffffff;
-          cursor: pointer;
-          font-weight: 950;
-        }
-        .fail {
+        .contextStrip {
           margin-top: 10px;
-          width: 100%;
-          border-radius: 12px;
-          border: 1px solid rgba(220, 38, 38, 0.2);
-          background: rgba(220, 38, 38, 0.08);
-          color: rgba(153, 27, 27, 0.95);
-          padding: 10px;
-          font-weight: 950;
-          cursor: pointer;
+          display: grid;
+          grid-template-columns: 1fr auto;
+          gap: 8px;
+          align-items: center;
         }
 
-        .menu {
-          position: relative;
-        }
-        .menu.left {
-          margin-left: 0;
-        }
-        .menu.right {
-          margin-left: auto;
-        }
-        .menuGrid {
-          position: absolute;
-          right: 0;
-          top: 34px;
-          width: 170px;
-          background: #ffffff;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          border-radius: 14px;
-          box-shadow: 0 18px 40px rgba(2, 6, 23, 0.12);
+        .listingPill {
+          min-width: 0;
+          display: flex;
+          align-items: center;
+          gap: 10px;
           padding: 8px;
-          display: grid;
-          gap: 8px;
-          z-index: 50;
-        }
-        .menuItem {
-          width: 100%;
-          border-radius: 12px;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: rgba(2, 6, 23, 0.03);
-          padding: 10px;
-          font-weight: 900;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          border-radius: 18px;
+          background: rgba(255, 255, 255, 0.9);
           cursor: pointer;
           text-align: left;
         }
-        .menuItem.danger {
-          border-color: rgba(220, 38, 38, 0.22);
-          background: rgba(220, 38, 38, 0.08);
-          color: rgba(153, 27, 27, 0.95);
-        }
 
-        .chips {
-          padding: 0 10px 10px;
-          display: flex;
-          gap: 8px;
-          flex-wrap: wrap;
-        }
-        .chip {
-          border-radius: 999px;
-          padding: 6px 10px;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: rgba(2, 6, 23, 0.03);
-          cursor: pointer;
-          font-weight: 900;
-          font-size: 12px;
-        }
-        .chip.on {
-          border-color: rgba(22, 163, 74, 0.22);
-          background: rgba(22, 163, 74, 0.1);
-          color: rgba(22, 163, 74, 0.95);
-        }
-
-        .toBottom {
-          position: fixed;
-          right: 14px;
-          bottom: calc(${bottomNavH}px + 88px);
-          border-radius: 999px;
-          padding: 10px 12px;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          background: #ffffff;
-          box-shadow: 0 16px 36px rgba(2, 6, 23, 0.12);
-          font-weight: 950;
-          cursor: pointer;
-          z-index: 40;
-        }
-
-        /* ✅ fixed banners */
-        .fixedBanner {
-          position: fixed;
-          left: 12px;
-          right: 12px;
-          z-index: 60;
-        }
-        .bannerInner {
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: rgba(255, 255, 255, 0.92);
-          backdrop-filter: blur(10px);
-          border-radius: 16px;
-          box-shadow: 0 18px 40px rgba(2, 6, 23, 0.12);
-          padding: 10px;
-          display: flex;
-          gap: 10px;
-          align-items: center;
-        }
-        .bannerText {
-          flex: 1;
-          min-width: 0;
-          font-size: 12px;
-          font-weight: 900;
-          color: rgba(15, 23, 42, 0.75);
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-        .bannerX {
+        .listingThumb {
           width: 38px;
           height: 38px;
           border-radius: 12px;
-          border: 1px solid rgba(15, 23, 42, 0.1);
-          background: rgba(2, 6, 23, 0.03);
-          cursor: pointer;
-          font-weight: 950;
+          overflow: hidden;
+          background: #eef2f7;
+          flex-shrink: 0;
+          display: grid;
+          place-items: center;
+          color: #64748b;
+          border: 1px solid rgba(15, 23, 42, 0.08);
         }
-        .editInput {
-          flex: 1;
-          height: 40px;
-          border-radius: 12px;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          background: #ffffff;
-          padding: 0 12px;
-          outline: none;
+
+        .listingThumb img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
+        }
+
+        .listingMeta {
+          min-width: 0;
+        }
+
+        .listingTitle {
+          font-size: 13px;
+          font-weight: 900;
+          color: #0f172a;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .listingSub {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          flex-wrap: wrap;
+          margin-top: 2px;
+          font-size: 11px;
+          color: #64748b;
           font-weight: 800;
         }
-        .saveBtn {
+
+        .tinyDot {
+          opacity: 0.5;
+        }
+
+        .statusChip,
+        .dealChip {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          height: 24px;
+          border-radius: 999px;
+          padding: 0 10px;
+          font-size: 11px;
+          font-weight: 950;
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: rgba(15, 23, 42, 0.04);
+          color: #334155;
+        }
+
+        .statusChip.good,
+        .dealChip.good {
+          background: rgba(16, 185, 129, 0.12);
+          border-color: rgba(16, 185, 129, 0.24);
+          color: #047857;
+        }
+
+        .statusChip.warn,
+        .dealChip.warn {
+          background: rgba(245, 158, 11, 0.12);
+          border-color: rgba(245, 158, 11, 0.24);
+          color: #92400e;
+        }
+
+        .statusChip.done,
+        .dealChip.done {
+          background: rgba(59, 130, 246, 0.12);
+          border-color: rgba(59, 130, 246, 0.24);
+          color: #1d4ed8;
+        }
+
+        .dealPillBtn {
+          position: relative;
+          border: none;
+          background: transparent;
+          padding: 0;
+          cursor: pointer;
+        }
+
+        .notifDot {
+          position: absolute;
+          top: -4px;
+          right: -2px;
+          min-width: 18px;
+          height: 18px;
+          padding: 0 5px;
+          border-radius: 999px;
+          background: #ef4444;
+          color: white;
+          font-size: 10px;
+          font-weight: 950;
+          display: grid;
+          place-items: center;
+          border: 2px solid #f8fafc;
+        }
+
+        .errorBox {
+          margin-top: 10px;
+          border-radius: 16px;
+          padding: 10px 12px;
+          background: rgba(239, 68, 68, 0.08);
+          color: #b91c1c;
+          font-weight: 900;
+          font-size: 13px;
+          border: 1px solid rgba(239, 68, 68, 0.16);
+        }
+
+        .gateBar {
+          margin-top: 10px;
+          border-radius: 18px;
+          padding: 12px;
+          background: rgba(16, 185, 129, 0.1);
+          border: 1px solid rgba(16, 185, 129, 0.16);
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+
+        .gateText {
+          font-size: 13px;
+          font-weight: 900;
+          color: #065f46;
+        }
+
+        .gateAction {
           height: 40px;
-          padding: 0 12px;
-          border-radius: 12px;
-          border: 1px solid rgba(22, 163, 74, 0.22);
-          background: rgba(22, 163, 74, 0.12);
+          padding: 0 14px;
+          border-radius: 999px;
+          border: 1px solid rgba(16, 185, 129, 0.22);
+          background: rgba(16, 185, 129, 0.16);
+          color: #065f46;
+          font-weight: 950;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .sheetWrap {
+          position: fixed;
+          inset: 0;
+          z-index: 40;
+          background: rgba(15, 23, 42, 0.22);
+          display: flex;
+          align-items: flex-end;
+          justify-content: center;
+          padding: 12px;
+        }
+
+        .sheet {
+          width: min(560px, 100%);
+          background: #ffffff;
+          border-radius: 24px 24px 18px 18px;
+          padding: 10px 14px 16px;
+          box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+        }
+
+        .sheetHandle {
+          width: 46px;
+          height: 5px;
+          border-radius: 999px;
+          background: #d1d5db;
+          margin: 0 auto 12px;
+        }
+
+        .sheetTitle {
+          font-size: 17px;
+          font-weight: 950;
+          color: #0f172a;
+        }
+
+        .sheetSub {
+          margin-top: 4px;
+          font-size: 13px;
+          color: #64748b;
+          font-weight: 700;
+        }
+
+        .sheetActions {
+          margin-top: 14px;
+          display: grid;
+          gap: 10px;
+        }
+
+        .sheetPrimary,
+        .sheetGood,
+        .sheetGhost {
+          height: 48px;
+          border-radius: 16px;
           font-weight: 950;
           cursor: pointer;
         }
-        .saveBtn:disabled {
+
+        .sheetPrimary {
+          border: 1px solid rgba(16, 185, 129, 0.24);
+          background: rgba(16, 185, 129, 0.12);
+          color: #047857;
+        }
+
+        .sheetGood {
+          border: 1px solid rgba(34, 197, 94, 0.24);
+          background: rgba(34, 197, 94, 0.12);
+          color: #166534;
+        }
+
+        .sheetGhost {
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: #ffffff;
+          color: #0f172a;
+        }
+
+        .sheetErr {
+          margin-top: 10px;
+          color: #b91c1c;
+          font-size: 13px;
+          font-weight: 900;
+        }
+
+        .thread {
+          padding: 10px 12px 0;
+        }
+
+        .threadInner {
+          max-width: 860px;
+          margin: 0 auto;
+        }
+
+        .olderWrap {
+          display: flex;
+          justify-content: center;
+          margin: 6px 0 10px;
+        }
+
+        .olderBtn {
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: rgba(255, 255, 255, 0.86);
+          height: 38px;
+          padding: 0 14px;
+          border-radius: 999px;
+          font-weight: 900;
+          color: #334155;
+          cursor: pointer;
+        }
+
+        .loadingState {
+          text-align: center;
+          color: #64748b;
+          font-weight: 800;
+          padding: 30px 0;
+        }
+
+        .dayDivider {
+          display: flex;
+          justify-content: center;
+          margin: 18px 0 12px;
+        }
+
+        .dayDivider span {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          height: 28px;
+          padding: 0 12px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.85);
+          border: 1px solid rgba(15, 23, 42, 0.06);
+          color: #64748b;
+          font-size: 12px;
+          font-weight: 900;
+        }
+
+        .messageRow {
+          display: flex;
+          align-items: flex-end;
+          gap: 8px;
+          margin-top: 10px;
+        }
+
+        .messageRow.tight {
+          margin-top: 4px;
+        }
+
+        .messageRow.mine {
+          justify-content: flex-end;
+        }
+
+        .messageRow.theirs {
+          justify-content: flex-start;
+        }
+
+        .avatarSlot {
+          width: 34px;
+          flex-shrink: 0;
+          display: flex;
+          align-items: flex-end;
+          justify-content: center;
+        }
+
+        .miniAvatar,
+        .avatarSpacer {
+          width: 28px;
+          height: 28px;
+          border-radius: 999px;
+        }
+
+        .miniAvatar {
+          display: grid;
+          place-items: center;
+          background: linear-gradient(135deg, #10b981, #34d399);
+          color: white;
+          font-size: 10px;
+          font-weight: 950;
+        }
+
+        .messageStack {
+          display: flex;
+          flex-direction: column;
+          max-width: min(74vw, 560px);
+        }
+
+        .messageStack.mine {
+          align-items: flex-end;
+        }
+
+        .messageStack.theirs {
+          align-items: flex-start;
+        }
+
+        .replyCard {
+          width: fit-content;
+          max-width: 100%;
+          margin-bottom: 4px;
+          padding: 8px 10px;
+          border-radius: 14px;
+          background: rgba(15, 23, 42, 0.04);
+          border: 1px solid rgba(15, 23, 42, 0.06);
+          text-align: left;
+          cursor: pointer;
+        }
+
+        .replyCard.mine {
+          background: rgba(16, 185, 129, 0.1);
+          border-color: rgba(16, 185, 129, 0.12);
+        }
+
+        .replyLabel {
+          font-size: 11px;
+          font-weight: 900;
+          color: #475569;
+        }
+
+        .replyPreview {
+          margin-top: 3px;
+          font-size: 12px;
+          font-weight: 700;
+          color: #334155;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .bubble {
+          border: none;
+          cursor: pointer;
+          text-align: left;
+          max-width: 100%;
+          padding: 12px 14px;
+          border-radius: 22px;
+          transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease;
+        }
+
+        .bubble.selected {
+          box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.18);
+        }
+
+        .bubble.mine {
+          background: linear-gradient(135deg, #10b981, #34d399);
+          color: white;
+          border-bottom-right-radius: 8px;
+        }
+
+        .bubble.theirs {
+          background: #ffffff;
+          color: #0f172a;
+          border-bottom-left-radius: 8px;
+          border: 1px solid rgba(15, 23, 42, 0.06);
+        }
+
+        .bubble.deleted {
+          background: rgba(15, 23, 42, 0.05);
+          color: #64748b;
+        }
+
+        .bubbleImage {
+          width: 100%;
+          max-height: 360px;
+          object-fit: cover;
+          border-radius: 16px;
+          display: block;
+          margin-bottom: 8px;
+        }
+
+        .bubbleText {
+          white-space: pre-wrap;
+          word-break: break-word;
+          font-size: 14px;
+          line-height: 1.38;
+          font-weight: 700;
+        }
+
+        .deletedText {
+          font-size: 14px;
+          font-style: italic;
+          font-weight: 700;
+        }
+
+        .failedBtn {
+          margin-top: 8px;
+          border: none;
+          width: 100%;
+          height: 38px;
+          border-radius: 12px;
+          background: rgba(255, 255, 255, 0.22);
+          color: inherit;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .reactionRow {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+          margin-top: 4px;
+        }
+
+        .reactionRow.mine {
+          justify-content: flex-end;
+        }
+
+        .reactionRow.theirs {
+          justify-content: flex-start;
+        }
+
+        .reactionChip {
+          height: 26px;
+          border-radius: 999px;
+          padding: 0 10px;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: rgba(255, 255, 255, 0.92);
+          font-size: 12px;
+          font-weight: 900;
+          cursor: pointer;
+          color: #0f172a;
+        }
+
+        .reactionChip.active {
+          border-color: rgba(16, 185, 129, 0.22);
+          background: rgba(16, 185, 129, 0.12);
+          color: #047857;
+        }
+
+        .metaLine {
+          margin-top: 4px;
+          display: flex;
+          gap: 8px;
+          font-size: 11px;
+          font-weight: 800;
+          color: #94a3b8;
+          padding: 0 4px;
+        }
+
+        .metaLine.mine {
+          justify-content: flex-end;
+        }
+
+        .metaLine.theirs {
+          justify-content: flex-start;
+        }
+
+        .actionTray {
+          margin-top: 6px;
+          display: grid;
+          gap: 8px;
+          width: 100%;
+        }
+
+        .actionTray.mine {
+          justify-items: end;
+        }
+
+        .actionTray.theirs {
+          justify-items: start;
+        }
+
+        .quickReactions {
+          display: flex;
+          gap: 6px;
+          background: rgba(255, 255, 255, 0.96);
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          border-radius: 999px;
+          padding: 6px;
+          box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+        }
+
+        .quickReactionBtn {
+          width: 34px;
+          height: 34px;
+          border-radius: 999px;
+          border: none;
+          background: transparent;
+          font-size: 18px;
+          cursor: pointer;
+        }
+
+        .trayButtons {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+
+        .trayBtn {
+          height: 34px;
+          padding: 0 12px;
+          border-radius: 999px;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: rgba(255, 255, 255, 0.96);
+          color: #0f172a;
+          font-size: 12px;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .trayBtn.danger {
+          color: #b91c1c;
+          background: rgba(239, 68, 68, 0.06);
+          border-color: rgba(239, 68, 68, 0.12);
+        }
+
+        .typingRow {
+          display: flex;
+          align-items: flex-end;
+          gap: 8px;
+          margin-top: 14px;
+        }
+
+        .typingBubble {
+          height: 42px;
+          min-width: 68px;
+          padding: 0 14px;
+          border-radius: 22px;
+          border-bottom-left-radius: 8px;
+          background: white;
+          border: 1px solid rgba(15, 23, 42, 0.06);
+          display: flex;
+          align-items: center;
+          gap: 5px;
+        }
+
+        .typingBubble span {
+          width: 7px;
+          height: 7px;
+          border-radius: 999px;
+          background: #94a3b8;
+          display: block;
+          animation: blink 1s infinite ease-in-out;
+        }
+
+        .typingBubble span:nth-child(2) {
+          animation-delay: 0.12s;
+        }
+
+        .typingBubble span:nth-child(3) {
+          animation-delay: 0.24s;
+        }
+
+        @keyframes blink {
+          0%, 80%, 100% {
+            transform: scale(0.85);
+            opacity: 0.45;
+          }
+          40% {
+            transform: scale(1);
+            opacity: 1;
+          }
+        }
+
+        .jumpBtn {
+          position: fixed;
+          right: 14px;
+          bottom: calc(${bottomNavH}px + 88px);
+          height: 42px;
+          padding: 0 14px;
+          border-radius: 999px;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: rgba(255, 255, 255, 0.96);
+          box-shadow: 0 16px 36px rgba(15, 23, 42, 0.12);
+          color: #0f172a;
+          font-weight: 950;
+          cursor: pointer;
+          z-index: 25;
+        }
+
+        .floatingBanner {
+          position: fixed;
+          left: 12px;
+          right: 12px;
+          z-index: 45;
+        }
+
+        .floatingInner {
+          max-width: 860px;
+          margin: 0 auto;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          border-radius: 18px;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: rgba(255, 255, 255, 0.96);
+          box-shadow: 0 18px 40px rgba(15, 23, 42, 0.1);
+          padding: 10px 12px;
+          backdrop-filter: blur(10px);
+        }
+
+        .floatingInner.editMode {
+          gap: 8px;
+        }
+
+        .floatingLabel {
+          font-size: 11px;
+          font-weight: 950;
+          color: #10b981;
+          flex-shrink: 0;
+        }
+
+        .floatingBody {
+          min-width: 0;
+          flex: 1;
+          font-size: 12px;
+          font-weight: 800;
+          color: #334155;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .floatingClose,
+        .floatingSave,
+        .floatingGhost {
+          height: 38px;
+          border-radius: 12px;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .floatingClose {
+          width: 38px;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: #ffffff;
+        }
+
+        .floatingSave {
+          padding: 0 12px;
+          border: 1px solid rgba(16, 185, 129, 0.24);
+          background: rgba(16, 185, 129, 0.12);
+          color: #047857;
+        }
+
+        .floatingSave:disabled {
           opacity: 0.5;
           cursor: not-allowed;
         }
-        .ghostBtn {
-          height: 40px;
+
+        .floatingGhost {
           padding: 0 12px;
-          border-radius: 12px;
-          border: 1px solid rgba(15, 23, 42, 0.14);
-          background: transparent;
-          font-weight: 950;
-          cursor: pointer;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: #ffffff;
+          color: #0f172a;
         }
 
-        /* ✅ COMPOSER (THE MESSAGE BOX) */
-        .composerWrap {
-          position: fixed;
-          left: 0;
-          right: 0;
-          z-index: 55;
-          padding: 10px 12px;
-          /* safe-area support */
-          padding-bottom: calc(10px + env(safe-area-inset-bottom));
-          background: rgba(246, 247, 249, 0.9);
-          backdrop-filter: blur(10px);
-          border-top: 1px solid rgba(15, 23, 42, 0.08);
-        }
-        .composer {
-          max-width: 980px;
-          margin: 0 auto;
-          display: flex;
-          gap: 10px;
-          align-items: center;
-        }
-        .iconBtn {
-          width: 46px;
-          height: 46px;
-          border-radius: 14px;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          background: #ffffff;
-          display: grid;
-          place-items: center;
-          cursor: pointer;
-          font-weight: 900;
-        }
-        .iconBtn.disabled {
-          opacity: 0.55;
-          cursor: not-allowed;
-        }
-        .msgInput {
+        .editField {
           flex: 1;
-          height: 46px;
-          border-radius: 14px;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          background: #ffffff;
+          min-width: 0;
+          height: 38px;
+          border-radius: 12px;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: white;
+          color: #0f172a;
           padding: 0 12px;
           outline: none;
           font-weight: 800;
         }
-        .msgInput:disabled {
-          opacity: 0.7;
+
+        .composerDock {
+          position: fixed;
+          left: 0;
+          right: 0;
+          z-index: 44;
+          padding: 10px 12px;
+          padding-bottom: calc(10px + env(safe-area-inset-bottom));
+          background: linear-gradient(to top, rgba(248, 250, 252, 0.98), rgba(248, 250, 252, 0.88));
+          backdrop-filter: blur(12px);
+          border-top: 1px solid rgba(15, 23, 42, 0.06);
         }
-        .sendBtn {
+
+        .composerShell {
+          max-width: 860px;
+          margin: 0 auto;
+          display: grid;
+          grid-template-columns: 46px 1fr 46px;
+          gap: 10px;
+          align-items: end;
+        }
+
+        .attachBtn,
+        .sendFab {
+          width: 46px;
+          min-width: 46px;
           height: 46px;
-          padding: 0 16px;
-          border-radius: 14px;
-          border: 1px solid rgba(22, 163, 74, 0.22);
-          background: rgba(22, 163, 74, 0.12);
-          color: rgba(22, 163, 74, 0.98);
+          border-radius: 999px;
+          display: grid;
+          place-items: center;
+          font-size: 20px;
           font-weight: 950;
+        }
+
+        .attachBtn {
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: white;
+          color: #0f172a;
           cursor: pointer;
         }
-        .sendBtn.disabled {
-          opacity: 0.55;
+
+        .attachBtn.disabled {
+          opacity: 0.5;
           cursor: not-allowed;
         }
 
+        .composerBox {
+          min-height: 46px;
+          border-radius: 24px;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: white;
+          padding: 10px 14px;
+          display: flex;
+          align-items: center;
+          box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+        }
+
+        .composerInput {
+          width: 100%;
+          max-height: 140px;
+          resize: none;
+          overflow: auto;
+          border: none;
+          outline: none;
+          background: transparent;
+          color: #0f172a;
+          font-size: 14px;
+          font-weight: 700;
+          line-height: 1.35;
+        }
+
+        .composerInput::placeholder {
+          color: #94a3b8;
+        }
+
+        .composerInput:disabled {
+          opacity: 0.7;
+        }
+
+        .sendFab {
+          border: none;
+          background: linear-gradient(135deg, #10b981, #34d399);
+          color: white;
+          box-shadow: 0 10px 24px rgba(16, 185, 129, 0.24);
+          cursor: pointer;
+        }
+
+        .sendFab.disabled {
+          opacity: 0.45;
+          cursor: not-allowed;
+          box-shadow: none;
+        }
+
         @media (min-width: 720px) {
-          .main {
+          .header {
             padding-left: 18px;
             padding-right: 18px;
           }
-          .top {
+
+          .thread {
+            padding-left: 18px;
+            padding-right: 18px;
+          }
+
+          .floatingBanner {
+            left: 18px;
+            right: 18px;
+          }
+
+          .composerDock {
             padding-left: 18px;
             padding-right: 18px;
           }
