@@ -25,7 +25,7 @@ type FeedRowFromView = {
   created_at: string;
   photo_url: string | null;
   expires_at: string | null;
-  interest_count: number;
+  interest_count: number | null;
   owner_role?: OwnerRole;
 };
 
@@ -37,16 +37,16 @@ type ItemMeta = {
   request_group: string | null;
   request_timeframe: string | null;
   request_location: string | null;
-  status?: string | null;
+  status: string | null;
 };
 
 type FeedRow = FeedRowFromView & {
-  owner_id?: string | null;
-  is_claimed?: boolean | null;
-  post_type?: PostType;
-  request_group?: string | null;
-  request_timeframe?: string | null;
-  request_location?: string | null;
+  owner_id: string | null;
+  is_claimed: boolean | null;
+  post_type: PostType;
+  request_group: string | null;
+  request_timeframe: string | null;
+  request_location: string | null;
 };
 
 type EventCategory =
@@ -76,47 +76,70 @@ type EventRow = {
   created_at?: string | null;
 };
 
-const NAV_APPROX_HEIGHT = 86; // your bottom nav
+type MyInterestStatus =
+  | "pending"
+  | "reserved"
+  | "accepted"
+  | "completed"
+  | "declined"
+  | "withdrawn"
+  | string;
+
+type AuthState = {
+  userId: string | null;
+  userEmail: string | null;
+  isAshland: boolean;
+  isLoggedIn: boolean;
+};
+
+const NAV_APPROX_HEIGHT = 86;
 const PAGE_BOTTOM_PAD = NAV_APPROX_HEIGHT + 28;
+const ATTEND_TABLE = "event_attendees";
 
-function formatShortDate(d: string) {
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return "";
-  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-function formatTimeRange(startsAtISO: string, endsAtISO: string | null) {
-  const s = new Date(startsAtISO);
-  if (Number.isNaN(s.getTime())) return "";
-  const sameDay = endsAtISO ? new Date(endsAtISO).toDateString() === s.toDateString() : true;
-  const day = s.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-  const st = s.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  if (!endsAtISO) return `${day} • ${st}`;
-  const e = new Date(endsAtISO);
-  if (Number.isNaN(e.getTime())) return `${day} • ${st}`;
-  const et = e.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  if (sameDay) return `${day} • ${st}–${et}`;
-  const endDay = e.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-  return `${day} ${st} → ${endDay} ${et}`;
+function isAshlandEmail(email: string | null) {
+  return !!email && email.toLowerCase().endsWith("@ashland.edu");
 }
 
 function normStatus(s: string | null | undefined) {
-  return (s ?? "available").toLowerCase().trim();
+  return (s ?? "").toLowerCase().trim();
 }
 
-// Feed rule: show everything except completed/claimed.
-// Also: while reserved/in talk, still show AVAILABLE label (waitlist open).
-function statusLabel(status: string | null, postType: PostType) {
-  if ((postType ?? "give") === "request") return "REQUEST";
-  const st = normStatus(status);
-  if (st === "claimed") return "CLAIMED";
+function isExpired(expiresAt: string | null | undefined) {
+  if (!expiresAt) return false;
+  const ts = new Date(expiresAt).getTime();
+  if (Number.isNaN(ts)) return false;
+  return ts <= Date.now();
+}
+
+function isItemClosed(item: FeedRow) {
+  const st = normStatus(item.status);
+  return !!item.is_claimed || st === "claimed" || st === "completed" || st === "expired";
+}
+
+function itemPublicStatus(item: FeedRow): "open" | "in_talks" | "closed" {
+  const st = normStatus(item.status);
+
+  if (isItemClosed(item) || isExpired(item.expires_at)) return "closed";
+  if (st === "reserved" || st === "accepted" || st === "in_talks" || st === "hold") return "in_talks";
+  return "open";
+}
+
+function itemBadgeLabel(item: FeedRow) {
+  const pt = (item.post_type ?? "give") as PostType;
+  if (pt === "request") return "REQUEST";
+
+  const publicState = itemPublicStatus(item);
+  if (publicState === "closed") return "CLOSED";
+  if (publicState === "in_talks") return "IN TALKS";
   return "AVAILABLE";
 }
 
-function statusHint(status: string | null, postType: PostType) {
-  if ((postType ?? "give") === "request") return "";
-  const st = normStatus(status);
-  if (st === "reserved") return "In talks • Waitlist open";
+function itemHint(item: FeedRow) {
+  const pt = (item.post_type ?? "give") as PostType;
+  if (pt === "request") return "";
+
+  const publicState = itemPublicStatus(item);
+  if (publicState === "in_talks") return "Someone is already being considered • Waitlist open";
   return "";
 }
 
@@ -137,47 +160,88 @@ function requestTimeframeLabel(t: string | null | undefined) {
   return "";
 }
 
-/**
- * ✅ Attendance table assumed:
- * table: event_attendees
- * columns: event_id (uuid), user_id (uuid)
- *
- * If yours is named differently, change BOTH places:
- * - loadMyAttendanceMap()
- * - onAttendToggle()
- */
-const ATTEND_TABLE = "event_attendees";
+function myInterestLabel(status: MyInterestStatus | null | undefined) {
+  const st = normStatus(status);
+  if (st === "accepted") return "Accepted";
+  if (st === "reserved") return "Reserved";
+  if (st === "completed") return "Completed";
+  if (st === "declined") return "Declined";
+  if (st === "withdrawn") return "Withdrawn";
+  if (st === "pending") return "Requested";
+  return "Requested";
+}
+
+function isActiveInterestStatus(status: MyInterestStatus | null | undefined) {
+  const st = normStatus(status);
+  return st === "pending" || st === "reserved" || st === "accepted";
+}
+
+function formatShortDate(d: string) {
+  const dt = new Date(d);
+  if (Number.isNaN(dt.getTime())) return "";
+  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function formatTimeRange(startsAtISO: string, endsAtISO: string | null) {
+  const s = new Date(startsAtISO);
+  if (Number.isNaN(s.getTime())) return "";
+
+  const sameDay = endsAtISO ? new Date(endsAtISO).toDateString() === s.toDateString() : true;
+  const day = s.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  const st = s.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+
+  if (!endsAtISO) return `${day} • ${st}`;
+
+  const e = new Date(endsAtISO);
+  if (Number.isNaN(e.getTime())) return `${day} • ${st}`;
+
+  const et = e.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  if (sameDay) return `${day} • ${st}–${et}`;
+
+  const endDay = e.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  return `${day} ${st} → ${endDay} ${et}`;
+}
+
+async function getAuthState(): Promise<AuthState> {
+  const { data } = await supabase.auth.getSession();
+  const session = data.session;
+  const userId = session?.user?.id ?? null;
+  const userEmail = session?.user?.email ?? null;
+  const isAshland = isAshlandEmail(userEmail);
+
+  return {
+    userId,
+    userEmail,
+    isAshland,
+    isLoggedIn: !!userId && !!userEmail && isAshland,
+  };
+}
 
 export default function FeedPage() {
   const router = useRouter();
 
-  // items/requests
-  const [items, setItems] = useState<FeedRow[]>([]);
-  const [loadingItems, setLoadingItems] = useState(true);
-  const [errItems, setErrItems] = useState<string | null>(null);
+  const [auth, setAuth] = useState<AuthState>({
+    userId: null,
+    userEmail: null,
+    isAshland: false,
+    isLoggedIn: false,
+  });
 
-  // events
+  const [items, setItems] = useState<FeedRow[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
+
+  const [loadingItems, setLoadingItems] = useState(true);
   const [loadingEvents, setLoadingEvents] = useState(true);
+  const [errItems, setErrItems] = useState<string | null>(null);
   const [errEvents, setErrEvents] = useState<string | null>(null);
 
-  // auth
-  const [userId, setUserId] = useState<string | null>(null);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-
-  // item interests
-  const [myInterested, setMyInterested] = useState<Record<string, boolean>>({});
-  const [savingId, setSavingId] = useState<string | null>(null);
-
-  // event attendance
+  const [myInterestMap, setMyInterestMap] = useState<Record<string, MyInterestStatus>>({});
   const [myAttending, setMyAttending] = useState<Record<string, boolean>>({});
   const [savingAttendId, setSavingAttendId] = useState<string | null>(null);
 
-  // image modal (items + events)
   const [openImg, setOpenImg] = useState<string | null>(null);
-  const [openTitle, setOpenTitle] = useState<string>("");
+  const [openTitle, setOpenTitle] = useState("");
 
-  // UI state
   const [tab, setTab] = useState<"items" | "requests" | "events">("items");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"newest" | "popular">("newest");
@@ -185,51 +249,14 @@ export default function FeedPage() {
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [filtersOpen, setFiltersOpen] = useState(false);
 
-  // search delight
   const [searchFocused, setSearchFocused] = useState(false);
   const [searchPulse, setSearchPulse] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
-
-  // category row drag-scroll
   const chipRowRef = useRef<HTMLDivElement | null>(null);
-
-  async function syncAuth() {
-    const { data } = await supabase.auth.getSession();
-    const session = data.session;
-    setUserId(session?.user?.id ?? null);
-    setUserEmail(session?.user?.email ?? null);
-  }
-
-  const isAshland = !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-  const isLoggedIn = !!userId && !!userEmail && isAshland;
-
-  async function loadMyInterestMap(uid: string, itemIds: string[]) {
-    if (itemIds.length === 0) return;
-    const { data, error } = await supabase.from("interests").select("item_id").eq("user_id", uid).in("item_id", itemIds);
-    if (error) return;
-
-    const map: Record<string, boolean> = {};
-    for (const r of (data as any[]) || []) map[String(r.item_id)] = true;
-    setMyInterested(map);
-  }
-
-  async function loadMyAttendanceMap(uid: string, eventIds: string[]) {
-    if (eventIds.length === 0) return;
-    const { data, error } = await supabase
-      .from(ATTEND_TABLE)
-      .select("event_id")
-      .eq("user_id", uid)
-      .in("event_id", eventIds);
-
-    if (error) return;
-
-    const map: Record<string, boolean> = {};
-    for (const r of (data as any[]) || []) map[String(r.event_id)] = true;
-    setMyAttending(map);
-  }
 
   async function loadOwnerMeta(itemIds: string[]) {
     if (itemIds.length === 0) return new Map<string, ItemMeta>();
+
     const { data, error } = await supabase
       .from("items")
       .select("id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,status")
@@ -237,180 +264,202 @@ export default function FeedPage() {
 
     if (error) return new Map<string, ItemMeta>();
 
-    const m = new Map<string, ItemMeta>();
-    for (const r of (data as ItemMeta[]) || []) m.set(r.id, r);
-    return m;
+    const map = new Map<string, ItemMeta>();
+    for (const row of ((data as ItemMeta[]) || [])) {
+      map.set(row.id, row);
+    }
+    return map;
   }
 
-  async function loadFeedItems() {
+  async function loadMyInterestStatuses(userId: string, itemIds: string[]) {
+    if (itemIds.length === 0) {
+      setMyInterestMap({});
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("interests")
+      .select("item_id,status")
+      .eq("user_id", userId)
+      .in("item_id", itemIds);
+
+    if (error) {
+      setMyInterestMap({});
+      return;
+    }
+
+    const next: Record<string, MyInterestStatus> = {};
+    for (const row of ((data as Array<{ item_id: string; status: MyInterestStatus }>) || [])) {
+      next[String(row.item_id)] = row.status ?? "pending";
+    }
+    setMyInterestMap(next);
+  }
+
+  async function loadMyAttendanceMap(userId: string, eventIds: string[]) {
+    if (eventIds.length === 0) {
+      setMyAttending({});
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from(ATTEND_TABLE)
+      .select("event_id")
+      .eq("user_id", userId)
+      .in("event_id", eventIds);
+
+    if (error) {
+      setMyAttending({});
+      return;
+    }
+
+    const next: Record<string, boolean> = {};
+    for (const row of ((data as Array<{ event_id: string }>) || [])) {
+      next[String(row.event_id)] = true;
+    }
+    setMyAttending(next);
+  }
+
+  async function loadFeedItems(nextAuth: AuthState) {
     setLoadingItems(true);
     setErrItems(null);
 
-    const { data, error } = await supabase
-      .from("v_feed_items")
-      .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
-      .order("created_at", { ascending: false });
+    try {
+      const { data, error } = await supabase
+        .from("v_feed_items")
+        .select("id,title,description,category,status,created_at,photo_url,expires_at,interest_count,owner_role")
+        .order("created_at", { ascending: false });
 
-    if (error) {
+      if (error) throw new Error(error.message || "Error loading feed.");
+
+      const baseRows = ((data as FeedRowFromView[]) || []).map((row) => ({ ...row }));
+      const ids = baseRows.map((row) => row.id);
+      const meta = await loadOwnerMeta(ids);
+
+      const merged: FeedRow[] = baseRows.map((row) => {
+        const m = meta.get(row.id);
+        return {
+          ...row,
+          owner_id: m?.owner_id ?? null,
+          is_claimed: m?.is_claimed ?? null,
+          post_type: (m?.post_type ?? "give") as PostType,
+          request_group: m?.request_group ?? null,
+          request_timeframe: m?.request_timeframe ?? null,
+          request_location: m?.request_location ?? null,
+          status: m?.status ?? row.status ?? "available",
+          interest_count: row.interest_count ?? 0,
+        };
+      });
+
+      const visible = merged.filter((item) => {
+        if (isItemClosed(item)) return false;
+        if (isExpired(item.expires_at)) return false;
+        return true;
+      });
+
+      setItems(visible);
+
+      const giveIds = visible
+        .filter((item) => (item.post_type ?? "give") === "give")
+        .map((item) => item.id);
+
+      if (nextAuth.isLoggedIn && nextAuth.userId) {
+        await loadMyInterestStatuses(nextAuth.userId, giveIds);
+      } else {
+        setMyInterestMap({});
+      }
+    } catch (e: any) {
       setItems([]);
-      setMyInterested({});
-      setErrItems(error.message || "Error loading feed.");
+      setMyInterestMap({});
+      setErrItems(e?.message || "Error loading feed.");
+    } finally {
       setLoadingItems(false);
-      return;
     }
-
-    const rows = ((data as FeedRowFromView[]) || []).map((x) => ({ ...x })) as FeedRow[];
-    const ids = rows.map((x) => x.id);
-    const meta = await loadOwnerMeta(ids);
-
-    const merged = rows.map((x) => {
-      const m = meta.get(x.id);
-      return {
-        ...x,
-        owner_id: m?.owner_id ?? null,
-        is_claimed: m?.is_claimed ?? null,
-        post_type: (m?.post_type ?? "give") as PostType,
-        request_group: m?.request_group ?? null,
-        request_timeframe: m?.request_timeframe ?? null,
-        request_location: m?.request_location ?? null,
-        status: (m?.status ?? x.status ?? "available") as any,
-      };
-    });
-
-    // Hide ONLY claimed
-    const visible = merged.filter((x) => {
-      const st = normStatus(x.status);
-      const claimed = !!x.is_claimed || st === "claimed";
-      return !claimed;
-    });
-
-    setItems(visible);
-
-    const giveIds = visible.filter((x) => (x.post_type ?? "give") === "give").map((x) => x.id);
-    if (isLoggedIn && userId) await loadMyInterestMap(userId, giveIds);
-    else setMyInterested({});
-
-    setLoadingItems(false);
   }
 
-  async function loadFeedEvents() {
+  async function loadFeedEvents(nextAuth: AuthState) {
     setLoadingEvents(true);
     setErrEvents(null);
 
-    // show events from now onward (and a small buffer into past so "today" isn't lost)
-    const nowMinus6h = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    try {
+      const nowMinus6h = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
 
-    const { data, error } = await supabase
-      .from("events")
-      .select("id,title,description,host_org,category,location,starts_at,ends_at,link_url,photo_url,is_anonymous,created_by,created_at")
-      .gte("starts_at", nowMinus6h)
-      .order("starts_at", { ascending: true });
+      const { data, error } = await supabase
+        .from("events")
+        .select("id,title,description,host_org,category,location,starts_at,ends_at,link_url,photo_url,is_anonymous,created_by,created_at")
+        .gte("starts_at", nowMinus6h)
+        .order("starts_at", { ascending: true });
 
-    if (error) {
+      if (error) throw new Error(error.message || "Error loading events.");
+
+      const rows = (data as EventRow[]) || [];
+      setEvents(rows);
+
+      if (nextAuth.isLoggedIn && nextAuth.userId) {
+        await loadMyAttendanceMap(nextAuth.userId, rows.map((e) => e.id));
+      } else {
+        setMyAttending({});
+      }
+    } catch (e: any) {
       setEvents([]);
       setMyAttending({});
-      setErrEvents(error.message || "Error loading events.");
+      setErrEvents(e?.message || "Error loading events.");
+    } finally {
       setLoadingEvents(false);
-      return;
     }
-
-    const rows = (data as EventRow[]) || [];
-    setEvents(rows);
-
-    if (isLoggedIn && userId) {
-      const ids = rows.map((e) => e.id);
-      await loadMyAttendanceMap(userId, ids);
-    } else {
-      setMyAttending({});
-    }
-
-    setLoadingEvents(false);
   }
 
-  async function onPrimaryAction(item: FeedRow) {
-    if (!isLoggedIn || !userId) {
-      router.push("/me");
-      return;
-    }
-
-    const postType = (item.post_type ?? "give") as PostType;
-
-    if (postType === "request") {
-      router.push(`/item/${item.id}`);
-      return;
-    }
-
-    const isMine = !!item.owner_id && item.owner_id === userId;
-    if (isMine) return;
-
-    const already = myInterested[item.id] === true;
-    setSavingId(item.id);
-
-    if (already) {
-      const { error } = await supabase.from("interests").delete().eq("item_id", item.id).eq("user_id", userId);
-      setSavingId(null);
-      if (error) return alert(error.message);
-
-      setMyInterested((p) => ({ ...p, [item.id]: false }));
-      setItems((prev) =>
-        prev.map((x) => (x.id === item.id ? { ...x, interest_count: Math.max(0, (x.interest_count || 0) - 1) } : x))
-      );
-      return;
-    }
-
-    const { error } = await supabase.from("interests").insert([{ item_id: item.id, user_id: userId }]);
-    setSavingId(null);
-
-    if (error) {
-      const msg = error.message.toLowerCase();
-      if (msg.includes("duplicate") || msg.includes("unique")) {
-        setMyInterested((p) => ({ ...p, [item.id]: true }));
-        return;
-      }
-      return alert(error.message);
-    }
-
-    setMyInterested((p) => ({ ...p, [item.id]: true }));
-    setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, interest_count: (x.interest_count || 0) + 1 } : x)));
+  async function refreshAll(nextAuth?: AuthState) {
+    const resolvedAuth = nextAuth ?? (await getAuthState());
+    setAuth(resolvedAuth);
+    await Promise.all([loadFeedItems(resolvedAuth), loadFeedEvents(resolvedAuth)]);
   }
 
   async function onAttendToggle(ev: EventRow) {
-    if (!isLoggedIn || !userId) {
+    if (!auth.isLoggedIn || !auth.userId) {
       router.push("/me");
       return;
     }
 
-    const isMine = !!ev.created_by && ev.created_by === userId;
+    const isMine = !!ev.created_by && ev.created_by === auth.userId;
     if (isMine) return;
 
     const already = myAttending[ev.id] === true;
     setSavingAttendId(ev.id);
 
-    if (already) {
-      const { error } = await supabase.from(ATTEND_TABLE).delete().eq("event_id", ev.id).eq("user_id", userId);
-      setSavingAttendId(null);
-      if (error) return alert(error.message);
+    try {
+      if (already) {
+        const { error } = await supabase
+          .from(ATTEND_TABLE)
+          .delete()
+          .eq("event_id", ev.id)
+          .eq("user_id", auth.userId);
 
-      setMyAttending((p) => ({ ...p, [ev.id]: false }));
-      return;
-    }
-
-    const { error } = await supabase.from(ATTEND_TABLE).insert([{ event_id: ev.id, user_id: userId }]);
-    setSavingAttendId(null);
-
-    if (error) {
-      const msg = error.message.toLowerCase();
-      if (msg.includes("duplicate") || msg.includes("unique")) {
-        setMyAttending((p) => ({ ...p, [ev.id]: true }));
+        if (error) throw new Error(error.message);
+        setMyAttending((prev) => ({ ...prev, [ev.id]: false }));
         return;
       }
-      return alert(error.message);
-    }
 
-    setMyAttending((p) => ({ ...p, [ev.id]: true }));
+      const { error } = await supabase
+        .from(ATTEND_TABLE)
+        .insert([{ event_id: ev.id, user_id: auth.userId }]);
+
+      if (error) {
+        const msg = error.message.toLowerCase();
+        if (msg.includes("duplicate") || msg.includes("unique")) {
+          setMyAttending((prev) => ({ ...prev, [ev.id]: true }));
+          return;
+        }
+        throw new Error(error.message);
+      }
+
+      setMyAttending((prev) => ({ ...prev, [ev.id]: true }));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSavingAttendId(null);
+    }
   }
 
-  // micro-delight pulse while typing
   useEffect(() => {
     if (!query) return;
     setSearchPulse(true);
@@ -418,27 +467,34 @@ export default function FeedPage() {
     return () => clearTimeout(t);
   }, [query]);
 
-  // when switching tabs, reset tab-specific filters
   useEffect(() => {
     setQuery("");
     setCategoryFilter("all");
     setFiltersOpen(false);
+
+    if (tab === "events") {
+      setSort("newest");
+    }
   }, [tab]);
 
   useEffect(() => {
-    (async () => {
-      await syncAuth();
-      await Promise.all([loadFeedItems(), loadFeedEvents()]);
-    })();
+    refreshAll();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      syncAuth();
-      loadFeedItems();
-      loadFeedEvents();
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
+      const nextAuth: AuthState = {
+        userId: session?.user?.id ?? null,
+        userEmail: session?.user?.email ?? null,
+        isAshland: isAshlandEmail(session?.user?.email ?? null),
+        isLoggedIn:
+          !!session?.user?.id &&
+          !!session?.user?.email &&
+          isAshlandEmail(session?.user?.email ?? null),
+      };
+
+      await refreshAll(nextAuth);
     });
 
     return () => sub.subscription.unsubscribe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -447,74 +503,70 @@ export default function FeedPage() {
         setOpenImg(null);
         setFiltersOpen(false);
       }
+
       if (e.key === "/" && !openImg) {
         e.preventDefault();
         searchRef.current?.focus();
       }
     }
+
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [openImg]);
 
-  // chip-row drag scroll
   useEffect(() => {
-    const root = chipRowRef.current;
-    if (!root) return;
+    const el = chipRowRef.current;
+    if (!el) return;
 
     let down = false;
     let startX = 0;
     let startLeft = 0;
 
-    const getEl = () => chipRowRef.current as HTMLDivElement | null;
-
-    function onPointerDown(e: PointerEvent) {
-      const el = getEl();
-      if (!el) return;
+    const onPointerDown = (e: PointerEvent) => {
       down = true;
       startX = e.clientX;
       startLeft = el.scrollLeft;
-      if ("setPointerCapture" in el) (el as any).setPointerCapture(e.pointerId);
-    }
+      el.setPointerCapture(e.pointerId);
+    };
 
-    function onPointerMove(e: PointerEvent) {
+    const onPointerMove = (e: PointerEvent) => {
       if (!down) return;
-      const el = getEl();
-      if (!el) return;
       const dx = e.clientX - startX;
       el.scrollLeft = startLeft - dx;
-    }
+    };
 
-    function onPointerUp() {
+    const onPointerUp = () => {
       down = false;
-    }
+    };
 
-    root.addEventListener("pointerdown", onPointerDown, { passive: true });
-    root.addEventListener("pointermove", onPointerMove, { passive: true });
-    root.addEventListener("pointerup", onPointerUp, { passive: true });
-    root.addEventListener("pointercancel", onPointerUp, { passive: true });
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("pointermove", onPointerMove);
+    el.addEventListener("pointerup", onPointerUp);
+    el.addEventListener("pointercancel", onPointerUp);
+    el.addEventListener("pointerleave", onPointerUp);
 
     return () => {
-      root.removeEventListener("pointerdown", onPointerDown);
-      root.removeEventListener("pointermove", onPointerMove);
-      root.removeEventListener("pointerup", onPointerUp);
-      root.removeEventListener("pointercancel", onPointerUp);
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("pointermove", onPointerMove);
+      el.removeEventListener("pointerup", onPointerUp);
+      el.removeEventListener("pointercancel", onPointerUp);
+      el.removeEventListener("pointerleave", onPointerUp);
     };
   }, []);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
-    for (const x of items) {
-      if ((x.post_type ?? "give") !== "give") continue;
-      const c = (x.category ?? "").trim();
+    for (const item of items) {
+      if ((item.post_type ?? "give") !== "give") continue;
+      const c = (item.category ?? "").trim();
       if (c) set.add(c);
     }
     return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
   }, [items]);
 
-  // items/request list filtered by tab
   const tabbedItems = useMemo(() => {
-    return items.filter((x) => {
-      const pt = (x.post_type ?? "give") as PostType;
+    return items.filter((item) => {
+      const pt = (item.post_type ?? "give") as PostType;
       if (tab === "items") return pt !== "request";
       if (tab === "requests") return pt === "request";
       return false;
@@ -524,32 +576,30 @@ export default function FeedPage() {
   const filteredItems = useMemo(() => {
     const q = query.trim().toLowerCase();
 
-    let list = tabbedItems.filter((x) => {
-      const pt = (x.post_type ?? "give") as PostType;
+    let list = tabbedItems.filter((item) => {
+      const pt = (item.post_type ?? "give") as PostType;
 
       if (roleFilter !== "all") {
-        const r = (x.owner_role ?? null) as OwnerRole;
-        if (!r) return false;
-        if (r !== roleFilter) return false;
+        const r = (item.owner_role ?? null) as OwnerRole;
+        if (!r || r !== roleFilter) return false;
       }
 
-      // category filter ONLY applies to items tab
       if (tab === "items" && pt !== "request") {
-        if (categoryFilter !== "all" && (x.category ?? "") !== categoryFilter) return false;
+        if (categoryFilter !== "all" && (item.category ?? "") !== categoryFilter) return false;
       }
 
       if (q) {
-        const blob =
-          [
-            x.title,
-            x.description ?? "",
-            x.category ?? "",
-            x.request_group ?? "",
-            x.request_timeframe ?? "",
-            x.request_location ?? "",
-          ]
-            .join(" ")
-            .toLowerCase() || "";
+        const blob = [
+          item.title,
+          item.description ?? "",
+          item.category ?? "",
+          item.request_group ?? "",
+          item.request_timeframe ?? "",
+          item.request_location ?? "",
+        ]
+          .join(" ")
+          .toLowerCase();
+
         if (!blob.includes(q)) return false;
       }
 
@@ -559,31 +609,41 @@ export default function FeedPage() {
     if (sort === "popular") {
       list = [...list].sort((a, b) => (b.interest_count || 0) - (a.interest_count || 0));
     } else {
-      list = [...list].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      list = [...list].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
     }
 
     return list;
   }, [tabbedItems, query, sort, roleFilter, categoryFilter, tab]);
 
-  // events filtered
   const filteredEvents = useMemo(() => {
     if (tab !== "events") return [];
+
     const q = query.trim().toLowerCase();
     let list = [...events];
 
     if (q) {
       list = list.filter((e) => {
-        const blob = [e.title, e.description, e.host_org, e.category ?? "", e.location, e.link_url ?? ""]
+        const blob = [
+          e.title,
+          e.description,
+          e.host_org,
+          e.category ?? "",
+          e.location,
+          e.link_url ?? "",
+        ]
           .join(" ")
           .toLowerCase();
+
         return blob.includes(q);
       });
     }
 
-    // sort for events: "newest" means soonest? We'll interpret:
-    // - newest: soonest upcoming first (chronological)
-    // - popular: keep soonest as well (until you add counts)
-    list = list.sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
+    list = list.sort(
+      (a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime()
+    );
+
     return list;
   }, [tab, events, query]);
 
@@ -593,9 +653,7 @@ export default function FeedPage() {
 
   return (
     <div className={`${brandFont.className} page`}>
-      {/* HEADER */}
       <header className="topbar">
-        {/* Row 1 */}
         <div className="row brandRow">
           <button className="iconBtn" onClick={() => router.push("/feed")} aria-label="Home" type="button">
             <Image src="/scholarswap-logo.png" alt="ScholarSwap" width={34} height={34} priority className="logoImg" />
@@ -618,24 +676,15 @@ export default function FeedPage() {
           </button>
         </div>
 
-        {/* Row 2 */}
         <div className="row tabsRow">
           <div className="seg3" role="tablist" aria-label="Feed tabs">
             <button className={`segBtn ${tab === "items" ? "active" : ""}`} onClick={() => setTab("items")} type="button">
               Items
             </button>
-            <button
-              className={`segBtn ${tab === "requests" ? "active" : ""}`}
-              onClick={() => setTab("requests")}
-              type="button"
-            >
+            <button className={`segBtn ${tab === "requests" ? "active" : ""}`} onClick={() => setTab("requests")} type="button">
               Requests
             </button>
-            <button
-              className={`segBtn ${tab === "events" ? "active" : ""}`}
-              onClick={() => setTab("events")}
-              type="button"
-            >
+            <button className={`segBtn ${tab === "events" ? "active" : ""}`} onClick={() => setTab("events")} type="button">
               Events
             </button>
             <span
@@ -655,7 +704,6 @@ export default function FeedPage() {
           </button>
         </div>
 
-        {/* Row 3 */}
         <div className={`row searchWrap ${searchFocused ? "searchFocused" : ""} ${searchPulse ? "searchPulse" : ""}`}>
           <div className="searchRow">
             <button
@@ -674,7 +722,13 @@ export default function FeedPage() {
               onChange={(e) => setQuery(e.target.value)}
               onFocus={() => setSearchFocused(true)}
               onBlur={() => setSearchFocused(false)}
-              placeholder={tab === "events" ? "Search events, hosts, locations…" : tab === "items" ? "Search items, categories…" : "Search requests, locations…"}
+              placeholder={
+                tab === "events"
+                  ? "Search events, hosts, locations…"
+                  : tab === "items"
+                  ? "Search items, categories…"
+                  : "Search requests, locations…"
+              }
               autoCorrect="off"
               autoCapitalize="none"
               spellCheck={false}
@@ -696,8 +750,14 @@ export default function FeedPage() {
               {categories.map((c) => {
                 const active = categoryFilter === c;
                 const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
+
                 return (
-                  <button key={c} className={`chip ${active ? "chipOn" : ""}`} onClick={() => setCategoryFilter(c)} type="button">
+                  <button
+                    key={c}
+                    className={`chip ${active ? "chipOn" : ""}`}
+                    onClick={() => setCategoryFilter(c)}
+                    type="button"
+                  >
                     {label}
                   </button>
                 );
@@ -719,7 +779,6 @@ export default function FeedPage() {
         {loading && <div className="loading">Loading…</div>}
       </header>
 
-      {/* FILTER SHEET */}
       {filtersOpen && (
         <div className="sheetBackdrop" onClick={() => setFiltersOpen(false)} role="dialog" aria-modal="true">
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -737,13 +796,15 @@ export default function FeedPage() {
                   <button className={`tog ${sort === "newest" ? "togOn" : ""}`} onClick={() => setSort("newest")} type="button">
                     ↕️ {tab === "events" ? "Soonest" : "Newest"}
                   </button>
-                  <button className={`tog ${sort === "popular" ? "togOn" : ""}`} onClick={() => setSort("popular")} type="button">
-                    🔥 Popular
-                  </button>
+
+                  {tab !== "events" && (
+                    <button className={`tog ${sort === "popular" ? "togOn" : ""}`} onClick={() => setSort("popular")} type="button">
+                      🔥 Popular
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {/* Lister filter applies to items/requests only (events don’t have owner_role in this page) */}
               {tab !== "events" && (
                 <div className="sheetBlock">
                   <div className="sheetLabel">Lister</div>
@@ -751,18 +812,10 @@ export default function FeedPage() {
                     <button className={`tog ${roleFilter === "all" ? "togOn" : ""}`} onClick={() => setRoleFilter("all")} type="button">
                       👤 All
                     </button>
-                    <button
-                      className={`tog ${roleFilter === "student" ? "togOn" : ""}`}
-                      onClick={() => setRoleFilter("student")}
-                      type="button"
-                    >
+                    <button className={`tog ${roleFilter === "student" ? "togOn" : ""}`} onClick={() => setRoleFilter("student")} type="button">
                       🎓 Student
                     </button>
-                    <button
-                      className={`tog ${roleFilter === "faculty" ? "togOn" : ""}`}
-                      onClick={() => setRoleFilter("faculty")}
-                      type="button"
-                    >
+                    <button className={`tog ${roleFilter === "faculty" ? "togOn" : ""}`} onClick={() => setRoleFilter("faculty")} type="button">
                       🧑‍🏫 Faculty
                     </button>
                   </div>
@@ -791,13 +844,11 @@ export default function FeedPage() {
         </div>
       )}
 
-      {/* GRID */}
       <main className="main">
         <div className="grid">
-          {/* EVENTS */}
           {tab === "events" &&
             filteredEvents.map((ev) => {
-              const isMine = !!userId && !!ev.created_by && ev.created_by === userId;
+              const isMine = !!auth.userId && !!ev.created_by && ev.created_by === auth.userId;
               const attending = myAttending[ev.id] === true;
 
               return (
@@ -839,13 +890,7 @@ export default function FeedPage() {
                     <div className="desc clamp2">{ev.description}</div>
 
                     <div className="footerRow">
-                      {ev.link_url ? (
-                        <span className="small">
-                          Link included
-                        </span>
-                      ) : (
-                        <span className="small">No link</span>
-                      )}
+                      <span className="small">{ev.link_url ? "Link included" : "No link"}</span>
                       <span className="small">Starts: {formatShortDate(ev.starts_at)}</span>
                     </div>
 
@@ -864,7 +909,7 @@ export default function FeedPage() {
                           ? "Yours"
                           : savingAttendId === ev.id
                           ? "Saving…"
-                          : isLoggedIn
+                          : auth.isLoggedIn
                           ? attending
                             ? "Attending"
                             : "Attend"
@@ -876,12 +921,13 @@ export default function FeedPage() {
               );
             })}
 
-          {/* ITEMS + REQUESTS */}
           {tab !== "events" &&
             filteredItems.map((item) => {
               const postType = (item.post_type ?? "give") as PostType;
-              const isMine = !!userId && !!item.owner_id && item.owner_id === userId;
-              const interested = myInterested[item.id] === true;
+              const isMine = !!auth.userId && !!item.owner_id && item.owner_id === auth.userId;
+              const myStatus = myInterestMap[item.id];
+              const mineActive = isActiveInterestStatus(myStatus);
+              const publicState = itemPublicStatus(item);
 
               const group = requestGroupLabel(item.request_group);
               const tf = requestTimeframeLabel(item.request_timeframe);
@@ -891,7 +937,7 @@ export default function FeedPage() {
                 <article key={item.id} className={`card ${postType === "request" ? "cardRequest" : ""}`}>
                   {postType === "request" ? (
                     <div className="reqHero">
-                      <div className="badge badgeRequest">{statusLabel(item.status, postType)}</div>
+                      <div className="badge badgeRequest">{itemBadgeLabel(item)}</div>
                       <div className="reqMeta">
                         {group}
                         {tf ? ` • ${tf}` : ""}
@@ -901,7 +947,9 @@ export default function FeedPage() {
                     </div>
                   ) : (
                     <div className="media">
-                      <div className="badge badgeItem">{statusLabel(item.status, postType)}</div>
+                      <div className={`badge ${publicState === "in_talks" ? "badgeTalks" : "badgeItem"}`}>
+                        {itemBadgeLabel(item)}
+                      </div>
 
                       {item.photo_url ? (
                         <button
@@ -937,8 +985,8 @@ export default function FeedPage() {
 
                     {postType !== "request" ? <div className="title">{item.title}</div> : null}
 
-                    {postType !== "request" && statusHint(item.status, postType) ? (
-                      <div className="hint">{statusHint(item.status, postType)}</div>
+                    {postType !== "request" && itemHint(item) ? (
+                      <div className="hint">{itemHint(item)}</div>
                     ) : null}
 
                     <div className="desc clamp2">{item.description || "—"}</div>
@@ -952,7 +1000,6 @@ export default function FeedPage() {
                       {item.expires_at ? <span className="small">Ends: {formatShortDate(item.expires_at)}</span> : null}
                     </div>
 
-                    {/* ✅ BOTH BUTTONS: View + Primary */}
                     <div className="actions">
                       <button className="btn btnGhost" onClick={() => router.push(`/item/${item.id}`)} type="button">
                         View
@@ -960,23 +1007,23 @@ export default function FeedPage() {
 
                       <button
                         className={`btn btnPrimary ${isMine ? "btnDisabled" : ""} ${
-                          postType !== "request" && interested ? "btnOn" : ""
+                          postType !== "request" && mineActive ? "btnOn" : ""
                         }`}
-                        onClick={() => onPrimaryAction(item)}
-                        disabled={savingId === item.id || isMine}
+                        onClick={() => router.push(auth.isLoggedIn ? `/item/${item.id}` : "/me")}
+                        disabled={isMine}
                         type="button"
                       >
                         {isMine
                           ? "Yours"
-                          : savingId === item.id
-                          ? "Saving…"
                           : postType === "request"
-                          ? isLoggedIn
+                          ? auth.isLoggedIn
                             ? "Offer help"
                             : "Offer (login)"
-                          : isLoggedIn
-                          ? interested
-                            ? "Requested"
+                          : auth.isLoggedIn
+                          ? mineActive
+                            ? myInterestLabel(myStatus)
+                            : publicState === "in_talks"
+                            ? "Join waitlist"
                             : "Request"
                           : "Request (login)"}
                       </button>
@@ -988,7 +1035,6 @@ export default function FeedPage() {
         </div>
       </main>
 
-      {/* IMAGE MODAL */}
       {openImg && (
         <div className="modal" onClick={() => setOpenImg(null)} role="dialog" aria-modal="true">
           <div className="modalInner" onClick={(e) => e.stopPropagation()}>
@@ -1011,7 +1057,6 @@ export default function FeedPage() {
           color: #0f172a;
         }
 
-        /* ====== TOPBAR ====== */
         .topbar {
           position: sticky;
           top: 0;
@@ -1347,7 +1392,6 @@ export default function FeedPage() {
           font-weight: 800;
         }
 
-        /* ====== FILTER SHEET ====== */
         .sheetBackdrop {
           position: fixed;
           inset: 0;
@@ -1464,7 +1508,6 @@ export default function FeedPage() {
           box-shadow: 0 14px 30px rgba(16, 185, 129, 0.2);
         }
 
-        /* ====== GRID ====== */
         .main {
           padding: 14px 12px ${PAGE_BOTTOM_PAD}px;
         }
@@ -1565,6 +1608,12 @@ export default function FeedPage() {
           color: #065f46;
         }
 
+        .badgeTalks {
+          border-color: rgba(59, 130, 246, 0.25);
+          background: rgba(59, 130, 246, 0.12);
+          color: #1d4ed8;
+        }
+
         .badgeEvent {
           border-color: rgba(59, 130, 246, 0.25);
           background: rgba(59, 130, 246, 0.12);
@@ -1637,6 +1686,10 @@ export default function FeedPage() {
           font-size: 12px;
         }
 
+        .small {
+          font-size: 12px;
+        }
+
         .actions {
           margin-top: 12px;
           display: grid;
@@ -1694,7 +1747,6 @@ export default function FeedPage() {
           overflow: hidden;
         }
 
-        /* ====== MODAL ====== */
         .modal {
           position: fixed;
           inset: 0;
