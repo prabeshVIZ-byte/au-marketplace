@@ -54,7 +54,6 @@ type EventCategory =
   | "other";
 
 type ExpireChoice = "7" | "14" | "30" | "never" | "urgent24";
-type StepIndex = 0 | 1 | 2;
 
 type DraftState = {
   mode: Mode | null;
@@ -81,8 +80,6 @@ type DraftState = {
   hideName: boolean;
   expireChoice: ExpireChoice;
 
-  currentStep: StepIndex;
-
   itemFileName: string | null;
   eventFileName: string | null;
 };
@@ -97,11 +94,12 @@ const EVENT_FLYERS_BUCKET = "event-flyers";
 const MAX_ITEM_PHOTO_MB = 6;
 const MAX_EVENT_FLYER_MB = 8;
 
-const DRAFT_KEY = "scholarswap_create_draft_v2";
+const DRAFT_KEY = "scholarswap_create_draft_modern_v1";
 const SUCCESS_ROUTE = "/feed";
-const WIZARD_STICKY_HEIGHT = 86;
+const STICKY_HEIGHT = 92;
 
-// ---------- utils ----------
+/* ------------------------------ utils ------------------------------ */
+
 function isAllowedImage(file: File) {
   return ["image/jpeg", "image/png", "image/webp"].includes(file.type);
 }
@@ -190,6 +188,25 @@ function requestTimeframeLabel(t: RequestTimeframe) {
   return "";
 }
 
+function giveCategoryLabel(v: GiveCategory) {
+  return v
+    .split(" ")
+    .map((x) => x.charAt(0).toUpperCase() + x.slice(1))
+    .join(" ");
+}
+
+function eventCategoryLabel(v: EventCategory) {
+  return v.charAt(0).toUpperCase() + v.slice(1);
+}
+
+function expireChoiceLabel(v: ExpireChoice) {
+  if (v === "urgent24") return "24h";
+  if (v === "7") return "7d";
+  if (v === "14") return "14d";
+  if (v === "30") return "30d";
+  return "Until canceled";
+}
+
 function getDefaultDraft(): DraftState {
   return {
     mode: null,
@@ -216,26 +233,24 @@ function getDefaultDraft(): DraftState {
     hideName: false,
     expireChoice: "7",
 
-    currentStep: 0,
-
     itemFileName: null,
     eventFileName: null,
   };
 }
 
-function getSteps(mode: Mode | null) {
-  if (!mode) return ["Choose", "Details", "Review"];
-  if (mode === "give") return ["Details", "Photo & options", "Review"];
-  if (mode === "request") return ["Details", "Location & options", "Review"];
-  return ["Details", "Time & flyer", "Review"];
-}
+/* ------------------------------ main ------------------------------ */
 
-// ---------- main ----------
 export default function CreatePage() {
   const router = useRouter();
 
   const itemFileInputRef = useRef<HTMLInputElement | null>(null);
   const eventFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const topComposerRef = useRef<HTMLDivElement | null>(null);
+  const mediaSectionRef = useRef<HTMLDivElement | null>(null);
+  const titleSectionRef = useRef<HTMLDivElement | null>(null);
+  const detailsSectionRef = useRef<HTMLDivElement | null>(null);
+  const optionsSectionRef = useRef<HTMLDivElement | null>(null);
 
   const [authLoading, setAuthLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(true);
@@ -255,9 +270,7 @@ export default function CreatePage() {
 
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
-
-  const steps = useMemo(() => getSteps(draft.mode), [draft.mode]);
-  const currentStep = draft.currentStep;
+  const [fieldError, setFieldError] = useState<string | null>(null);
 
   const cleanTitle = useMemo(() => draft.title.trim(), [draft.title]);
   const cleanDesc = useMemo(() => draft.description.trim(), [draft.description]);
@@ -302,13 +315,9 @@ export default function CreatePage() {
         setHydratedDraft(true);
         return;
       }
+
       const parsed = JSON.parse(raw) as Partial<DraftState>;
       const merged = { ...getDefaultDraft(), ...parsed };
-
-      if (merged.currentStep !== 0 && merged.currentStep !== 1 && merged.currentStep !== 2) {
-        merged.currentStep = 0;
-      }
-
       setDraft(merged as DraftState);
     } catch {
       // ignore broken draft
@@ -322,7 +331,7 @@ export default function CreatePage() {
     try {
       localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
     } catch {
-      // ignore localStorage failure
+      // ignore
     }
   }, [draft, hydratedDraft]);
 
@@ -416,13 +425,16 @@ export default function CreatePage() {
 
   function patchDraft<K extends keyof DraftState>(key: K, value: DraftState[K]) {
     setDraft((prev) => ({ ...prev, [key]: value }));
+    setMsg(null);
+    setFieldError(null);
   }
 
-  function resetWizard() {
+  function resetComposer() {
     setDraft(getDefaultDraft());
     setItemFile(null);
     setEventFile(null);
     setMsg(null);
+    setFieldError(null);
     try {
       localStorage.removeItem(DRAFT_KEY);
     } catch {
@@ -430,8 +442,24 @@ export default function CreatePage() {
     }
   }
 
+  function selectMode(mode: Mode) {
+    setMsg(null);
+    setFieldError(null);
+    setItemFile(null);
+    setEventFile(null);
+    setDraft({
+      ...getDefaultDraft(),
+      mode,
+    });
+
+    requestAnimationFrame(() => {
+      topComposerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
   function pickItemFile(file: File | null) {
     setMsg(null);
+    setFieldError(null);
 
     if (!file) {
       setItemFile(null);
@@ -441,11 +469,15 @@ export default function CreatePage() {
 
     if (!isAllowedImage(file)) {
       setMsg("Upload JPG, PNG, or WEBP.");
+      setFieldError("media");
+      mediaSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
     if (file.size > MAX_ITEM_PHOTO_MB * 1024 * 1024) {
       setMsg(`Image is too large. Max ${MAX_ITEM_PHOTO_MB}MB.`);
+      setFieldError("media");
+      mediaSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
@@ -455,6 +487,7 @@ export default function CreatePage() {
 
   function pickEventFile(file: File | null) {
     setMsg(null);
+    setFieldError(null);
 
     if (!file) {
       setEventFile(null);
@@ -464,11 +497,15 @@ export default function CreatePage() {
 
     if (!isAllowedImage(file)) {
       setMsg("Upload JPG, PNG, or WEBP.");
+      setFieldError("media");
+      mediaSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
     if (file.size > MAX_EVENT_FLYER_MB * 1024 * 1024) {
       setMsg(`Image is too large. Max ${MAX_EVENT_FLYER_MB}MB.`);
+      setFieldError("media");
+      mediaSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
@@ -476,128 +513,119 @@ export default function CreatePage() {
     patchDraft("eventFileName", file.name);
   }
 
-  function selectMode(mode: Mode) {
-    setMsg(null);
-    setDraft((prev) => ({
-      ...getDefaultDraft(),
-      mode,
-      currentStep: 0,
-    }));
-    setItemFile(null);
-    setEventFile(null);
-  }
+  const hasRequiredMedia =
+    draft.mode === "request" ? true : draft.mode === "give" ? !!itemFile : draft.mode === "event" ? !!eventFile : false;
 
-  function getStepError(step: StepIndex): string | null {
-    if (!draft.mode) return "Choose Give, Request, or Event.";
-    if (!isLoggedIn) return "Log in with your @ashland.edu email to post.";
-    if (!profileComplete) return "Complete your profile first.";
+  const hasBasicTitle = cleanTitle.length >= 3;
+  const hasBasicDescription = cleanDesc.length >= 3;
+
+  const detailsReady =
+    draft.mode === "give"
+      ? hasBasicTitle && hasBasicDescription
+      : draft.mode === "request"
+      ? hasBasicTitle && hasBasicDescription
+      : draft.mode === "event"
+      ? hasBasicTitle && hasBasicDescription && draft.hostOrg.trim().length > 0
+      : false;
+
+  const secondaryReady =
+    draft.mode === "give"
+      ? !!draft.giveCategory && !!draft.pickupLocation
+      : draft.mode === "request"
+      ? !!draft.requestGroup && !!draft.requestTimeframe
+      : draft.mode === "event"
+      ? !!draft.eventCategory &&
+        !!draft.eventLocation.trim() &&
+        !!draft.eventDate &&
+        !!draft.eventStartTime &&
+        !!eventStartIso &&
+        isValidHttpUrlMaybeEmpty(draft.eventLink) &&
+        !(draft.eventEndTime && eventEndIso && new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime())
+      : false;
+
+  const composerProgress = useMemo(() => {
+    if (!draft.mode) return 0;
+    let done = 0;
+    if (hasRequiredMedia) done += 1;
+    if (detailsReady) done += 1;
+    if (secondaryReady) done += 1;
+    return done / 3;
+  }, [draft.mode, hasRequiredMedia, detailsReady, secondaryReady]);
+
+  const eventTimeSummary = eventStartIso
+    ? `${formatLongDateTime(eventStartIso)}${eventEndIso ? ` → ${formatLongDateTime(eventEndIso)}` : ""}`
+    : "—";
+
+  function validateBeforeSubmit(): { message: string; section: "media" | "title" | "details" | "options" | "account" } | null {
+    if (!draft.mode) return { message: "Choose Give, Request, or Event first.", section: "account" };
+    if (!isLoggedIn) return { message: "Log in with your @ashland.edu email to post.", section: "account" };
+    if (!profileComplete) return { message: "Complete your profile first.", section: "account" };
 
     if (draft.mode === "give") {
-      if (step === 0) {
-        if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
-        if (cleanDesc.length < 3) return "Description is required.";
-        if (!draft.giveCategory) return "Choose a category.";
-        if (!draft.pickupLocation) return "Choose a pickup location.";
-      }
-
-      if (step === 1) {
-        if (!itemFile) return "Please upload an image.";
-        if (!isAllowedImage(itemFile)) return "Image must be JPG, PNG, or WEBP.";
-      }
-
+      if (!itemFile) return { message: "Add a photo to continue.", section: "media" };
+      if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "title" };
+      if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
+      if (!draft.giveCategory) return { message: "Choose a category.", section: "details" };
+      if (!draft.pickupLocation) return { message: "Choose a pickup location.", section: "details" };
       return null;
     }
 
     if (draft.mode === "request") {
-      if (step === 0) {
-        if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
-        if (cleanDesc.length < 3) return "Description is required.";
-        if (!draft.requestGroup) return "Choose a request type.";
-      }
-
-      if (step === 1) {
-        if (!draft.requestTimeframe) return "Choose a timeframe.";
-      }
-
+      if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "title" };
+      if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
+      if (!draft.requestGroup) return { message: "Choose a request type.", section: "details" };
+      if (!draft.requestTimeframe) return { message: "Choose a timeframe.", section: "details" };
       return null;
     }
 
-    if (draft.mode === "event") {
-      if (step === 0) {
-        if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
-        if (cleanDesc.length < 3) return "Description is required.";
-        if (!draft.eventCategory) return "Choose a category.";
-        if (!draft.hostOrg.trim()) return "Host is required.";
-      }
-
-      if (step === 1) {
-        if (!draft.eventLocation.trim()) return "Location is required.";
-        if (!draft.eventDate) return "Choose a date.";
-        if (!draft.eventStartTime) return "Choose a start time.";
-        if (!eventStartIso) return "Start time is invalid.";
-        if (!eventFile) return "Please upload an image.";
-        if (!isValidHttpUrlMaybeEmpty(draft.eventLink)) {
-          return "Link must start with http:// or https://";
-        }
-        if (
-          draft.eventEndTime &&
-          eventEndIso &&
-          new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime()
-        ) {
-          return "End time cannot be before start time.";
-        }
-      }
-
-      return null;
+    if (!eventFile) return { message: "Add a flyer image to continue.", section: "media" };
+    if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "title" };
+    if (!draft.hostOrg.trim()) return { message: "Host is required.", section: "details" };
+    if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
+    if (!draft.eventCategory) return { message: "Choose a category.", section: "details" };
+    if (!draft.eventLocation.trim()) return { message: "Location is required.", section: "details" };
+    if (!draft.eventDate) return { message: "Choose a date.", section: "details" };
+    if (!draft.eventStartTime) return { message: "Choose a start time.", section: "details" };
+    if (!eventStartIso) return { message: "Start time is invalid.", section: "details" };
+    if (!isValidHttpUrlMaybeEmpty(draft.eventLink)) {
+      return { message: "Link must start with http:// or https://", section: "details" };
+    }
+    if (
+      draft.eventEndTime &&
+      eventEndIso &&
+      new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime()
+    ) {
+      return { message: "End time cannot be before start time.", section: "details" };
     }
 
     return null;
   }
 
-  function validateAllBeforeSubmit() {
-    const e0 = getStepError(0);
-    if (e0) return e0;
-    const e1 = getStepError(1);
-    if (e1) return e1;
-    return null;
-  }
-
-  function goToStep(step: StepIndex) {
-    setMsg(null);
-    if (!draft.mode) return;
-    setDraft((prev) => ({ ...prev, currentStep: step }));
-  }
-
-  function nextStep() {
-    setMsg(null);
-    const err = getStepError(currentStep);
-    if (err) {
-      setMsg(err);
-      if (!isLoggedIn || !profileComplete) router.push("/me");
-      return;
-    }
-    if (currentStep < 2) {
-      patchDraft("currentStep", (currentStep + 1) as StepIndex);
-    }
-  }
-
-  function prevStep() {
-    setMsg(null);
-    if (currentStep > 0) {
-      patchDraft("currentStep", (currentStep - 1) as StepIndex);
-    }
+  function scrollToSection(section: "media" | "title" | "details" | "options" | "account") {
+    if (section === "media") mediaSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (section === "title") titleSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (section === "details") detailsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (section === "options") optionsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (section === "account") topComposerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   async function handleSubmit() {
     setMsg(null);
+    setFieldError(null);
 
-    const validationError = validateAllBeforeSubmit();
-    if (validationError) {
-      setMsg(validationError);
+    const validation = validateBeforeSubmit();
+    if (validation) {
+      setMsg(validation.message);
+      setFieldError(validation.section);
+      scrollToSection(validation.section);
+
+      if (validation.section === "account" && (!isLoggedIn || !profileComplete)) {
+        setTimeout(() => router.push("/me"), 250);
+      }
       return;
     }
 
-    if (!userId) {
+    if (!userId || !draft.mode) {
       setMsg("You must be logged in.");
       return;
     }
@@ -667,7 +695,7 @@ export default function CreatePage() {
           throw new Error(`Event created but image save failed: ${updErr.message}`);
         }
 
-        resetWizard();
+        resetComposer();
         router.push(SUCCESS_ROUTE);
         router.refresh();
         return;
@@ -715,7 +743,7 @@ export default function CreatePage() {
       const itemId = String(createdItem.id);
 
       if (postType === "request") {
-        resetWizard();
+        resetComposer();
         router.push(`/item/${itemId}`);
         router.refresh();
         return;
@@ -764,7 +792,7 @@ export default function CreatePage() {
         throw new Error(`Image metadata save failed: ${photoErr.message}`);
       }
 
-      resetWizard();
+      resetComposer();
       router.push(`/item/${itemId}`);
       router.refresh();
     } catch (err: any) {
@@ -774,293 +802,52 @@ export default function CreatePage() {
     }
   }
 
-  const pageStyle: React.CSSProperties = {
-    minHeight: "100vh",
-    background:
-      "linear-gradient(180deg, #f8fafc 0%, #f6f7fb 35%, #f8fafc 100%)",
-    color: "#0f172a",
-    padding: 18,
-    paddingBottom:
-      "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px) + 98px + 24px)",
-  };
-
-  const shell: React.CSSProperties = {
-    maxWidth: 780,
-    margin: "0 auto",
-  };
-
-  const brandWrap: React.CSSProperties = {
-    marginBottom: 14,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-  };
-
-  const brandTitle: React.CSSProperties = {
-    fontSize: 28,
-    fontWeight: 1000,
-    letterSpacing: "-0.03em",
-  };
-
-  const brandSub: React.CSSProperties = {
-    marginTop: 4,
-    color: "#64748b",
-    fontSize: 14,
-    fontWeight: 600,
-  };
-
-  const card: React.CSSProperties = {
-    background: "rgba(255,255,255,0.96)",
-    border: "1px solid #e5e7eb",
-    borderRadius: 20,
-    padding: 16,
-    boxShadow: "0 16px 40px rgba(15,23,42,0.06)",
-    backdropFilter: "blur(8px)",
-  };
-
-  const input: React.CSSProperties = {
-    width: "100%",
-    padding: "13px 14px",
-    borderRadius: 14,
-    border: "1px solid #e5e7eb",
-    background: "#ffffff",
-    outline: "none",
-    fontSize: 14,
-  };
-
-  const textarea: React.CSSProperties = {
-    ...input,
-    resize: "vertical",
-    lineHeight: 1.4,
-  };
-
-  const select: React.CSSProperties = {
-    ...input,
-    cursor: "pointer",
-  };
-
-  const button: React.CSSProperties = {
-    border: "1px solid #e5e7eb",
-    background: "#ffffff",
-    color: "#111827",
-    padding: "11px 14px",
-    borderRadius: 14,
-    cursor: "pointer",
-    fontWeight: 900,
-  };
-
-  const primary = (disabled: boolean): React.CSSProperties => ({
-    border: "none",
-    borderRadius: 16,
-    padding: "12px 16px",
-    minWidth: 130,
-    fontWeight: 1000,
-    cursor: disabled ? "not-allowed" : "pointer",
-    opacity: disabled ? 0.55 : 1,
-    color: "white",
-    background: disabled ? "#94a3b8" : "#0f172a",
-    boxShadow: disabled ? "none" : "0 16px 34px rgba(15,23,42,0.18)",
-  });
-
-  const ghostBtn: React.CSSProperties = {
-    ...button,
-    borderRadius: 16,
-    minWidth: 96,
-  };
-
-  const danger: React.CSSProperties = {
-    ...button,
-    borderColor: "#fecaca",
-    color: "#b91c1c",
-  };
-
-  const modeButton = (active: boolean): React.CSSProperties => ({
-    ...button,
-    width: "100%",
-    textAlign: "left",
-    borderRadius: 18,
-    padding: 16,
-    background: active ? "#eef2ff" : "#ffffff",
-    borderColor: active ? "#c7d2fe" : "#e5e7eb",
-    boxShadow: active ? "0 10px 25px rgba(79,70,229,0.08)" : "none",
-  });
-
-  const sticky: React.CSSProperties = {
-    position: "fixed",
-    left: 0,
-    right: 0,
-    bottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px))",
-    minHeight: WIZARD_STICKY_HEIGHT,
-    background: "rgba(248,250,252,0.92)",
-    borderTop: "1px solid #e5e7eb",
-    backdropFilter: "blur(14px)",
-    zIndex: 9999,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "10px 16px",
-  };
-
-  const stickyInner: React.CSSProperties = {
-    width: "100%",
-    maxWidth: 780,
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-  };
-
-  const row2: React.CSSProperties = {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: 10,
-  };
-
-  const canGoBack = currentStep > 0;
-  const stepError = draft.mode ? getStepError(currentStep) : null;
-  const isReviewStep = !!draft.mode && currentStep === 2;
-
-  const stickyHint = useMemo(() => {
-    if (!draft.mode) return "Choose one to start.";
-    if (!isLoggedIn) return "Log in with your @ashland.edu email.";
-    if (!profileComplete) return "Finish your profile first.";
-    if (stepError) return stepError;
-    if (isReviewStep) return "Review everything before posting.";
-    return "Looks good.";
-  }, [draft.mode, isLoggedIn, profileComplete, stepError, isReviewStep]);
-
-  const eventTimeSummary = eventStartIso
-    ? `${formatLongDateTime(eventStartIso)}${eventEndIso ? ` → ${formatLongDateTime(eventEndIso)}` : ""}`
-    : "—";
-
-  function renderModePicker() {
-    return (
-      <div style={{ display: "grid", gap: 12 }}>
-        <button type="button" onClick={() => selectMode("give")} style={modeButton(draft.mode === "give")}>
-          <div style={{ fontWeight: 1000, fontSize: 18 }}>Give</div>
-          <div style={{ marginTop: 6, fontSize: 14, color: "#64748b" }}>
-            Share items with others.
-          </div>
-        </button>
-
-        <button type="button" onClick={() => selectMode("request")} style={modeButton(draft.mode === "request")}>
-          <div style={{ fontWeight: 1000, fontSize: 18 }}>Request</div>
-          <div style={{ marginTop: 6, fontSize: 14, color: "#64748b" }}>
-            Ask the community for items or help you need.
-          </div>
-        </button>
-
-        <button type="button" onClick={() => selectMode("event")} style={modeButton(draft.mode === "event")}>
-          <div style={{ fontWeight: 1000, fontSize: 18 }}>Event</div>
-          <div style={{ marginTop: 6, fontSize: 14, color: "#64748b" }}>
-            Promote upcoming campus events.
-          </div>
-        </button>
-      </div>
-    );
-  }
-
-  function renderStepTabs() {
-    if (!draft.mode) return null;
-
-    return (
-      <div style={{ ...card, padding: 12 }}>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {steps.map((label, i) => {
-            const idx = i as StepIndex;
-            const active = idx === currentStep;
-            const done = idx < currentStep;
-
-            return (
-              <button
-                key={label}
-                type="button"
-                onClick={() => goToStep(idx)}
-                style={{
-                  ...button,
-                  borderRadius: 999,
-                  padding: "10px 14px",
-                  background: active ? "#0f172a" : done ? "#ecfeff" : "#ffffff",
-                  color: active ? "#ffffff" : "#111827",
-                  borderColor: active ? "#0f172a" : done ? "#a5f3fc" : "#e5e7eb",
-                }}
-              >
-                {done ? "✓ " : ""}
-                {label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    );
-  }
-
-  function renderReviewCard() {
-    if (!draft.mode) return null;
-
-    if (draft.mode === "event") {
+  function renderPreviewCard() {
+    if (!draft.mode) {
       return (
-        <div style={{ ...card, overflow: "hidden", padding: 0 }}>
-          <div
-            style={{
-              position: "relative",
-              height: 230,
-              background: "#eef2ff",
-              borderBottom: "1px solid #e5e7eb",
-            }}
-          >
-            <div
-              style={{
-                position: "absolute",
-                top: 12,
-                left: 12,
-                zIndex: 2,
-                padding: "6px 10px",
-                borderRadius: 999,
-                background: "rgba(15,23,42,0.72)",
-                color: "white",
-                fontSize: 12,
-                fontWeight: 900,
-              }}
-            >
-              EVENT
-            </div>
+        <div style={previewCard}>
+          <div style={{ fontSize: 18, fontWeight: 900 }}>Live preview</div>
+          <div style={{ marginTop: 8, color: "#64748b", lineHeight: 1.5 }}>
+            Choose a post type to start building your post. Your preview will update as you type.
+          </div>
+        </div>
+      );
+    }
 
-            {eventPreviewUrl ? (
+    if (draft.mode === "give") {
+      return (
+        <div style={previewCard}>
+          <div style={previewMedia}>
+            {itemPreviewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={eventPreviewUrl}
-                alt="Event preview"
-                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-              />
+              <img src={itemPreviewUrl} alt="Give preview" style={previewImage} />
             ) : (
-              <div
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  display: "grid",
-                  placeItems: "center",
-                  color: "#64748b",
-                  fontWeight: 900,
-                }}
-              >
-                No preview
+              <div style={previewPlaceholder}>
+                <div style={{ fontSize: 40 }}>📸</div>
+                <div style={{ marginTop: 8 }}>Add a photo for your item</div>
               </div>
             )}
+
+            <div style={previewBadgeWarm}>GIVE</div>
           </div>
 
-          <div style={{ padding: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 900, color: "#64748b" }}>
-              {draft.eventCategory.toUpperCase()} • {draft.hostOrg || "Host"}
+          <div style={previewBody}>
+            <div style={previewMetaRow}>
+              <span>{giveCategoryLabel(draft.giveCategory)}</span>
+              <span>•</span>
+              <span>{draft.pickupLocation}</span>
             </div>
-            <div style={{ marginTop: 8, fontWeight: 1000, fontSize: 22 }}>
-              {cleanTitle || "Untitled event"}
+
+            <div style={previewTitle}>{cleanTitle || "What are you sharing?"}</div>
+
+            <div style={previewText}>
+              {cleanDesc || "Mention condition, quantity, and pickup info so others know exactly what you’re offering."}
             </div>
-            <div style={{ marginTop: 8, fontSize: 13, fontWeight: 800, color: "#0f766e" }}>
-              📍 {draft.eventLocation || "Location needed"} • {eventTimeSummary}
-            </div>
-            <div style={{ marginTop: 12, color: "#374151", fontSize: 14 }}>
-              {cleanDesc || "No description yet."}
+
+            <div style={previewFooterRow}>
+              <span>{draft.hideName ? "Anonymous" : "Visible name"}</span>
+              <span>•</span>
+              <span>{expireChoiceLabel(draft.expireChoice)}</span>
             </div>
           </div>
         </div>
@@ -1069,32 +856,37 @@ export default function CreatePage() {
 
     if (draft.mode === "request") {
       return (
-        <div style={{ ...card, overflow: "hidden", padding: 0 }}>
+        <div style={previewCard}>
           <div
             style={{
-              minHeight: 170,
-              padding: 18,
-              display: "flex",
-              flexDirection: "column",
-              justifyContent: "flex-end",
-              background: "linear-gradient(135deg, #ecfeff 0%, #f8fafc 100%)",
-              borderBottom: "1px solid #e5e7eb",
+              ...previewMedia,
+              height: 148,
+              background: "linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%)",
             }}
           >
-            <div style={{ fontSize: 12, fontWeight: 900, color: "#0f766e" }}>
-              {requestGroupLabel(draft.requestGroup)} • {requestTimeframeLabel(draft.requestTimeframe)}
+            <div style={{ padding: 18, width: "100%", display: "flex", flexDirection: "column", justifyContent: "end" }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <span style={miniTagBlue}>{requestGroupLabel(draft.requestGroup)}</span>
+                <span style={miniTagBlue}>{requestTimeframeLabel(draft.requestTimeframe)}</span>
+              </div>
+
+              <div style={{ marginTop: 12, fontWeight: 950, fontSize: 23, lineHeight: 1.15 }}>
+                {cleanTitle || "What do you need?"}
+              </div>
             </div>
-            <div style={{ marginTop: 8, fontWeight: 1000, fontSize: 22 }}>
-              {cleanTitle || "Untitled request"}
-            </div>
+
+            <div style={previewBadgeBlue}>REQUEST</div>
           </div>
 
-          <div style={{ padding: 16 }}>
-            <div style={{ fontSize: 13, color: "#64748b", fontWeight: 800 }}>
-              📍 {draft.requestLocation.trim() || "No location added"}
+          <div style={previewBody}>
+            <div style={previewText}>
+              {cleanDesc || "Tell the campus community what you need, why you need it, and when you need it."}
             </div>
-            <div style={{ marginTop: 12, color: "#374151", fontSize: 14 }}>
-              {cleanDesc || "No description yet."}
+
+            <div style={previewFooterRow}>
+              <span>{draft.requestLocation.trim() || "No location added"}</span>
+              <span>•</span>
+              <span>{draft.hideName ? "Anonymous" : "Visible name"}</span>
             </div>
           </div>
         </div>
@@ -1102,556 +894,465 @@ export default function CreatePage() {
     }
 
     return (
-      <div style={{ ...card, overflow: "hidden", padding: 0 }}>
-        <div
-          style={{
-            position: "relative",
-            height: 230,
-            background: "#f1f5f9",
-            borderBottom: "1px solid #e5e7eb",
-          }}
-        >
-          <div
-            style={{
-              position: "absolute",
-              top: 12,
-              left: 12,
-              zIndex: 2,
-              padding: "6px 10px",
-              borderRadius: 999,
-              background: "rgba(15,23,42,0.72)",
-              color: "white",
-              fontSize: 12,
-              fontWeight: 900,
-            }}
-          >
-            GIVE
-          </div>
-
-          {itemPreviewUrl ? (
+      <div style={previewCard}>
+        <div style={previewMedia}>
+          {eventPreviewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={itemPreviewUrl}
-              alt="Item preview"
-              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-            />
+            <img src={eventPreviewUrl} alt="Event preview" style={previewImage} />
           ) : (
-            <div
-              style={{
-                width: "100%",
-                height: "100%",
-                display: "grid",
-                placeItems: "center",
-                color: "#64748b",
-                fontWeight: 900,
-              }}
-            >
-              No preview
+            <div style={previewPlaceholder}>
+              <div style={{ fontSize: 40 }}>🎫</div>
+              <div style={{ marginTop: 8 }}>Add a flyer for your event</div>
             </div>
           )}
+
+          <div style={previewBadgePurple}>EVENT</div>
         </div>
 
-        <div style={{ padding: 16 }}>
-          <div style={{ fontSize: 12, color: "#64748b", fontWeight: 900 }}>
-            {draft.giveCategory.toUpperCase()} • {draft.pickupLocation}
+        <div style={previewBody}>
+          <div style={previewMetaRow}>
+            <span>{eventCategoryLabel(draft.eventCategory)}</span>
+            <span>•</span>
+            <span>{draft.hostOrg.trim() || "Host"}</span>
           </div>
-          <div style={{ marginTop: 8, fontWeight: 1000, fontSize: 22 }}>
-            {cleanTitle || "Untitled item"}
+
+          <div style={previewTitle}>{cleanTitle || "What’s your event called?"}</div>
+
+          <div style={{ marginTop: 8, fontSize: 13, color: "#7c3aed", fontWeight: 900 }}>
+            📍 {draft.eventLocation.trim() || "Location"} • {eventTimeSummary}
           </div>
-          <div style={{ marginTop: 12, color: "#374151", fontSize: 14 }}>
-            {cleanDesc || "No description yet."}
+
+          <div style={previewText}>
+            {cleanDesc || "What should students know before joining? Share the details that make the event worth attending."}
           </div>
         </div>
       </div>
     );
   }
 
-  function renderReviewDetails() {
-    if (!draft.mode) return null;
+  function renderModePicker() {
+    return (
+      <div style={{ display: "grid", gap: 14 }}>
+        <button type="button" onClick={() => selectMode("give")} style={heroCard(draft.mode === "give", "warm")}>
+          <div style={heroIcon}>🎁</div>
+          <div style={{ flex: 1 }}>
+            <div style={heroTitle}>Give</div>
+            <div style={heroDesc}>Share something useful</div>
+          </div>
+          <div style={heroArrow}>→</div>
+        </button>
+
+        <button type="button" onClick={() => selectMode("request")} style={heroCard(draft.mode === "request", "blue")}>
+          <div style={heroIcon}>🤝</div>
+          <div style={{ flex: 1 }}>
+            <div style={heroTitle}>Request</div>
+            <div style={heroDesc}>Ask the campus community</div>
+          </div>
+          <div style={heroArrow}>→</div>
+        </button>
+
+        <button type="button" onClick={() => selectMode("event")} style={heroCard(draft.mode === "event", "purple")}>
+          <div style={heroIcon}>📅</div>
+          <div style={{ flex: 1 }}>
+            <div style={heroTitle}>Event</div>
+            <div style={heroDesc}>Promote something happening</div>
+          </div>
+          <div style={heroArrow}>→</div>
+        </button>
+      </div>
+    );
+  }
+
+  function renderMediaSection() {
+    if (!draft.mode || draft.mode === "request") return null;
+
+    const isGive = draft.mode === "give";
+    const file = isGive ? itemFile : eventFile;
+    const previewUrl = isGive ? itemPreviewUrl : eventPreviewUrl;
+    const savedName = isGive ? draft.itemFileName : draft.eventFileName;
 
     return (
-      <div style={{ ...card, marginTop: 12 }}>
-        <div style={{ fontSize: 18, fontWeight: 1000 }}>Final check</div>
-
-        <div style={{ marginTop: 12, display: "grid", gap: 10, color: "#374151", fontSize: 14 }}>
-          <div><b>Type:</b> {draft.mode}</div>
-          <div><b>Title:</b> {cleanTitle || "—"}</div>
-          <div><b>Description:</b> {cleanDesc || "—"}</div>
-
-          {draft.mode === "give" && (
-            <>
-              <div><b>Category:</b> {draft.giveCategory}</div>
-              <div><b>Pickup:</b> {draft.pickupLocation}</div>
-              <div><b>Image:</b> {itemFile ? itemFile.name : draft.itemFileName || "Missing"}</div>
-              <div><b>Anonymous:</b> {draft.hideName ? "Yes" : "No"}</div>
-              <div><b>Auto-close:</b> {draft.expireChoice}</div>
-            </>
-          )}
-
-          {draft.mode === "request" && (
-            <>
-              <div><b>Request type:</b> {requestGroupLabel(draft.requestGroup)}</div>
-              <div><b>Timeframe:</b> {requestTimeframeLabel(draft.requestTimeframe)}</div>
-              <div><b>Location:</b> {draft.requestLocation.trim() || "—"}</div>
-              <div><b>Anonymous:</b> {draft.hideName ? "Yes" : "No"}</div>
-              <div><b>Auto-close:</b> {draft.expireChoice}</div>
-            </>
-          )}
-
-          {draft.mode === "event" && (
-            <>
-              <div><b>Category:</b> {draft.eventCategory}</div>
-              <div><b>Host:</b> {draft.hostOrg.trim() || "—"}</div>
-              <div><b>Location:</b> {draft.eventLocation.trim() || "—"}</div>
-              <div><b>Time:</b> {eventTimeSummary}</div>
-              <div><b>Link:</b> {draft.eventLink.trim() || "—"}</div>
-              <div><b>Image:</b> {eventFile ? eventFile.name : draft.eventFileName || "Missing"}</div>
-              <div><b>Anonymous:</b> {draft.hideName ? "Yes" : "No"}</div>
-            </>
-          )}
+      <section ref={mediaSectionRef} style={sectionWrap(fieldError === "media")}>
+        <div style={sectionLabel}>Media</div>
+        <div style={sectionTitle}>{isGive ? "Start with a photo" : "Start with a flyer"}</div>
+        <div style={sectionSub}>
+          {isGive
+            ? "Posts feel more real when people see the item first."
+            : "A good flyer makes your event look worth opening."}
         </div>
 
-        {((draft.mode === "give" && !itemFile) || (draft.mode === "event" && !eventFile)) && (
-          <div
-            style={{
-              marginTop: 12,
-              padding: 10,
-              borderRadius: 14,
-              background: "#fff7ed",
-              border: "1px solid #fdba74",
-              color: "#9a3412",
-              fontWeight: 800,
-            }}
-          >
-            Your text draft was restored, but the browser may not preserve the actual uploaded file after refresh.
-            Re-select the image before posting if needed.
+        <input
+          ref={isGive ? itemFileInputRef : eventFileInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          onChange={(e) => (isGive ? pickItemFile(e.target.files?.[0] ?? null) : pickEventFile(e.target.files?.[0] ?? null))}
+          style={{ display: "none" }}
+        />
+
+        <button
+          type="button"
+          onClick={() => (isGive ? itemFileInputRef.current?.click() : eventFileInputRef.current?.click())}
+          style={uploadHeroButton}
+        >
+          {previewUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={previewUrl} alt="Preview" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+          ) : (
+            <div style={uploadHeroInner}>
+              <div style={{ fontSize: 44 }}>{isGive ? "📷" : "🪄"}</div>
+              <div style={{ marginTop: 10, fontWeight: 900, fontSize: 18 }}>
+                {isGive ? "Upload item photo" : "Upload event flyer"}
+              </div>
+              <div style={{ marginTop: 6, fontSize: 14, color: "#64748b" }}>JPG, PNG, or WEBP</div>
+            </div>
+          )}
+
+          <div style={uploadOverlay}>{file ? "Change image" : "Tap to upload"}</div>
+        </button>
+
+        <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>
+            {file ? file.name : savedName ? `Saved draft file: ${savedName}` : "No image selected"}
           </div>
-        )}
-      </div>
+
+          {file && (
+            <button
+              type="button"
+              style={smallDangerBtn}
+              onClick={() => (isGive ? pickItemFile(null) : pickEventFile(null))}
+            >
+              Remove
+            </button>
+          )}
+        </div>
+      </section>
     );
   }
 
-  function renderStepContent() {
+  function renderTitleSection() {
     if (!draft.mode) return null;
 
-    // STEP 1
-    if (currentStep === 0) {
-      if (draft.mode === "give") {
-        return (
-          <div style={card}>
-            <div style={{ fontSize: 18, fontWeight: 1000 }}>Give details</div>
+    const titlePlaceholder =
+      draft.mode === "give"
+        ? "What are you sharing?"
+        : draft.mode === "request"
+        ? "What do you need?"
+        : "What’s your event called?";
 
-            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-              <input
-                value={draft.title}
-                onChange={(e) => patchDraft("title", e.target.value)}
-                style={input}
-                placeholder="Item title"
-                autoFocus
-              />
+    const descPlaceholder =
+      draft.mode === "give"
+        ? "Mention condition, quantity, and pickup info."
+        : draft.mode === "request"
+        ? "What exactly do you need, and by when?"
+        : "What should students know before joining?";
 
-              <textarea
-                value={draft.description}
-                onChange={(e) => patchDraft("description", e.target.value)}
-                style={textarea}
-                rows={5}
-                placeholder="Describe the item, condition, and useful details."
-              />
-
-              <div style={row2}>
-                <select
-                  value={draft.giveCategory}
-                  onChange={(e) => patchDraft("giveCategory", e.target.value as GiveCategory)}
-                  style={select}
-                >
-                  <option value="books">Books</option>
-                  <option value="notes">Notes</option>
-                  <option value="electronics">Electronics</option>
-                  <option value="furniture">Furniture</option>
-                  <option value="clothing">Clothing</option>
-                  <option value="sport equipment">Sport Equipment</option>
-                  <option value="stationary item">Stationary Item</option>
-                  <option value="ride">Ride</option>
-                  <option value="art pieces">Art Pieces</option>
-                  <option value="health & beauty">Health & Beauty</option>
-                  <option value="home & kitchen">Home & Kitchen</option>
-                  <option value="jeweleries">Jeweleries</option>
-                  <option value="musical instruments">Musical Instruments</option>
-                  <option value="lost & found">Lost & Found</option>
-                  <option value="others">Others</option>
-                </select>
-
-                <select
-                  value={draft.pickupLocation}
-                  onChange={(e) => patchDraft("pickupLocation", e.target.value as PickupLocation)}
-                  style={select}
-                >
-                  <option value="College Quad">College Quad</option>
-                  <option value="Safety Service Office">Safety Service Office</option>
-                  <option value="Dining Hall">Dining Hall</option>
-                  <option value="Library">Library</option>
-                  <option value="Student Center">Student Center</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        );
-      }
-
-      if (draft.mode === "request") {
-        return (
-          <div style={card}>
-            <div style={{ fontSize: 18, fontWeight: 1000 }}>Request details</div>
-
-            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-              <input
-                value={draft.title}
-                onChange={(e) => patchDraft("title", e.target.value)}
-                style={input}
-                placeholder="What do you need?"
-                autoFocus
-              />
-
-              <textarea
-                value={draft.description}
-                onChange={(e) => patchDraft("description", e.target.value)}
-                style={textarea}
-                rows={5}
-                placeholder="Add the details people need in order to help you."
-              />
-
-              <select
-                value={draft.requestGroup}
-                onChange={(e) => patchDraft("requestGroup", e.target.value as RequestGroup)}
-                style={select}
-              >
-                <option value="logistics">Logistics</option>
-                <option value="services">Services</option>
-                <option value="urgent">Urgent</option>
-                <option value="collaboration">Collaboration</option>
-                <option value="lost & found">Lost & Found</option>
-              </select>
-            </div>
-          </div>
-        );
-      }
-
-      return (
-        <div style={card}>
-          <div style={{ fontSize: 18, fontWeight: 1000 }}>Event details</div>
-
-          <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-            <input
-              value={draft.title}
-              onChange={(e) => patchDraft("title", e.target.value)}
-              style={input}
-              placeholder="Event title"
-              autoFocus
-            />
-
-            <textarea
-              value={draft.description}
-              onChange={(e) => patchDraft("description", e.target.value)}
-              style={textarea}
-              rows={5}
-              placeholder="Write a short event description."
-            />
-
-            <div style={row2}>
-              <select
-                value={draft.eventCategory}
-                onChange={(e) => patchDraft("eventCategory", e.target.value as EventCategory)}
-                style={select}
-              >
-                <option value="career">Career</option>
-                <option value="club">Club</option>
-                <option value="sports">Sports</option>
-                <option value="music">Music</option>
-                <option value="arts">Arts</option>
-                <option value="volunteering">Volunteering</option>
-                <option value="academic">Academic</option>
-                <option value="social">Social</option>
-                <option value="other">Other</option>
-              </select>
-
-              <input
-                value={draft.hostOrg}
-                onChange={(e) => patchDraft("hostOrg", e.target.value)}
-                style={input}
-                placeholder="Host club / organisation"
-              />
-            </div>
-          </div>
+    return (
+      <section ref={titleSectionRef} style={sectionWrap(fieldError === "title")}>
+        <div style={sectionLabel}>Message</div>
+        <div style={sectionTitle}>
+          {draft.mode === "request" ? "Write the ask" : "Write the post"}
         </div>
+
+        <input
+          value={draft.title}
+          onChange={(e) => patchDraft("title", e.target.value)}
+          style={headlineInput}
+          placeholder={titlePlaceholder}
+          autoFocus={draft.mode === "request"}
+        />
+
+        <textarea
+          value={draft.description}
+          onChange={(e) => patchDraft("description", e.target.value)}
+          style={editorTextarea}
+          rows={5}
+          placeholder={descPlaceholder}
+        />
+
+        <div style={helperText}>
+          {draft.mode === "give" && "Tip: clear condition + pickup info gets more responses."}
+          {draft.mode === "request" && "Tip: be specific so people know whether they can help."}
+          {draft.mode === "event" && "Tip: focus on why someone should show up."}
+        </div>
+      </section>
+    );
+  }
+
+  function renderDetailsSection() {
+    if (!draft.mode) return null;
+
+    if (draft.mode === "give") {
+      return (
+        <section ref={detailsSectionRef} style={sectionWrap(fieldError === "details")}>
+          <div style={sectionLabel}>Details</div>
+          <div style={sectionTitle}>Help people understand the item</div>
+
+          <div style={{ marginTop: 16 }}>
+            <div style={chipLabel}>Category</div>
+            <div style={chipWrap}>
+              {(["books", "notes", "electronics", "furniture", "clothing", "others"] as GiveCategory[]).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("giveCategory", v)}
+                  style={chipButton(draft.giveCategory === v, "warm")}
+                >
+                  {giveCategoryLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 18 }}>
+            <div style={chipLabel}>Pickup</div>
+            <div style={chipWrap}>
+              {(
+                [
+                  "College Quad",
+                  "Safety Service Office",
+                  "Dining Hall",
+                  "Library",
+                  "Student Center",
+                ] as PickupLocation[]
+              ).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("pickupLocation", v)}
+                  style={chipButton(draft.pickupLocation === v, "neutral")}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
       );
     }
 
-    // STEP 2
-    if (currentStep === 1) {
-      if (draft.mode === "give") {
-        return (
-          <div style={card}>
-            <div style={{ fontSize: 18, fontWeight: 1000 }}>Image & options</div>
-
-            <div style={{ marginTop: 12, display: "grid", gap: 14 }}>
-              <div>
-                <input
-                  ref={itemFileInputRef}
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp"
-                  onChange={(e) => pickItemFile(e.target.files?.[0] ?? null)}
-                  style={{ display: "none" }}
-                />
-
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <button type="button" style={button} onClick={() => itemFileInputRef.current?.click()}>
-                    {itemFile ? "Change image" : "Upload image"}
-                  </button>
-
-                  {itemFile && (
-                    <button type="button" style={danger} onClick={() => pickItemFile(null)}>
-                      Remove
-                    </button>
-                  )}
-                </div>
-
-                <div style={{ marginTop: 8, fontSize: 13, color: "#64748b" }}>
-                  {itemFile
-                    ? itemFile.name
-                    : draft.itemFileName
-                    ? `Saved draft file: ${draft.itemFileName}`
-                    : "No image selected"}
-                </div>
-
-                {itemPreviewUrl && (
-                  <div style={{ marginTop: 12 }}>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={itemPreviewUrl}
-                      alt="Item preview"
-                      style={{
-                        width: "100%",
-                        height: 290,
-                        objectFit: "cover",
-                        borderRadius: 16,
-                        border: "1px solid #e5e7eb",
-                      }}
-                    />
-                  </div>
-                )}
-              </div>
-
-              <div style={row2}>
-                <button
-                  type="button"
-                  onClick={() => patchDraft("hideName", !draft.hideName)}
-                  style={{
-                    ...button,
-                    background: draft.hideName ? "#eef2ff" : "#ffffff",
-                    borderColor: draft.hideName ? "#c7d2fe" : "#e5e7eb",
-                    width: "100%",
-                  }}
-                >
-                  {draft.hideName ? "Anonymous: ON" : "Anonymous: OFF"}
-                </button>
-
-                <select
-                  value={draft.expireChoice}
-                  onChange={(e) => patchDraft("expireChoice", e.target.value as ExpireChoice)}
-                  style={select}
-                >
-                  <option value="urgent24">24 hours</option>
-                  <option value="7">7 days</option>
-                  <option value="14">14 days</option>
-                  <option value="30">30 days</option>
-                  <option value="never">Until I cancel</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        );
-      }
-
-      if (draft.mode === "request") {
-        return (
-          <div style={card}>
-            <div style={{ fontSize: 18, fontWeight: 1000 }}>Location & options</div>
-
-            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-              <div style={row2}>
-                <select
-                  value={draft.requestTimeframe}
-                  onChange={(e) => patchDraft("requestTimeframe", e.target.value as RequestTimeframe)}
-                  style={select}
-                >
-                  <option value="today">Today</option>
-                  <option value="this_week">This week</option>
-                  <option value="flexible">Flexible</option>
-                </select>
-
-                <input
-                  value={draft.requestLocation}
-                  onChange={(e) => patchDraft("requestLocation", e.target.value)}
-                  style={input}
-                  placeholder="Location (optional)"
-                />
-              </div>
-
-              <div style={row2}>
-                <button
-                  type="button"
-                  onClick={() => patchDraft("hideName", !draft.hideName)}
-                  style={{
-                    ...button,
-                    background: draft.hideName ? "#eef2ff" : "#ffffff",
-                    borderColor: draft.hideName ? "#c7d2fe" : "#e5e7eb",
-                    width: "100%",
-                  }}
-                >
-                  {draft.hideName ? "Anonymous: ON" : "Anonymous: OFF"}
-                </button>
-
-                <select
-                  value={draft.expireChoice}
-                  onChange={(e) => patchDraft("expireChoice", e.target.value as ExpireChoice)}
-                  style={select}
-                >
-                  <option value="urgent24">24 hours</option>
-                  <option value="7">7 days</option>
-                  <option value="14">14 days</option>
-                  <option value="30">30 days</option>
-                  <option value="never">Until I cancel</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        );
-      }
-
+    if (draft.mode === "request") {
       return (
-        <div style={card}>
-          <div style={{ fontSize: 18, fontWeight: 1000 }}>Time, place & image</div>
+        <section ref={detailsSectionRef} style={sectionWrap(fieldError === "details")}>
+          <div style={sectionLabel}>Details</div>
+          <div style={sectionTitle}>Make your request easy to respond to</div>
 
-          <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-            <div style={row2}>
-              <input
-                value={draft.eventLocation}
-                onChange={(e) => patchDraft("eventLocation", e.target.value)}
-                style={input}
-                placeholder="Location"
-              />
-
-              <input
-                value={draft.eventLink}
-                onChange={(e) => patchDraft("eventLink", e.target.value)}
-                style={input}
-                placeholder="Link (optional)"
-              />
+          <div style={{ marginTop: 16 }}>
+            <div style={chipLabel}>Request type</div>
+            <div style={chipWrap}>
+              {(["logistics", "services", "urgent", "collaboration", "lost & found"] as RequestGroup[]).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("requestGroup", v)}
+                  style={chipButton(draft.requestGroup === v, v === "urgent" ? "danger" : "blue")}
+                >
+                  {requestGroupLabel(v)}
+                </button>
+              ))}
             </div>
+          </div>
 
-            <div style={row2}>
+          <div style={{ marginTop: 18 }}>
+            <div style={chipLabel}>Timeframe</div>
+            <div style={chipWrap}>
+              {(["today", "this_week", "flexible"] as RequestTimeframe[]).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("requestTimeframe", v)}
+                  style={chipButton(draft.requestTimeframe === v, v === "today" ? "danger" : "blue")}
+                >
+                  {requestTimeframeLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 18 }}>
+            <div style={chipLabel}>Location</div>
+            <input
+              value={draft.requestLocation}
+              onChange={(e) => patchDraft("requestLocation", e.target.value)}
+              style={softInput}
+              placeholder="Optional location"
+            />
+          </div>
+        </section>
+      );
+    }
+
+    return (
+      <section ref={detailsSectionRef} style={sectionWrap(fieldError === "details")}>
+        <div style={sectionLabel}>Details</div>
+        <div style={sectionTitle}>Build the event like a real flyer</div>
+
+        <div style={{ marginTop: 16 }}>
+          <div style={chipLabel}>Category</div>
+          <div style={chipWrap}>
+            {(["career", "club", "sports", "music", "arts", "academic", "social", "volunteering", "other"] as EventCategory[]).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => patchDraft("eventCategory", v)}
+                style={chipButton(draft.eventCategory === v, "purple")}
+              >
+                {eventCategoryLabel(v)}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
+          <div>
+            <div style={chipLabel}>Host</div>
+            <input
+              value={draft.hostOrg}
+              onChange={(e) => patchDraft("hostOrg", e.target.value)}
+              style={softInput}
+              placeholder="Host club / organisation"
+            />
+          </div>
+
+          <div>
+            <div style={chipLabel}>Location</div>
+            <input
+              value={draft.eventLocation}
+              onChange={(e) => patchDraft("eventLocation", e.target.value)}
+              style={softInput}
+              placeholder="Where is it happening?"
+            />
+          </div>
+
+          <div style={grid2}>
+            <div>
+              <div style={chipLabel}>Date</div>
               <input
                 type="date"
                 value={draft.eventDate}
                 onChange={(e) => patchDraft("eventDate", e.target.value)}
-                style={input}
+                style={softInput}
               />
+            </div>
+            <div>
+              <div style={chipLabel}>Start time</div>
               <input
                 type="time"
                 value={draft.eventStartTime}
                 onChange={(e) => patchDraft("eventStartTime", e.target.value)}
-                style={input}
+                style={softInput}
               />
             </div>
+          </div>
 
-            <div style={row2}>
+          <div style={grid2}>
+            <div>
+              <div style={chipLabel}>End time</div>
               <input
                 type="time"
                 value={draft.eventEndTime}
                 onChange={(e) => patchDraft("eventEndTime", e.target.value)}
-                style={input}
+                style={softInput}
               />
-              <button
-                type="button"
-                onClick={() => patchDraft("hideName", !draft.hideName)}
-                style={{
-                  ...button,
-                  background: draft.hideName ? "#eef2ff" : "#ffffff",
-                  borderColor: draft.hideName ? "#c7d2fe" : "#e5e7eb",
-                  width: "100%",
-                }}
-              >
-                {draft.hideName ? "Anonymous: ON" : "Anonymous: OFF"}
-              </button>
             </div>
-
             <div>
+              <div style={chipLabel}>Link</div>
               <input
-                ref={eventFileInputRef}
-                type="file"
-                accept="image/jpeg,image/png,image/webp"
-                onChange={(e) => pickEventFile(e.target.files?.[0] ?? null)}
-                style={{ display: "none" }}
+                value={draft.eventLink}
+                onChange={(e) => patchDraft("eventLink", e.target.value)}
+                style={softInput}
+                placeholder="Optional event link"
               />
-
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button type="button" style={button} onClick={() => eventFileInputRef.current?.click()}>
-                  {eventFile ? "Change image" : "Upload image"}
-                </button>
-
-                {eventFile && (
-                  <button type="button" style={danger} onClick={() => pickEventFile(null)}>
-                    Remove
-                  </button>
-                )}
-              </div>
-
-              <div style={{ marginTop: 8, fontSize: 13, color: "#64748b" }}>
-                {eventFile
-                  ? eventFile.name
-                  : draft.eventFileName
-                  ? `Saved draft file: ${draft.eventFileName}`
-                  : "No image selected"}
-              </div>
-
-              {eventPreviewUrl && (
-                <div style={{ marginTop: 12 }}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={eventPreviewUrl}
-                    alt="Event preview"
-                    style={{
-                      width: "100%",
-                      height: 290,
-                      objectFit: "cover",
-                      borderRadius: 16,
-                      border: "1px solid #e5e7eb",
-                    }}
-                  />
-                </div>
-              )}
             </div>
           </div>
-        </div>
-      );
-    }
 
-    // STEP 3
-    return (
-      <>
-        {renderReviewCard()}
-        {renderReviewDetails()}
-      </>
+          {!!draft.eventEndTime &&
+            !!eventEndIso &&
+            !!eventStartIso &&
+            new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime() && (
+              <div style={inlineWarning}>End time cannot be before start time.</div>
+            )}
+
+          {!isValidHttpUrlMaybeEmpty(draft.eventLink) && (
+            <div style={inlineWarning}>Link must start with http:// or https://</div>
+          )}
+        </div>
+      </section>
     );
+  }
+
+  function renderOptionsSection() {
+    if (!draft.mode) return null;
+
+    return (
+      <section ref={optionsSectionRef} style={sectionWrap(fieldError === "options")}>
+        <div style={sectionLabel}>Options</div>
+        <div style={sectionTitle}>A few final settings</div>
+
+        <div style={{ marginTop: 16 }}>
+          <div style={chipLabel}>Visibility</div>
+          <div style={chipWrap}>
+            <button
+              type="button"
+              onClick={() => patchDraft("hideName", false)}
+              style={chipButton(!draft.hideName, "neutral")}
+            >
+              Show my name
+            </button>
+            <button
+              type="button"
+              onClick={() => patchDraft("hideName", true)}
+              style={chipButton(draft.hideName, "neutral")}
+            >
+              Post anonymously
+            </button>
+          </div>
+        </div>
+
+        {draft.mode !== "event" && (
+          <div style={{ marginTop: 18 }}>
+            <div style={chipLabel}>Auto-close</div>
+            <div style={chipWrap}>
+              {(["urgent24", "7", "14", "30", "never"] as ExpireChoice[]).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("expireChoice", v)}
+                  style={chipButton(draft.expireChoice === v, v === "urgent24" ? "danger" : "neutral")}
+                >
+                  {expireChoiceLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+    );
+  }
+
+  function getStickyHint() {
+    if (!draft.mode) return "Choose a post type to begin.";
+    if (!isLoggedIn) return "Log in with your @ashland.edu email.";
+    if (!profileComplete) return "Finish your profile first.";
+    const validation = validateBeforeSubmit();
+    if (validation) return validation.message;
+    return "Ready to publish.";
+  }
+
+  function getPrimaryLabel() {
+    if (saving) return "Posting…";
+    if (!draft.mode) return "Choose a type";
+    if (draft.mode === "give") return "Share item";
+    if (draft.mode === "request") return "Post request";
+    return "Publish event";
   }
 
   if (!hydratedDraft || authLoading || profileLoading) {
     return (
       <div style={pageStyle}>
         <div style={shell}>
-          <div style={card}>
-            <div style={{ fontWeight: 1000 }}>Loading…</div>
-            <div style={{ marginTop: 6, color: "#64748b", fontSize: 14 }}>
+          <div style={statusCard}>
+            <div style={{ fontWeight: 1000, fontSize: 18 }}>Loading…</div>
+            <div style={{ marginTop: 6, color: "#64748b" }}>
               Restoring your draft and checking account status.
             </div>
           </div>
@@ -1664,12 +1365,12 @@ export default function CreatePage() {
     return (
       <div style={pageStyle}>
         <div style={shell}>
-          <div style={card}>
-            <div style={{ fontWeight: 1000, fontSize: 22 }}>You need your Ashland email</div>
+          <div style={statusCard}>
+            <div style={{ fontWeight: 1000, fontSize: 24 }}>You need your Ashland email</div>
             <div style={{ marginTop: 8, color: "#64748b" }}>
               Log in with your <b>@ashland.edu</b> account before posting.
             </div>
-            <button onClick={() => router.push("/me")} style={{ ...primary(false), marginTop: 14 }}>
+            <button onClick={() => router.push("/me")} style={{ ...primaryBtn(false), marginTop: 16 }}>
               Go to account
             </button>
           </div>
@@ -1682,12 +1383,12 @@ export default function CreatePage() {
     return (
       <div style={pageStyle}>
         <div style={shell}>
-          <div style={card}>
-            <div style={{ fontWeight: 1000, fontSize: 22 }}>Complete your profile</div>
+          <div style={statusCard}>
+            <div style={{ fontWeight: 1000, fontSize: 24 }}>Complete your profile</div>
             <div style={{ marginTop: 8, color: "#64748b" }}>
               Add your full name and choose Student or Faculty first.
             </div>
-            <button onClick={() => router.push("/me")} style={{ ...primary(false), marginTop: 14 }}>
+            <button onClick={() => router.push("/me")} style={{ ...primaryBtn(false), marginTop: 16 }}>
               Finish profile
             </button>
           </div>
@@ -1696,21 +1397,23 @@ export default function CreatePage() {
     );
   }
 
+  const primaryDisabled = saving || !draft.mode;
+
   return (
     <div style={pageStyle}>
       <div style={shell}>
-        <div style={brandWrap}>
+        <div style={topBar}>
           <div>
-            <div style={brandTitle}>ScholarSwap</div>
-            <div style={brandSub}>List something for campus</div>
+            <div style={appTitle}>Create</div>
+            <div style={appSub}>What do you want to share today?</div>
           </div>
 
-          <button onClick={() => router.push("/feed")} style={{ ...button, borderRadius: 999 }}>
+          <button onClick={() => router.push("/feed")} style={topPillBtn}>
             ← Feed
           </button>
         </div>
 
-        <div style={{ ...card, marginBottom: 12 }}>
+        <div style={postingAsCard}>
           <div style={{ fontSize: 13, color: "#475569", fontWeight: 800 }}>
             Posting as <b>{email}</b>
           </div>
@@ -1719,86 +1422,654 @@ export default function CreatePage() {
         {renderModePicker()}
 
         {draft.mode && (
-          <>
-            <div style={{ marginTop: 12 }}>{renderStepTabs()}</div>
+          <div ref={topComposerRef} style={contentGrid}>
+            <div style={composerShell}>
+              <div style={composerProgressWrap}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                  <div>
+                    <div style={{ fontWeight: 950, fontSize: 18 }}>
+                      {draft.mode === "give" && "Share with campus"}
+                      {draft.mode === "request" && "Ask the campus community"}
+                      {draft.mode === "event" && "Promote your event"}
+                    </div>
+                    <div style={{ marginTop: 4, color: "#64748b", fontSize: 14 }}>
+                      Build your post in one clean composer.
+                    </div>
+                  </div>
 
-            <div style={{ ...card, marginTop: 12 }}>
-              <div style={{ fontSize: 22, fontWeight: 1000 }}>
-                {steps[currentStep]}
-              </div>
-              <div style={{ marginTop: 6, color: "#64748b", fontSize: 14 }}>
-                Step {currentStep + 1} of 3
-              </div>
-            </div>
-
-            <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
-              {renderStepContent()}
-
-              {msg && (
-                <div
-                  style={{
-                    ...card,
-                    borderColor: "#fecdd3",
-                    background: "#fff1f2",
-                    color: "#9f1239",
-                    fontWeight: 850,
-                  }}
-                >
-                  {msg}
+                  <button type="button" onClick={resetComposer} style={subtleResetBtn} disabled={saving}>
+                    Reset
+                  </button>
                 </div>
-              )}
+
+                <div style={{ marginTop: 14 }}>
+                  <div style={progressTrack}>
+                    <div style={{ ...progressFill, width: `${Math.round(composerProgress * 100)}%` }} />
+                  </div>
+                  <div style={progressLegend}>
+                    <span>Media</span>
+                    <span>Details</span>
+                    <span>Ready</span>
+                  </div>
+                </div>
+              </div>
+
+              {renderMediaSection()}
+              {renderTitleSection()}
+              {detailsReady || draft.mode === "request" ? renderDetailsSection() : renderDetailsSection()}
+              {renderOptionsSection()}
+
+              {msg && <div style={errorBanner}>{msg}</div>}
             </div>
-          </>
+
+            <div style={previewColumn}>
+              <div style={previewSticky}>{renderPreviewCard()}</div>
+            </div>
+          </div>
         )}
       </div>
 
       {draft.mode && (
-        <div style={sticky}>
+        <div style={stickyBar}>
           <div style={stickyInner}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12, color: "#64748b", fontWeight: 700 }}>
-                {stickyHint}
-              </div>
+              <div style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>Composer status</div>
+              <div style={{ marginTop: 3, fontSize: 14, fontWeight: 900, color: "#0f172a" }}>{getStickyHint()}</div>
             </div>
 
-            {canGoBack ? (
-              <button type="button" onClick={prevStep} style={ghostBtn} disabled={saving}>
-                Back
-              </button>
-            ) : (
-              <button type="button" onClick={resetWizard} style={ghostBtn} disabled={saving}>
-                Reset
-              </button>
-            )}
+            <button type="button" onClick={() => router.push("/feed")} style={ghostBtn} disabled={saving}>
+              Cancel
+            </button>
 
-            {!isReviewStep ? (
-              <button
-                type="button"
-                onClick={nextStep}
-                disabled={saving}
-                style={primary(saving)}
-              >
-                Next
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleSubmit}
-                disabled={saving}
-                style={primary(saving)}
-              >
-                {saving
-                  ? "Posting…"
-                  : draft.mode === "event"
-                  ? "Post event"
-                  : draft.mode === "request"
-                  ? "Post request"
-                  : "Post item"}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={primaryDisabled}
+              style={primaryBtn(primaryDisabled)}
+            >
+              {getPrimaryLabel()}
+            </button>
           </div>
         </div>
       )}
     </div>
   );
 }
+
+/* ------------------------------ styles ------------------------------ */
+
+const pageStyle: React.CSSProperties = {
+  minHeight: "100vh",
+  background: "linear-gradient(180deg, #f8fafc 0%, #f6f7fb 45%, #f8fafc 100%)",
+  color: "#0f172a",
+  padding: 18,
+  paddingBottom: `calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px) + ${STICKY_HEIGHT}px + 30px)`,
+};
+
+const shell: React.CSSProperties = {
+  maxWidth: 1180,
+  margin: "0 auto",
+};
+
+const topBar: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  marginBottom: 16,
+};
+
+const appTitle: React.CSSProperties = {
+  fontSize: 34,
+  fontWeight: 1000,
+  letterSpacing: "-0.04em",
+};
+
+const appSub: React.CSSProperties = {
+  marginTop: 5,
+  fontSize: 15,
+  color: "#64748b",
+  fontWeight: 600,
+};
+
+const topPillBtn: React.CSSProperties = {
+  border: "1px solid #e2e8f0",
+  background: "rgba(255,255,255,0.88)",
+  color: "#0f172a",
+  padding: "11px 16px",
+  borderRadius: 999,
+  cursor: "pointer",
+  fontWeight: 900,
+  backdropFilter: "blur(10px)",
+};
+
+const postingAsCard: React.CSSProperties = {
+  marginBottom: 14,
+  background: "rgba(255,255,255,0.82)",
+  border: "1px solid #e5e7eb",
+  borderRadius: 18,
+  padding: "12px 14px",
+  boxShadow: "0 10px 30px rgba(15,23,42,0.04)",
+};
+
+const statusCard: React.CSSProperties = {
+  background: "rgba(255,255,255,0.95)",
+  border: "1px solid #e5e7eb",
+  borderRadius: 24,
+  padding: 22,
+  boxShadow: "0 24px 60px rgba(15,23,42,0.06)",
+};
+
+const contentGrid: React.CSSProperties = {
+  marginTop: 18,
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1.35fr) minmax(320px, 0.95fr)",
+  gap: 18,
+  alignItems: "start",
+};
+
+const composerShell: React.CSSProperties = {
+  background: "rgba(255,255,255,0.86)",
+  border: "1px solid rgba(226,232,240,0.95)",
+  borderRadius: 30,
+  padding: 20,
+  boxShadow: "0 30px 80px rgba(15,23,42,0.08)",
+  backdropFilter: "blur(14px)",
+};
+
+const composerProgressWrap: React.CSSProperties = {
+  paddingBottom: 20,
+  marginBottom: 18,
+  borderBottom: "1px solid #edf2f7",
+};
+
+const progressTrack: React.CSSProperties = {
+  width: "100%",
+  height: 6,
+  background: "#e2e8f0",
+  borderRadius: 999,
+  overflow: "hidden",
+};
+
+const progressFill: React.CSSProperties = {
+  height: "100%",
+  borderRadius: 999,
+  background: "linear-gradient(90deg, #0f172a 0%, #6366f1 100%)",
+  transition: "width 220ms ease",
+};
+
+const progressLegend: React.CSSProperties = {
+  marginTop: 8,
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 8,
+  fontSize: 12,
+  color: "#64748b",
+  fontWeight: 800,
+};
+
+const previewColumn: React.CSSProperties = {
+  minWidth: 0,
+};
+
+const previewSticky: React.CSSProperties = {
+  position: "sticky",
+  top: 16,
+};
+
+const previewCard: React.CSSProperties = {
+  background: "rgba(255,255,255,0.92)",
+  border: "1px solid #e5e7eb",
+  borderRadius: 28,
+  overflow: "hidden",
+  boxShadow: "0 24px 60px rgba(15,23,42,0.08)",
+};
+
+const previewMedia: React.CSSProperties = {
+  position: "relative",
+  height: 250,
+  background: "#f8fafc",
+  borderBottom: "1px solid #eef2f7",
+  overflow: "hidden",
+};
+
+const previewImage: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  objectFit: "cover",
+  display: "block",
+};
+
+const previewPlaceholder: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  display: "grid",
+  placeItems: "center",
+  textAlign: "center",
+  color: "#64748b",
+  fontWeight: 800,
+  padding: 20,
+};
+
+const previewBody: React.CSSProperties = {
+  padding: 18,
+};
+
+const previewBadgeWarm: React.CSSProperties = {
+  position: "absolute",
+  top: 14,
+  left: 14,
+  padding: "7px 11px",
+  borderRadius: 999,
+  fontSize: 12,
+  fontWeight: 1000,
+  color: "#9a3412",
+  background: "rgba(255,247,237,0.94)",
+  border: "1px solid #fdba74",
+};
+
+const previewBadgeBlue: React.CSSProperties = {
+  position: "absolute",
+  top: 14,
+  left: 14,
+  padding: "7px 11px",
+  borderRadius: 999,
+  fontSize: 12,
+  fontWeight: 1000,
+  color: "#1d4ed8",
+  background: "rgba(239,246,255,0.95)",
+  border: "1px solid #93c5fd",
+};
+
+const previewBadgePurple: React.CSSProperties = {
+  position: "absolute",
+  top: 14,
+  left: 14,
+  padding: "7px 11px",
+  borderRadius: 999,
+  fontSize: 12,
+  fontWeight: 1000,
+  color: "#6d28d9",
+  background: "rgba(245,243,255,0.95)",
+  border: "1px solid #c4b5fd",
+};
+
+const previewMetaRow: React.CSSProperties = {
+  display: "flex",
+  gap: 8,
+  flexWrap: "wrap",
+  fontSize: 12,
+  color: "#64748b",
+  fontWeight: 900,
+};
+
+const previewTitle: React.CSSProperties = {
+  marginTop: 9,
+  fontSize: 25,
+  lineHeight: 1.12,
+  fontWeight: 1000,
+  letterSpacing: "-0.03em",
+};
+
+const previewText: React.CSSProperties = {
+  marginTop: 12,
+  color: "#334155",
+  fontSize: 14,
+  lineHeight: 1.55,
+};
+
+const previewFooterRow: React.CSSProperties = {
+  marginTop: 14,
+  display: "flex",
+  gap: 8,
+  flexWrap: "wrap",
+  fontSize: 12,
+  color: "#64748b",
+  fontWeight: 800,
+};
+
+const miniTagBlue: React.CSSProperties = {
+  padding: "6px 10px",
+  borderRadius: 999,
+  background: "rgba(255,255,255,0.78)",
+  border: "1px solid #bfdbfe",
+  color: "#1d4ed8",
+  fontSize: 12,
+  fontWeight: 1000,
+};
+
+const heroIcon: React.CSSProperties = {
+  width: 54,
+  height: 54,
+  borderRadius: 18,
+  display: "grid",
+  placeItems: "center",
+  fontSize: 26,
+  background: "rgba(255,255,255,0.72)",
+  border: "1px solid rgba(255,255,255,0.85)",
+  flexShrink: 0,
+};
+
+const heroTitle: React.CSSProperties = {
+  fontSize: 21,
+  fontWeight: 1000,
+  letterSpacing: "-0.02em",
+};
+
+const heroDesc: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 14,
+  color: "#475569",
+  fontWeight: 700,
+};
+
+const heroArrow: React.CSSProperties = {
+  fontSize: 20,
+  fontWeight: 1000,
+  color: "#0f172a",
+  opacity: 0.7,
+};
+
+function heroCard(active: boolean, tone: "warm" | "blue" | "purple"): React.CSSProperties {
+  const palette =
+    tone === "warm"
+      ? {
+          bg: "linear-gradient(135deg, #fff7ed 0%, #ffffff 100%)",
+          border: active ? "#fb923c" : "#fed7aa",
+          glow: "rgba(251,146,60,0.14)",
+        }
+      : tone === "blue"
+      ? {
+          bg: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)",
+          border: active ? "#60a5fa" : "#bfdbfe",
+          glow: "rgba(96,165,250,0.14)",
+        }
+      : {
+          bg: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%)",
+          border: active ? "#8b5cf6" : "#ddd6fe",
+          glow: "rgba(139,92,246,0.14)",
+        };
+
+  return {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    gap: 16,
+    textAlign: "left",
+    padding: 18,
+    borderRadius: 24,
+    border: `1px solid ${palette.border}`,
+    background: palette.bg,
+    boxShadow: active ? `0 16px 40px ${palette.glow}` : "0 8px 20px rgba(15,23,42,0.04)",
+    cursor: "pointer",
+    transition: "all 180ms ease",
+  };
+}
+
+function sectionWrap(highlight: boolean): React.CSSProperties {
+  return {
+    padding: "18px 4px 20px 4px",
+    borderBottom: "1px solid #eef2f7",
+    outline: highlight ? "2px solid #fecdd3" : "none",
+    outlineOffset: 8,
+    borderRadius: 18,
+    scrollMarginTop: 80,
+  };
+}
+
+const sectionLabel: React.CSSProperties = {
+  fontSize: 12,
+  fontWeight: 1000,
+  color: "#64748b",
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+};
+
+const sectionTitle: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 24,
+  fontWeight: 1000,
+  letterSpacing: "-0.03em",
+};
+
+const sectionSub: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 14,
+  color: "#64748b",
+  lineHeight: 1.5,
+};
+
+const uploadHeroButton: React.CSSProperties = {
+  width: "100%",
+  height: 280,
+  marginTop: 16,
+  borderRadius: 24,
+  overflow: "hidden",
+  border: "1px solid #e5e7eb",
+  background: "#f8fafc",
+  cursor: "pointer",
+  position: "relative",
+  padding: 0,
+};
+
+const uploadHeroInner: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  display: "grid",
+  placeItems: "center",
+  textAlign: "center",
+  padding: 20,
+};
+
+const uploadOverlay: React.CSSProperties = {
+  position: "absolute",
+  right: 14,
+  bottom: 14,
+  padding: "9px 12px",
+  borderRadius: 999,
+  background: "rgba(15,23,42,0.78)",
+  color: "white",
+  fontSize: 12,
+  fontWeight: 1000,
+  backdropFilter: "blur(8px)",
+};
+
+const smallDangerBtn: React.CSSProperties = {
+  border: "1px solid #fecaca",
+  background: "#fff1f2",
+  color: "#be123c",
+  borderRadius: 999,
+  padding: "7px 11px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const headlineInput: React.CSSProperties = {
+  width: "100%",
+  marginTop: 16,
+  padding: "14px 0",
+  fontSize: 32,
+  fontWeight: 1000,
+  letterSpacing: "-0.04em",
+  border: "none",
+  borderBottom: "1px solid #e5e7eb",
+  outline: "none",
+  background: "transparent",
+  color: "#0f172a",
+};
+
+const editorTextarea: React.CSSProperties = {
+  width: "100%",
+  marginTop: 14,
+  padding: "0 0 10px 0",
+  border: "none",
+  borderBottom: "1px solid #e5e7eb",
+  outline: "none",
+  resize: "vertical",
+  fontSize: 16,
+  lineHeight: 1.65,
+  background: "transparent",
+  color: "#0f172a",
+};
+
+const helperText: React.CSSProperties = {
+  marginTop: 10,
+  fontSize: 13,
+  color: "#64748b",
+  fontWeight: 700,
+};
+
+const chipLabel: React.CSSProperties = {
+  marginBottom: 10,
+  fontSize: 13,
+  color: "#475569",
+  fontWeight: 900,
+};
+
+const chipWrap: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 10,
+};
+
+function chipButton(active: boolean, tone: "warm" | "blue" | "purple" | "neutral" | "danger"): React.CSSProperties {
+  const palette =
+    tone === "warm"
+      ? {
+          bg: active ? "#ffedd5" : "#ffffff",
+          border: active ? "#fb923c" : "#e5e7eb",
+          color: active ? "#9a3412" : "#0f172a",
+        }
+      : tone === "blue"
+      ? {
+          bg: active ? "#dbeafe" : "#ffffff",
+          border: active ? "#60a5fa" : "#e5e7eb",
+          color: active ? "#1d4ed8" : "#0f172a",
+        }
+      : tone === "purple"
+      ? {
+          bg: active ? "#ede9fe" : "#ffffff",
+          border: active ? "#8b5cf6" : "#e5e7eb",
+          color: active ? "#6d28d9" : "#0f172a",
+        }
+      : tone === "danger"
+      ? {
+          bg: active ? "#ffe4e6" : "#ffffff",
+          border: active ? "#fb7185" : "#e5e7eb",
+          color: active ? "#be123c" : "#0f172a",
+        }
+      : {
+          bg: active ? "#f1f5f9" : "#ffffff",
+          border: active ? "#94a3b8" : "#e5e7eb",
+          color: "#0f172a",
+        };
+
+  return {
+    padding: "10px 14px",
+    borderRadius: 999,
+    border: `1px solid ${palette.border}`,
+    background: palette.bg,
+    color: palette.color,
+    fontWeight: 900,
+    fontSize: 14,
+    cursor: "pointer",
+  };
+}
+
+const softInput: React.CSSProperties = {
+  width: "100%",
+  padding: "13px 14px",
+  borderRadius: 16,
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  outline: "none",
+  fontSize: 14,
+};
+
+const grid2: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: 12,
+};
+
+const inlineWarning: React.CSSProperties = {
+  padding: "10px 12px",
+  borderRadius: 14,
+  background: "#fff1f2",
+  color: "#9f1239",
+  fontSize: 13,
+  fontWeight: 800,
+  border: "1px solid #fecdd3",
+};
+
+const errorBanner: React.CSSProperties = {
+  marginTop: 18,
+  padding: "14px 16px",
+  borderRadius: 18,
+  background: "#fff1f2",
+  border: "1px solid #fecdd3",
+  color: "#9f1239",
+  fontWeight: 900,
+};
+
+const stickyBar: React.CSSProperties = {
+  position: "fixed",
+  left: 0,
+  right: 0,
+  bottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px))",
+  padding: "12px 16px",
+  zIndex: 9999,
+  display: "flex",
+  justifyContent: "center",
+  pointerEvents: "none",
+};
+
+const stickyInner: React.CSSProperties = {
+  width: "100%",
+  maxWidth: 1180,
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  background: "rgba(255,255,255,0.82)",
+  border: "1px solid rgba(226,232,240,0.9)",
+  borderRadius: 24,
+  padding: "14px 16px",
+  boxShadow: "0 22px 60px rgba(15,23,42,0.14)",
+  backdropFilter: "blur(16px)",
+  pointerEvents: "auto",
+};
+
+const ghostBtn: React.CSSProperties = {
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#0f172a",
+  padding: "12px 16px",
+  borderRadius: 16,
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+function primaryBtn(disabled: boolean): React.CSSProperties {
+  return {
+    border: "none",
+    background: disabled ? "#94a3b8" : "#0f172a",
+    color: "white",
+    padding: "13px 18px",
+    borderRadius: 16,
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontWeight: 1000,
+    minWidth: 142,
+    opacity: disabled ? 0.58 : 1,
+    boxShadow: disabled ? "none" : "0 18px 35px rgba(15,23,42,0.2)",
+  };
+}
+
+const subtleResetBtn: React.CSSProperties = {
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#334155",
+  padding: "10px 14px",
+  borderRadius: 14,
+  cursor: "pointer",
+  fontWeight: 900,
+};
