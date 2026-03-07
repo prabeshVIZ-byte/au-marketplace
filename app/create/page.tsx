@@ -1,4 +1,5 @@
 "use client";
+
 export const dynamic = "force-dynamic";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -9,24 +10,36 @@ type Mode = "give" | "request" | "event";
 type PostType = "give" | "request";
 
 type GiveCategory =
+  | "books"
+  | "notes"
+  | "electronics"
+  | "furniture"
   | "clothing"
   | "sport equipment"
   | "stationary item"
   | "ride"
-  | "books"
-  | "notes"
   | "art pieces"
-  | "others"
-  | "electronics"
-  | "furniture"
   | "health & beauty"
   | "home & kitchen"
   | "jeweleries"
-  | "musical instruments";
+  | "musical instruments"
+  | "lost & found"
+  | "others";
 
-type PickupLocation = "College Quad" | "Safety Service Office" | "Dining Hall";
+type PickupLocation =
+  | "College Quad"
+  | "Safety Service Office"
+  | "Dining Hall"
+  | "Library"
+  | "Student Center";
 
-type RequestGroup = "logistics" | "services" | "urgent" | "collaboration";
+type RequestGroup =
+  | "logistics"
+  | "services"
+  | "urgent"
+  | "collaboration"
+  | "lost & found";
+
 type RequestTimeframe = "today" | "this_week" | "flexible";
 
 type EventCategory =
@@ -41,7 +54,7 @@ type EventCategory =
   | "other";
 
 type ExpireChoice = "7" | "14" | "30" | "never" | "urgent24";
-type EventDurationPreset = "30" | "60" | "90" | "120" | "custom";
+type StepIndex = 0 | 1 | 2;
 
 type DraftState = {
   mode: Mode | null;
@@ -61,17 +74,15 @@ type DraftState = {
   hostOrg: string;
   eventLink: string;
 
-  eventDate: string; // YYYY-MM-DD
-  eventStartTime: string; // HH:mm
-  eventEndTime: string; // HH:mm
-  eventDurationPreset: EventDurationPreset;
+  eventDate: string;
+  eventStartTime: string;
+  eventEndTime: string;
 
   hideName: boolean;
   expireChoice: ExpireChoice;
 
-  currentStep: number;
+  currentStep: StepIndex;
 
-  // draft note only; actual file cannot safely persist through refresh
   itemFileName: string | null;
   eventFileName: string | null;
 };
@@ -86,48 +97,11 @@ const EVENT_FLYERS_BUCKET = "event-flyers";
 const MAX_ITEM_PHOTO_MB = 6;
 const MAX_EVENT_FLYER_MB = 8;
 
-const DRAFT_KEY = "scholarswap_create_wizard_draft_v1";
-
-const WIZARD_STICKY_HEIGHT = 78;
+const DRAFT_KEY = "scholarswap_create_draft_v2";
 const SUCCESS_ROUTE = "/feed";
+const WIZARD_STICKY_HEIGHT = 86;
 
-const GIVE_STEPS = [
-  "Choose type",
-  "Title",
-  "Description",
-  "Photo",
-  "Category",
-  "Pickup",
-  "Options",
-  "Review",
-] as const;
-
-const REQUEST_STEPS = [
-  "Choose type",
-  "Title",
-  "Description",
-  "Request type",
-  "Timeframe",
-  "Location",
-  "Options",
-  "Review",
-] as const;
-
-const EVENT_STEPS = [
-  "Choose type",
-  "Title",
-  "Description",
-  "Category",
-  "Host",
-  "Location",
-  "Time",
-  "Flyer",
-  "Link",
-  "Options",
-  "Review",
-] as const;
-
-// ---------------- utils ----------------
+// ---------- utils ----------
 function isAllowedImage(file: File) {
   return ["image/jpeg", "image/png", "image/webp"].includes(file.type);
 }
@@ -187,25 +161,6 @@ function combineLocalDateAndTimeToISO(dateStr: string, timeStr: string) {
   return dt.toISOString();
 }
 
-function addMinutesToTime(timeStr: string, mins: number) {
-  const m = timeStr.match(/^(\d{2}):(\d{2})$/);
-  if (!m) return "";
-  const hh = Number(m[1]);
-  const mm = Number(m[2]);
-  const total = hh * 60 + mm + mins;
-  const next = ((total % 1440) + 1440) % 1440;
-  const outH = String(Math.floor(next / 60)).padStart(2, "0");
-  const outM = String(next % 60).padStart(2, "0");
-  return `${outH}:${outM}`;
-}
-
-function formatShortDate(d: string | null | undefined) {
-  if (!d) return "—";
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return "—";
-  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
 function formatLongDateTime(iso: string | null) {
   if (!iso) return "—";
   const dt = new Date(iso);
@@ -224,6 +179,7 @@ function requestGroupLabel(g: RequestGroup) {
   if (g === "services") return "Services";
   if (g === "urgent") return "Urgent";
   if (g === "collaboration") return "Collaboration";
+  if (g === "lost & found") return "Lost & Found";
   return "Request";
 }
 
@@ -256,7 +212,6 @@ function getDefaultDraft(): DraftState {
     eventDate: "",
     eventStartTime: "",
     eventEndTime: "",
-    eventDurationPreset: "60",
 
     hideName: false,
     expireChoice: "7",
@@ -268,21 +223,20 @@ function getDefaultDraft(): DraftState {
   };
 }
 
-function getStepsForMode(mode: Mode | null) {
-  if (mode === "give") return GIVE_STEPS;
-  if (mode === "request") return REQUEST_STEPS;
-  if (mode === "event") return EVENT_STEPS;
-  return ["Choose type"] as const;
+function getSteps(mode: Mode | null) {
+  if (!mode) return ["Choose", "Details", "Review"];
+  if (mode === "give") return ["Details", "Photo & options", "Review"];
+  if (mode === "request") return ["Details", "Location & options", "Review"];
+  return ["Details", "Time & flyer", "Review"];
 }
 
-// ---------------- main ----------------
+// ---------- main ----------
 export default function CreatePage() {
   const router = useRouter();
 
   const itemFileInputRef = useRef<HTMLInputElement | null>(null);
   const eventFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // auth + profile
   const [authLoading, setAuthLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(true);
 
@@ -290,25 +244,21 @@ export default function CreatePage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [profileComplete, setProfileComplete] = useState(false);
 
-  // wizard state
   const [draft, setDraft] = useState<DraftState>(getDefaultDraft());
   const [hydratedDraft, setHydratedDraft] = useState(false);
 
-  // files
   const [itemFile, setItemFile] = useState<File | null>(null);
-  const [itemPreviewUrl, setItemPreviewUrl] = useState<string | null>(null);
   const [eventFile, setEventFile] = useState<File | null>(null);
+
+  const [itemPreviewUrl, setItemPreviewUrl] = useState<string | null>(null);
   const [eventPreviewUrl, setEventPreviewUrl] = useState<string | null>(null);
 
-  // submit
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
-  const steps = useMemo(() => getStepsForMode(draft.mode), [draft.mode]);
-  const maxStepIndex = steps.length - 1;
-  const currentStep = Math.max(0, Math.min(draft.currentStep, maxStepIndex));
+  const steps = useMemo(() => getSteps(draft.mode), [draft.mode]);
+  const currentStep = draft.currentStep;
 
-  // derived
   const cleanTitle = useMemo(() => draft.title.trim(), [draft.title]);
   const cleanDesc = useMemo(() => draft.description.trim(), [draft.description]);
 
@@ -316,6 +266,7 @@ export default function CreatePage() {
     () => combineLocalDateAndTimeToISO(draft.eventDate, draft.eventStartTime),
     [draft.eventDate, draft.eventStartTime]
   );
+
   const eventEndIso = useMemo(
     () => combineLocalDateAndTimeToISO(draft.eventDate, draft.eventEndTime),
     [draft.eventDate, draft.eventEndTime]
@@ -324,7 +275,6 @@ export default function CreatePage() {
   const isAshland = useMemo(() => !!email && email.toLowerCase().endsWith("@ashland.edu"), [email]);
   const isLoggedIn = !!userId && !!email && isAshland;
 
-  // preview urls
   useEffect(() => {
     if (!itemFile) {
       setItemPreviewUrl(null);
@@ -345,7 +295,6 @@ export default function CreatePage() {
     return () => URL.revokeObjectURL(url);
   }, [eventFile]);
 
-  // draft hydrate
   useEffect(() => {
     try {
       const raw = localStorage.getItem(DRAFT_KEY);
@@ -355,17 +304,19 @@ export default function CreatePage() {
       }
       const parsed = JSON.parse(raw) as Partial<DraftState>;
       const merged = { ...getDefaultDraft(), ...parsed };
-      const safeSteps = getStepsForMode(merged.mode);
-      merged.currentStep = Math.max(0, Math.min(Number(merged.currentStep ?? 0), safeSteps.length - 1));
-      setDraft(merged);
+
+      if (merged.currentStep !== 0 && merged.currentStep !== 1 && merged.currentStep !== 2) {
+        merged.currentStep = 0;
+      }
+
+      setDraft(merged as DraftState);
     } catch {
-      // ignore broken localStorage
+      // ignore broken draft
     } finally {
       setHydratedDraft(true);
     }
   }, []);
 
-  // save draft
   useEffect(() => {
     if (!hydratedDraft) return;
     try {
@@ -375,7 +326,6 @@ export default function CreatePage() {
     }
   }, [draft, hydratedDraft]);
 
-  // bottom-nav height css var
   useEffect(() => {
     const update = () => {
       const el = document.getElementById("bottom-nav");
@@ -387,30 +337,26 @@ export default function CreatePage() {
     return () => window.removeEventListener("resize", update);
   }, []);
 
-  // auth
   useEffect(() => {
     let mounted = true;
 
     async function syncAuth() {
       setAuthLoading(true);
       try {
-        const timeoutMs = 6500;
         const raced = await Promise.race([
           supabase.auth.getSession(),
           new Promise<any>((resolve) =>
-            setTimeout(() => resolve({ data: { session: null }, error: { message: "Auth timeout" } }), timeoutMs)
+            setTimeout(() => resolve({ data: { session: null }, error: { message: "Auth timeout" } }), 6500)
           ),
         ]);
 
         if (!mounted) return;
-        const { data, error } = raced;
-        if (error) console.log("getSession:", error?.message ?? error);
 
+        const { data } = raced;
         const session = data?.session ?? null;
         setEmail(session?.user?.email ?? null);
         setUserId(session?.user?.id ?? null);
-      } catch (e: any) {
-        console.log("syncAuth error:", e?.message ?? e);
+      } catch {
         if (!mounted) return;
         setEmail(null);
         setUserId(null);
@@ -428,7 +374,6 @@ export default function CreatePage() {
     };
   }, []);
 
-  // profile check
   useEffect(() => {
     let mounted = true;
 
@@ -451,7 +396,6 @@ export default function CreatePage() {
         if (!mounted) return;
 
         if (error) {
-          console.log("profile check error:", error.message);
           setProfileComplete(false);
           return;
         }
@@ -470,33 +414,6 @@ export default function CreatePage() {
     };
   }, [userId]);
 
-  // file pickers
-  function pickItemFile(f: File | null) {
-    setMsg(null);
-    if (!f) {
-      setItemFile(null);
-      setDraft((p) => ({ ...p, itemFileName: null }));
-      return;
-    }
-    if (!isAllowedImage(f)) return setMsg("Upload JPG, PNG, or WEBP.");
-    if (f.size > MAX_ITEM_PHOTO_MB * 1024 * 1024) return setMsg(`Photo too large (max ${MAX_ITEM_PHOTO_MB}MB).`);
-    setItemFile(f);
-    setDraft((p) => ({ ...p, itemFileName: f.name }));
-  }
-
-  function pickEventFile(f: File | null) {
-    setMsg(null);
-    if (!f) {
-      setEventFile(null);
-      setDraft((p) => ({ ...p, eventFileName: null }));
-      return;
-    }
-    if (!isAllowedImage(f)) return setMsg("Flyer must be JPG, PNG, or WEBP.");
-    if (f.size > MAX_EVENT_FLYER_MB * 1024 * 1024) return setMsg(`Flyer too large (max ${MAX_EVENT_FLYER_MB}MB).`);
-    setEventFile(f);
-    setDraft((p) => ({ ...p, eventFileName: f.name }));
-  }
-
   function patchDraft<K extends keyof DraftState>(key: K, value: DraftState[K]) {
     setDraft((prev) => ({ ...prev, [key]: value }));
   }
@@ -513,85 +430,142 @@ export default function CreatePage() {
     }
   }
 
-  function selectMode(mode: Mode) {
-    if (draft.mode && draft.mode !== mode) return;
-    setDraft((prev) => ({
-      ...prev,
-      mode,
-      currentStep: 1,
-    }));
+  function pickItemFile(file: File | null) {
     setMsg(null);
-  }
 
-  function applyDurationPreset(mins: number, preset: EventDurationPreset) {
-    if (!draft.eventStartTime) return;
-    patchDraft("eventDurationPreset", preset);
-    patchDraft("eventEndTime", addMinutesToTime(draft.eventStartTime, mins));
-  }
-
-  function getStepError(step: number): string | null {
-    if (!draft.mode) {
-      if (step === 0) return "Choose what you want to create.";
-      return null;
+    if (!file) {
+      setItemFile(null);
+      patchDraft("itemFileName", null);
+      return;
     }
 
+    if (!isAllowedImage(file)) {
+      setMsg("Upload JPG, PNG, or WEBP.");
+      return;
+    }
+
+    if (file.size > MAX_ITEM_PHOTO_MB * 1024 * 1024) {
+      setMsg(`Image is too large. Max ${MAX_ITEM_PHOTO_MB}MB.`);
+      return;
+    }
+
+    setItemFile(file);
+    patchDraft("itemFileName", file.name);
+  }
+
+  function pickEventFile(file: File | null) {
+    setMsg(null);
+
+    if (!file) {
+      setEventFile(null);
+      patchDraft("eventFileName", null);
+      return;
+    }
+
+    if (!isAllowedImage(file)) {
+      setMsg("Upload JPG, PNG, or WEBP.");
+      return;
+    }
+
+    if (file.size > MAX_EVENT_FLYER_MB * 1024 * 1024) {
+      setMsg(`Image is too large. Max ${MAX_EVENT_FLYER_MB}MB.`);
+      return;
+    }
+
+    setEventFile(file);
+    patchDraft("eventFileName", file.name);
+  }
+
+  function selectMode(mode: Mode) {
+    setMsg(null);
+    setDraft((prev) => ({
+      ...getDefaultDraft(),
+      mode,
+      currentStep: 0,
+    }));
+    setItemFile(null);
+    setEventFile(null);
+  }
+
+  function getStepError(step: StepIndex): string | null {
+    if (!draft.mode) return "Choose Give, Request, or Event.";
     if (!isLoggedIn) return "Log in with your @ashland.edu email to post.";
-    if (!profileComplete) return "Complete your profile first (name + student/faculty).";
+    if (!profileComplete) return "Complete your profile first.";
 
     if (draft.mode === "give") {
-      if (step === 1 && cleanTitle.length < 3) return "Title must be at least 3 characters.";
-      if (step === 2 && cleanDesc.length < 3) return "Description is required.";
-      if (step === 3) {
-        if (!itemFile) return "A photo is required for Give posts.";
-        if (!isAllowedImage(itemFile)) return "Photo must be JPG, PNG, or WEBP.";
-        if (itemFile.size > MAX_ITEM_PHOTO_MB * 1024 * 1024) return `Photo too large (max ${MAX_ITEM_PHOTO_MB}MB).`;
+      if (step === 0) {
+        if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
+        if (cleanDesc.length < 3) return "Description is required.";
+        if (!draft.giveCategory) return "Choose a category.";
+        if (!draft.pickupLocation) return "Choose a pickup location.";
       }
-      if (step === 4 && !draft.giveCategory) return "Category is required.";
-      if (step === 5 && !draft.pickupLocation) return "Pickup spot is required.";
+
+      if (step === 1) {
+        if (!itemFile) return "Please upload an image.";
+        if (!isAllowedImage(itemFile)) return "Image must be JPG, PNG, or WEBP.";
+      }
+
       return null;
     }
 
     if (draft.mode === "request") {
-      if (step === 1 && cleanTitle.length < 3) return "Title must be at least 3 characters.";
-      if (step === 2 && cleanDesc.length < 3) return "Description is required.";
-      if (step === 3 && !draft.requestGroup) return "Request type is required.";
-      if (step === 4 && !draft.requestTimeframe) return "Timeframe is required.";
+      if (step === 0) {
+        if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
+        if (cleanDesc.length < 3) return "Description is required.";
+        if (!draft.requestGroup) return "Choose a request type.";
+      }
+
+      if (step === 1) {
+        if (!draft.requestTimeframe) return "Choose a timeframe.";
+      }
+
       return null;
     }
 
-    // event
-    if (step === 1 && cleanTitle.length < 3) return "Title must be at least 3 characters.";
-    if (step === 2 && cleanDesc.length < 3) return "Description is required.";
-    if (step === 3 && !draft.eventCategory) return "Event category is required.";
-    if (step === 4 && !draft.hostOrg.trim()) return "Host Club/Organisation is required.";
-    if (step === 5 && !draft.eventLocation.trim()) return "Location is required.";
-    if (step === 6) {
-      if (!draft.eventDate) return "Pick an event date.";
-      if (!draft.eventStartTime) return "Pick a start time.";
-      if (!eventStartIso) return "Start time is invalid.";
-      if (draft.eventEndTime && eventEndIso && new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime()) {
-        return "End time cannot be before start time.";
+    if (draft.mode === "event") {
+      if (step === 0) {
+        if (cleanTitle.length < 3) return "Title must be at least 3 characters.";
+        if (cleanDesc.length < 3) return "Description is required.";
+        if (!draft.eventCategory) return "Choose a category.";
+        if (!draft.hostOrg.trim()) return "Host is required.";
       }
-    }
-    if (step === 7) {
-      if (!eventFile) return "A flyer/photo is required for events.";
-      if (!isAllowedImage(eventFile)) return "Flyer must be JPG, PNG, or WEBP.";
-      if (eventFile.size > MAX_EVENT_FLYER_MB * 1024 * 1024) return `Flyer too large (max ${MAX_EVENT_FLYER_MB}MB).`;
-    }
-    if (step === 8 && !isValidHttpUrlMaybeEmpty(draft.eventLink)) {
-      return "Link must start with http:// or https:// (or be empty).";
+
+      if (step === 1) {
+        if (!draft.eventLocation.trim()) return "Location is required.";
+        if (!draft.eventDate) return "Choose a date.";
+        if (!draft.eventStartTime) return "Choose a start time.";
+        if (!eventStartIso) return "Start time is invalid.";
+        if (!eventFile) return "Please upload an image.";
+        if (!isValidHttpUrlMaybeEmpty(draft.eventLink)) {
+          return "Link must start with http:// or https://";
+        }
+        if (
+          draft.eventEndTime &&
+          eventEndIso &&
+          new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime()
+        ) {
+          return "End time cannot be before start time.";
+        }
+      }
+
+      return null;
     }
 
     return null;
   }
 
-  function validateAllBeforeSubmit(): string | null {
-    if (!draft.mode) return "Choose what you want to create.";
-    for (let i = 0; i <= maxStepIndex; i += 1) {
-      const err = getStepError(i);
-      if (err) return err;
-    }
+  function validateAllBeforeSubmit() {
+    const e0 = getStepError(0);
+    if (e0) return e0;
+    const e1 = getStepError(1);
+    if (e1) return e1;
     return null;
+  }
+
+  function goToStep(step: StepIndex) {
+    setMsg(null);
+    if (!draft.mode) return;
+    setDraft((prev) => ({ ...prev, currentStep: step }));
   }
 
   function nextStep() {
@@ -602,26 +576,17 @@ export default function CreatePage() {
       if (!isLoggedIn || !profileComplete) router.push("/me");
       return;
     }
-    patchDraft("currentStep", Math.min(currentStep + 1, maxStepIndex));
+    if (currentStep < 2) {
+      patchDraft("currentStep", (currentStep + 1) as StepIndex);
+    }
   }
 
   function prevStep() {
     setMsg(null);
-    patchDraft("currentStep", Math.max(currentStep - 1, 0));
+    if (currentStep > 0) {
+      patchDraft("currentStep", (currentStep - 1) as StepIndex);
+    }
   }
-
-  const canGoNext = !getStepError(currentStep);
-  const isReviewStep = draft.mode ? currentStep === maxStepIndex : false;
-
-  const stepTitle = useMemo(() => {
-    if (!draft.mode && currentStep === 0) return "What would you like to create?";
-    return steps[currentStep] || "Create";
-  }, [draft.mode, currentStep, steps]);
-
-  const progressText = draft.mode ? `Step ${currentStep + 1} of ${steps.length}` : "Start";
-  const eventTimeSummary = eventStartIso
-    ? `${formatLongDateTime(eventStartIso)}${eventEndIso ? ` → ${formatLongDateTime(eventEndIso)}` : ""}`
-    : "—";
 
   async function handleSubmit() {
     setMsg(null);
@@ -629,7 +594,6 @@ export default function CreatePage() {
     const validationError = validateAllBeforeSubmit();
     if (validationError) {
       setMsg(validationError);
-      if (!isLoggedIn || !profileComplete) router.push("/me");
       return;
     }
 
@@ -642,7 +606,7 @@ export default function CreatePage() {
 
     try {
       if (draft.mode === "event") {
-        const insertRow: any = {
+        const eventInsert: any = {
           created_by: userId,
           title: cleanTitle,
           description: cleanDesc,
@@ -660,7 +624,7 @@ export default function CreatePage() {
 
         const { data: created, error: createErr } = await supabase
           .from(EVENTS_TABLE)
-          .insert([insertRow])
+          .insert([eventInsert])
           .select("id")
           .single();
 
@@ -670,36 +634,37 @@ export default function CreatePage() {
 
         const eventId = String(created.id);
 
-        // required flyer
-        const flyer = eventFile;
-        if (!flyer) {
+        if (!eventFile) {
           await supabase.from(EVENTS_TABLE).delete().eq("id", eventId);
-          throw new Error("Event flyer is required.");
+          throw new Error("Image is required.");
         }
 
-        const ext = getExt(flyer.name);
+        const ext = getExt(eventFile.name);
         const path = `events/${userId}/${eventId}/${uuidSafe()}.${ext}`;
 
-        const { error: upErr } = await supabase.storage.from(EVENT_FLYERS_BUCKET).upload(path, flyer, {
+        const { error: uploadErr } = await supabase.storage.from(EVENT_FLYERS_BUCKET).upload(path, eventFile, {
           cacheControl: "3600",
           upsert: false,
-          contentType: flyer.type || undefined,
+          contentType: eventFile.type || undefined,
         });
 
-        if (upErr) {
+        if (uploadErr) {
           await supabase.from(EVENTS_TABLE).delete().eq("id", eventId);
-          throw new Error(`Flyer upload failed: ${upErr.message}`);
+          throw new Error(`Image upload failed: ${uploadErr.message}`);
         }
 
         const { data: pub } = supabase.storage.from(EVENT_FLYERS_BUCKET).getPublicUrl(path);
-        const flyerPublicUrl = pub.publicUrl;
+        const photoUrl = `${pub.publicUrl}?v=${Date.now()}`;
 
-        const { error: updErr } = await supabase.from(EVENTS_TABLE).update({ photo_url: flyerPublicUrl }).eq("id", eventId);
+        const { error: updErr } = await supabase
+          .from(EVENTS_TABLE)
+          .update({ photo_url: photoUrl })
+          .eq("id", eventId);
 
         if (updErr) {
           await supabase.storage.from(EVENT_FLYERS_BUCKET).remove([path]);
           await supabase.from(EVENTS_TABLE).delete().eq("id", eventId);
-          throw new Error(`Flyer saved but event update failed: ${updErr.message}`);
+          throw new Error(`Event created but image save failed: ${updErr.message}`);
         }
 
         resetWizard();
@@ -708,7 +673,6 @@ export default function CreatePage() {
         return;
       }
 
-      // items / requests
       const postType: PostType = draft.mode === "give" ? "give" : "request";
       const { untilCancel, expiresAt } = computeExpiry(draft.expireChoice);
 
@@ -731,11 +695,11 @@ export default function CreatePage() {
         itemInsert.request_timeframe = null;
         itemInsert.request_location = null;
       } else {
-        itemInsert.category = "others";
+        itemInsert.category = draft.requestGroup === "lost & found" ? "lost & found" : "others";
         itemInsert.pickup_location = null;
         itemInsert.request_group = draft.requestGroup;
         itemInsert.request_timeframe = draft.requestTimeframe;
-        itemInsert.request_location = draft.requestLocation.trim() ? draft.requestLocation.trim() : null;
+        itemInsert.request_location = draft.requestLocation.trim() || null;
       }
 
       const { data: createdItem, error: createItemErr } = await supabase
@@ -750,7 +714,6 @@ export default function CreatePage() {
 
       const itemId = String(createdItem.id);
 
-      // request: no photo
       if (postType === "request") {
         resetWizard();
         router.push(`/item/${itemId}`);
@@ -758,36 +721,37 @@ export default function CreatePage() {
         return;
       }
 
-      // give: required photo + rollback on fail
-      const givePhoto = itemFile;
-      if (!givePhoto) {
+      if (!itemFile) {
         await supabase.from(ITEMS_TABLE).delete().eq("id", itemId);
-        throw new Error("Photo is required for Give posts.");
+        throw new Error("Image is required.");
       }
 
-      const ext = getExt(givePhoto.name);
+      const ext = getExt(itemFile.name);
       const storagePath = `items/${userId}/${itemId}/${uuidSafe()}.${ext}`;
 
-      const { error: uploadErr } = await supabase.storage.from(ITEM_PHOTOS_BUCKET).upload(storagePath, givePhoto, {
+      const { error: uploadErr } = await supabase.storage.from(ITEM_PHOTOS_BUCKET).upload(storagePath, itemFile, {
         cacheControl: "3600",
         upsert: false,
-        contentType: givePhoto.type || undefined,
+        contentType: itemFile.type || undefined,
       });
 
       if (uploadErr) {
         await supabase.from(ITEMS_TABLE).delete().eq("id", itemId);
-        throw new Error(`Photo upload failed: ${uploadErr.message}`);
+        throw new Error(`Image upload failed: ${uploadErr.message}`);
       }
 
       const { data: pub } = supabase.storage.from(ITEM_PHOTOS_BUCKET).getPublicUrl(storagePath);
-      const publicUrl = pub.publicUrl;
+      const photoUrl = `${pub.publicUrl}?v=${Date.now()}`;
 
-      const { error: updateErr } = await supabase.from(ITEMS_TABLE).update({ photo_url: publicUrl }).eq("id", itemId);
+      const { error: updateErr } = await supabase
+        .from(ITEMS_TABLE)
+        .update({ photo_url: photoUrl })
+        .eq("id", itemId);
 
       if (updateErr) {
         await supabase.storage.from(ITEM_PHOTOS_BUCKET).remove([storagePath]);
         await supabase.from(ITEMS_TABLE).delete().eq("id", itemId);
-        throw new Error(`Photo uploaded but item update failed: ${updateErr.message}`);
+        throw new Error(`Post created but image save failed: ${updateErr.message}`);
       }
 
       const { error: photoErr } = await supabase
@@ -797,7 +761,7 @@ export default function CreatePage() {
       if (photoErr) {
         await supabase.storage.from(ITEM_PHOTOS_BUCKET).remove([storagePath]);
         await supabase.from(ITEMS_TABLE).delete().eq("id", itemId);
-        throw new Error(`Photo metadata save failed: ${photoErr.message}`);
+        throw new Error(`Image metadata save failed: ${photoErr.message}`);
       }
 
       resetWizard();
@@ -810,91 +774,93 @@ export default function CreatePage() {
     }
   }
 
-  // ---------------- UI styles ----------------
   const pageStyle: React.CSSProperties = {
     minHeight: "100vh",
-    background: "#f7f7f8",
+    background:
+      "linear-gradient(180deg, #f8fafc 0%, #f6f7fb 35%, #f8fafc 100%)",
     color: "#0f172a",
     padding: 18,
-    paddingBottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px) + 84px + 24px)",
+    paddingBottom:
+      "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px) + 98px + 24px)",
   };
 
-  const shell: React.CSSProperties = { maxWidth: 760, margin: "0 auto" };
+  const shell: React.CSSProperties = {
+    maxWidth: 780,
+    margin: "0 auto",
+  };
+
+  const brandWrap: React.CSSProperties = {
+    marginBottom: 14,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  };
+
+  const brandTitle: React.CSSProperties = {
+    fontSize: 28,
+    fontWeight: 1000,
+    letterSpacing: "-0.03em",
+  };
+
+  const brandSub: React.CSSProperties = {
+    marginTop: 4,
+    color: "#64748b",
+    fontSize: 14,
+    fontWeight: 600,
+  };
 
   const card: React.CSSProperties = {
-    background: "white",
+    background: "rgba(255,255,255,0.96)",
     border: "1px solid #e5e7eb",
-    borderRadius: 18,
-    padding: 14,
-    boxShadow: "0 10px 24px rgba(0,0,0,0.05)",
+    borderRadius: 20,
+    padding: 16,
+    boxShadow: "0 16px 40px rgba(15,23,42,0.06)",
+    backdropFilter: "blur(8px)",
   };
 
   const input: React.CSSProperties = {
     width: "100%",
-    padding: "12px 12px",
+    padding: "13px 14px",
     borderRadius: 14,
     border: "1px solid #e5e7eb",
-    background: "#fbfbfc",
+    background: "#ffffff",
     outline: "none",
     fontSize: 14,
   };
 
-  const textarea: React.CSSProperties = { ...input, resize: "vertical", lineHeight: 1.35 };
-  const select: React.CSSProperties = { ...input, background: "white", cursor: "pointer" };
-  const row2: React.CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 };
+  const textarea: React.CSSProperties = {
+    ...input,
+    resize: "vertical",
+    lineHeight: 1.4,
+  };
+
+  const select: React.CSSProperties = {
+    ...input,
+    cursor: "pointer",
+  };
 
   const button: React.CSSProperties = {
     border: "1px solid #e5e7eb",
-    background: "white",
+    background: "#ffffff",
     color: "#111827",
-    padding: "10px 12px",
+    padding: "11px 14px",
     borderRadius: 14,
     cursor: "pointer",
     fontWeight: 900,
-  };
-
-  const danger: React.CSSProperties = {
-    ...button,
-    borderColor: "#fecaca",
-    color: "#b91c1c",
-  };
-
-  const sticky: React.CSSProperties = {
-    position: "fixed",
-    left: 0,
-    right: 0,
-    bottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px))",
-    minHeight: WIZARD_STICKY_HEIGHT,
-    background: "rgba(247,247,248,0.92)",
-    borderTop: "1px solid #e5e7eb",
-    backdropFilter: "blur(10px)",
-    zIndex: 9999,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "10px 16px",
-    pointerEvents: "auto",
-  };
-
-  const stickyInner: React.CSSProperties = {
-    width: "100%",
-    maxWidth: 760,
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
   };
 
   const primary = (disabled: boolean): React.CSSProperties => ({
     border: "none",
     borderRadius: 16,
     padding: "12px 16px",
-    minWidth: 140,
-    fontWeight: 950,
+    minWidth: 130,
+    fontWeight: 1000,
     cursor: disabled ? "not-allowed" : "pointer",
     opacity: disabled ? 0.55 : 1,
     color: "white",
-    background: disabled ? "#94a3b8" : "#10b981",
-    boxShadow: disabled ? "none" : "0 14px 30px rgba(16,185,129,0.25)",
+    background: disabled ? "#94a3b8" : "#0f172a",
+    boxShadow: disabled ? "none" : "0 16px 34px rgba(15,23,42,0.18)",
   });
 
   const ghostBtn: React.CSSProperties = {
@@ -903,192 +869,127 @@ export default function CreatePage() {
     minWidth: 96,
   };
 
+  const danger: React.CSSProperties = {
+    ...button,
+    borderColor: "#fecaca",
+    color: "#b91c1c",
+  };
+
+  const modeButton = (active: boolean): React.CSSProperties => ({
+    ...button,
+    width: "100%",
+    textAlign: "left",
+    borderRadius: 18,
+    padding: 16,
+    background: active ? "#eef2ff" : "#ffffff",
+    borderColor: active ? "#c7d2fe" : "#e5e7eb",
+    boxShadow: active ? "0 10px 25px rgba(79,70,229,0.08)" : "none",
+  });
+
+  const sticky: React.CSSProperties = {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px))",
+    minHeight: WIZARD_STICKY_HEIGHT,
+    background: "rgba(248,250,252,0.92)",
+    borderTop: "1px solid #e5e7eb",
+    backdropFilter: "blur(14px)",
+    zIndex: 9999,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "10px 16px",
+  };
+
+  const stickyInner: React.CSSProperties = {
+    width: "100%",
+    maxWidth: 780,
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  };
+
+  const row2: React.CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 10,
+  };
+
   const canGoBack = currentStep > 0;
-  const stepError = getStepError(currentStep);
+  const stepError = draft.mode ? getStepError(currentStep) : null;
+  const isReviewStep = !!draft.mode && currentStep === 2;
 
   const stickyHint = useMemo(() => {
-    if (!draft.mode) return "Choose Give, Request, or Event to begin.";
-    if (!isLoggedIn) return "Log in with your @ashland.edu email to post.";
-    if (!profileComplete) return "Finish profile setup in Account.";
+    if (!draft.mode) return "Choose one to start.";
+    if (!isLoggedIn) return "Log in with your @ashland.edu email.";
+    if (!profileComplete) return "Finish your profile first.";
     if (stepError) return stepError;
-    if (isReviewStep) return "Review everything carefully before posting.";
-    return "Looks good. Continue to the next step.";
+    if (isReviewStep) return "Review everything before posting.";
+    return "Looks good.";
   }, [draft.mode, isLoggedIn, profileComplete, stepError, isReviewStep]);
 
-  // ---------------- gated screens ----------------
-  if (!hydratedDraft || authLoading || profileLoading) {
+  const eventTimeSummary = eventStartIso
+    ? `${formatLongDateTime(eventStartIso)}${eventEndIso ? ` → ${formatLongDateTime(eventEndIso)}` : ""}`
+    : "—";
+
+  function renderModePicker() {
     return (
-      <div style={pageStyle}>
-        <div style={shell}>
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>Loading your account…</div>
-            <div style={{ marginTop: 8, fontSize: 13, color: "#6b7280" }}>
-              Restoring your wizard draft and checking profile status.
-            </div>
-            {msg && (
-              <div
-                style={{
-                  marginTop: 12,
-                  padding: 10,
-                  borderRadius: 14,
-                  border: "1px solid #fecdd3",
-                  background: "#fff1f2",
-                  color: "#9f1239",
-                  fontWeight: 850,
-                }}
-              >
-                {msg}
-              </div>
-            )}
+      <div style={{ display: "grid", gap: 12 }}>
+        <button type="button" onClick={() => selectMode("give")} style={modeButton(draft.mode === "give")}>
+          <div style={{ fontWeight: 1000, fontSize: 18 }}>Give</div>
+          <div style={{ marginTop: 6, fontSize: 14, color: "#64748b" }}>
+            Share items with others.
           </div>
-        </div>
+        </button>
+
+        <button type="button" onClick={() => selectMode("request")} style={modeButton(draft.mode === "request")}>
+          <div style={{ fontWeight: 1000, fontSize: 18 }}>Request</div>
+          <div style={{ marginTop: 6, fontSize: 14, color: "#64748b" }}>
+            Ask the community for items or help you need.
+          </div>
+        </button>
+
+        <button type="button" onClick={() => selectMode("event")} style={modeButton(draft.mode === "event")}>
+          <div style={{ fontWeight: 1000, fontSize: 18 }}>Event</div>
+          <div style={{ marginTop: 6, fontSize: 14, color: "#64748b" }}>
+            Promote upcoming campus events.
+          </div>
+        </button>
       </div>
     );
   }
 
-  if (!isLoggedIn) {
-    return (
-      <div style={pageStyle}>
-        <div style={shell}>
-          <div style={card}>
-            <div style={{ fontSize: 22, fontWeight: 950 }}>Post on ScholarSwap</div>
-            <p style={{ color: "#4b5563" }}>
-              You must log in with your <b>@ashland.edu</b> email.
-            </p>
-            {msg && (
-              <div
-                style={{
-                  marginTop: 12,
-                  padding: 10,
-                  borderRadius: 14,
-                  border: "1px solid #fecdd3",
-                  background: "#fff1f2",
-                  color: "#9f1239",
-                  fontWeight: 850,
-                }}
-              >
-                {msg}
-              </div>
-            )}
-            <button onClick={() => router.push("/me")} style={{ ...button, marginTop: 12 }}>
-              Go to Account
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (!profileComplete) {
-    return (
-      <div style={pageStyle}>
-        <div style={shell}>
-          <div style={card}>
-            <div style={{ fontSize: 22, fontWeight: 950 }}>Complete Profile</div>
-            <p style={{ color: "#4b5563" }}>Before posting, add your full name and pick Student/Faculty in Account.</p>
-            <button onClick={() => router.push("/me")} style={{ ...primary(false), marginTop: 10 }}>
-              Go to Profile Setup
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  function renderProgress() {
+  function renderStepTabs() {
     if (!draft.mode) return null;
-    const pct = ((currentStep + 1) / steps.length) * 100;
 
     return (
-      <div style={card}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-          <div>
-            <div style={{ fontWeight: 950 }}>{progressText}</div>
-            <div style={{ marginTop: 4, fontSize: 13, color: "#6b7280" }}>{steps[currentStep]}</div>
-          </div>
-          <button type="button" onClick={resetWizard} style={{ ...danger, borderRadius: 999 }}>
-            Start over
-          </button>
-        </div>
+      <div style={{ ...card, padding: 12 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {steps.map((label, i) => {
+            const idx = i as StepIndex;
+            const active = idx === currentStep;
+            const done = idx < currentStep;
 
-        <div
-          style={{
-            marginTop: 12,
-            height: 10,
-            borderRadius: 999,
-            background: "#e5e7eb",
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              width: `${pct}%`,
-              height: "100%",
-              background: "#10b981",
-              transition: "width 0.2s ease",
-            }}
-          />
-        </div>
-      </div>
-    );
-  }
-
-  function renderTypeChoice() {
-    return (
-      <div style={card}>
-        <div style={{ fontSize: 24, fontWeight: 950 }}>Choose what you want to create</div>
-        <div style={{ marginTop: 8, color: "#4b5563" }}>
-          Once you choose a type, it stays locked for this draft unless you start over.
-        </div>
-
-        <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
-          <button
-            type="button"
-            onClick={() => selectMode("give")}
-            style={{
-              ...button,
-              textAlign: "left",
-              padding: 16,
-              borderRadius: 18,
-            }}
-          >
-            <div style={{ fontWeight: 950, fontSize: 18 }}>Give</div>
-            <div style={{ marginTop: 6, color: "#6b7280", fontSize: 14 }}>
-              Give away an item with a required photo, category, and pickup spot.
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => selectMode("request")}
-            style={{
-              ...button,
-              textAlign: "left",
-              padding: 16,
-              borderRadius: 18,
-            }}
-          >
-            <div style={{ fontWeight: 950, fontSize: 18 }}>Request</div>
-            <div style={{ marginTop: 6, color: "#6b7280", fontSize: 14 }}>
-              Ask for help or something you need. No photo required.
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => selectMode("event")}
-            style={{
-              ...button,
-              textAlign: "left",
-              padding: 16,
-              borderRadius: 18,
-            }}
-          >
-            <div style={{ fontWeight: 950, fontSize: 18 }}>Event</div>
-            <div style={{ marginTop: 6, color: "#6b7280", fontSize: 14 }}>
-              Post a campus event with date, time, location, and a required flyer/photo.
-            </div>
-          </button>
+            return (
+              <button
+                key={label}
+                type="button"
+                onClick={() => goToStep(idx)}
+                style={{
+                  ...button,
+                  borderRadius: 999,
+                  padding: "10px 14px",
+                  background: active ? "#0f172a" : done ? "#ecfeff" : "#ffffff",
+                  color: active ? "#ffffff" : "#111827",
+                  borderColor: active ? "#0f172a" : done ? "#a5f3fc" : "#e5e7eb",
+                }}
+              >
+                {done ? "✓ " : ""}
+                {label}
+              </button>
+            );
+          })}
         </div>
       </div>
     );
@@ -1103,8 +1004,8 @@ export default function CreatePage() {
           <div
             style={{
               position: "relative",
-              height: 220,
-              background: "#eff6ff",
+              height: 230,
+              background: "#eef2ff",
               borderBottom: "1px solid #e5e7eb",
             }}
           >
@@ -1113,13 +1014,13 @@ export default function CreatePage() {
                 position: "absolute",
                 top: 12,
                 left: 12,
+                zIndex: 2,
                 padding: "6px 10px",
                 borderRadius: 999,
+                background: "rgba(15,23,42,0.72)",
+                color: "white",
                 fontSize: 12,
                 fontWeight: 900,
-                background: "rgba(59,130,246,0.12)",
-                color: "#1e3a8a",
-                border: "1px solid rgba(59,130,246,0.25)",
               }}
             >
               EVENT
@@ -1139,46 +1040,27 @@ export default function CreatePage() {
                   height: "100%",
                   display: "grid",
                   placeItems: "center",
-                  color: "#6b7280",
+                  color: "#64748b",
                   fontWeight: 900,
                 }}
               >
-                Flyer required
+                No preview
               </div>
             )}
           </div>
 
-          <div style={{ padding: 14 }}>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 800 }}>
-                Host: {draft.hideName ? "Anonymous" : draft.hostOrg || "—"}
-              </span>
-              <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 800 }}>• {draft.eventCategory}</span>
+          <div style={{ padding: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 900, color: "#64748b" }}>
+              {draft.eventCategory.toUpperCase()} • {draft.hostOrg || "Host"}
             </div>
-
-            <div style={{ marginTop: 8, fontSize: 20, fontWeight: 950 }}>{cleanTitle || "Untitled event"}</div>
-
-            <div style={{ marginTop: 8, fontSize: 12, fontWeight: 900, color: "#065f46" }}>
-              {eventTimeSummary} • {draft.eventLocation || "Location needed"}
+            <div style={{ marginTop: 8, fontWeight: 1000, fontSize: 22 }}>
+              {cleanTitle || "Untitled event"}
             </div>
-
-            <div style={{ marginTop: 10, color: "#374151", fontSize: 14 }}>
+            <div style={{ marginTop: 8, fontSize: 13, fontWeight: 800, color: "#0f766e" }}>
+              📍 {draft.eventLocation || "Location needed"} • {eventTimeSummary}
+            </div>
+            <div style={{ marginTop: 12, color: "#374151", fontSize: 14 }}>
               {cleanDesc || "No description yet."}
-            </div>
-
-            <div
-              style={{
-                marginTop: 10,
-                display: "flex",
-                justifyContent: "space-between",
-                gap: 10,
-                color: "#6b7280",
-                fontWeight: 900,
-                fontSize: 12,
-              }}
-            >
-              <span>{draft.eventLink.trim() ? "Link included" : "No link"}</span>
-              <span>Starts: {formatShortDate(eventStartIso)}</span>
             </div>
           </div>
         </div>
@@ -1187,64 +1069,32 @@ export default function CreatePage() {
 
     if (draft.mode === "request") {
       return (
-        <div style={{ ...card, overflow: "hidden", padding: 0, borderColor: "rgba(16,185,129,0.25)" }}>
+        <div style={{ ...card, overflow: "hidden", padding: 0 }}>
           <div
             style={{
-              position: "relative",
-              minHeight: 220,
-              padding: 16,
+              minHeight: 170,
+              padding: 18,
               display: "flex",
               flexDirection: "column",
               justifyContent: "flex-end",
-              background: "rgba(16,185,129,0.08)",
+              background: "linear-gradient(135deg, #ecfeff 0%, #f8fafc 100%)",
+              borderBottom: "1px solid #e5e7eb",
             }}
           >
-            <div
-              style={{
-                position: "absolute",
-                top: 12,
-                left: 12,
-                padding: "6px 10px",
-                borderRadius: 999,
-                fontSize: 12,
-                fontWeight: 900,
-                background: "rgba(16,185,129,0.12)",
-                color: "#065f46",
-                border: "1px solid rgba(16,185,129,0.25)",
-              }}
-            >
-              REQUEST
+            <div style={{ fontSize: 12, fontWeight: 900, color: "#0f766e" }}>
+              {requestGroupLabel(draft.requestGroup)} • {requestTimeframeLabel(draft.requestTimeframe)}
             </div>
-
-            <div style={{ fontSize: 13, fontWeight: 900, color: "#374151", marginBottom: 8 }}>
-              {requestGroupLabel(draft.requestGroup)}
-              {draft.requestTimeframe ? ` • ${requestTimeframeLabel(draft.requestTimeframe)}` : ""}
-              {draft.requestLocation.trim() ? ` • ${draft.requestLocation.trim()}` : ""}
+            <div style={{ marginTop: 8, fontWeight: 1000, fontSize: 22 }}>
+              {cleanTitle || "Untitled request"}
             </div>
-
-            <div style={{ fontSize: 20, fontWeight: 950 }}>{cleanTitle || "Untitled request"}</div>
           </div>
 
-          <div style={{ padding: 14 }}>
-            <div style={{ fontSize: 12, color: "#6b7280", fontWeight: 800 }}>
-              Type: {requestGroupLabel(draft.requestGroup)}
+          <div style={{ padding: 16 }}>
+            <div style={{ fontSize: 13, color: "#64748b", fontWeight: 800 }}>
+              📍 {draft.requestLocation.trim() || "No location added"}
             </div>
-            <div style={{ marginTop: 10, color: "#374151", fontSize: 14 }}>
+            <div style={{ marginTop: 12, color: "#374151", fontSize: 14 }}>
               {cleanDesc || "No description yet."}
-            </div>
-            <div
-              style={{
-                marginTop: 10,
-                display: "flex",
-                justifyContent: "space-between",
-                gap: 10,
-                color: "#6b7280",
-                fontWeight: 900,
-                fontSize: 12,
-              }}
-            >
-              <span>Tap to offer help</span>
-              <span>{draft.expireChoice === "never" ? "No auto-close" : `Auto-close: ${draft.expireChoice}`}</span>
             </div>
           </div>
         </div>
@@ -1256,8 +1106,8 @@ export default function CreatePage() {
         <div
           style={{
             position: "relative",
-            height: 220,
-            background: "#f3f4f6",
+            height: 230,
+            background: "#f1f5f9",
             borderBottom: "1px solid #e5e7eb",
           }}
         >
@@ -1266,17 +1116,16 @@ export default function CreatePage() {
               position: "absolute",
               top: 12,
               left: 12,
+              zIndex: 2,
               padding: "6px 10px",
               borderRadius: 999,
+              background: "rgba(15,23,42,0.72)",
+              color: "white",
               fontSize: 12,
               fontWeight: 900,
-              background: "rgba(16,185,129,0.12)",
-              color: "#065f46",
-              border: "1px solid rgba(16,185,129,0.25)",
-              zIndex: 1,
             }}
           >
-            AVAILABLE
+            GIVE
           </div>
 
           {itemPreviewUrl ? (
@@ -1293,42 +1142,24 @@ export default function CreatePage() {
                 height: "100%",
                 display: "grid",
                 placeItems: "center",
-                color: "#6b7280",
+                color: "#64748b",
                 fontWeight: 900,
               }}
             >
-              Photo required
+              No preview
             </div>
           )}
         </div>
 
-        <div style={{ padding: 14 }}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 800 }}>
-              Category: {draft.giveCategory || "—"}
-            </span>
-            <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 800 }}>• Pickup: {draft.pickupLocation}</span>
+        <div style={{ padding: 16 }}>
+          <div style={{ fontSize: 12, color: "#64748b", fontWeight: 900 }}>
+            {draft.giveCategory.toUpperCase()} • {draft.pickupLocation}
           </div>
-
-          <div style={{ marginTop: 8, fontSize: 20, fontWeight: 950 }}>{cleanTitle || "Untitled item"}</div>
-
-          <div style={{ marginTop: 10, color: "#374151", fontSize: 14 }}>
+          <div style={{ marginTop: 8, fontWeight: 1000, fontSize: 22 }}>
+            {cleanTitle || "Untitled item"}
+          </div>
+          <div style={{ marginTop: 12, color: "#374151", fontSize: 14 }}>
             {cleanDesc || "No description yet."}
-          </div>
-
-          <div
-            style={{
-              marginTop: 10,
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 10,
-              color: "#6b7280",
-              fontWeight: 900,
-              fontSize: 12,
-            }}
-          >
-            <span>0 requests</span>
-            <span>{draft.expireChoice === "never" ? "No auto-close" : `Auto-close: ${draft.expireChoice}`}</span>
           </div>
         </div>
       </div>
@@ -1340,8 +1171,9 @@ export default function CreatePage() {
 
     return (
       <div style={{ ...card, marginTop: 12 }}>
-        <div style={{ fontSize: 18, fontWeight: 950 }}>Review details</div>
-        <div style={{ marginTop: 12, display: "grid", gap: 10, color: "#374151" }}>
+        <div style={{ fontSize: 18, fontWeight: 1000 }}>Final check</div>
+
+        <div style={{ marginTop: 12, display: "grid", gap: 10, color: "#374151", fontSize: 14 }}>
           <div><b>Type:</b> {draft.mode}</div>
           <div><b>Title:</b> {cleanTitle || "—"}</div>
           <div><b>Description:</b> {cleanDesc || "—"}</div>
@@ -1350,8 +1182,8 @@ export default function CreatePage() {
             <>
               <div><b>Category:</b> {draft.giveCategory}</div>
               <div><b>Pickup:</b> {draft.pickupLocation}</div>
-              <div><b>Photo:</b> {itemFile ? itemFile.name : draft.itemFileName || "Missing"}</div>
-              <div><b>Hide my name:</b> {draft.hideName ? "Yes" : "No"}</div>
+              <div><b>Image:</b> {itemFile ? itemFile.name : draft.itemFileName || "Missing"}</div>
+              <div><b>Anonymous:</b> {draft.hideName ? "Yes" : "No"}</div>
               <div><b>Auto-close:</b> {draft.expireChoice}</div>
             </>
           )}
@@ -1361,7 +1193,7 @@ export default function CreatePage() {
               <div><b>Request type:</b> {requestGroupLabel(draft.requestGroup)}</div>
               <div><b>Timeframe:</b> {requestTimeframeLabel(draft.requestTimeframe)}</div>
               <div><b>Location:</b> {draft.requestLocation.trim() || "—"}</div>
-              <div><b>Hide my name:</b> {draft.hideName ? "Yes" : "No"}</div>
+              <div><b>Anonymous:</b> {draft.hideName ? "Yes" : "No"}</div>
               <div><b>Auto-close:</b> {draft.expireChoice}</div>
             </>
           )}
@@ -1373,206 +1205,92 @@ export default function CreatePage() {
               <div><b>Location:</b> {draft.eventLocation.trim() || "—"}</div>
               <div><b>Time:</b> {eventTimeSummary}</div>
               <div><b>Link:</b> {draft.eventLink.trim() || "—"}</div>
-              <div><b>Flyer:</b> {eventFile ? eventFile.name : draft.eventFileName || "Missing"}</div>
-              <div><b>Hide my name:</b> {draft.hideName ? "Yes" : "No"}</div>
+              <div><b>Image:</b> {eventFile ? eventFile.name : draft.eventFileName || "Missing"}</div>
+              <div><b>Anonymous:</b> {draft.hideName ? "Yes" : "No"}</div>
             </>
           )}
         </div>
 
-        {(draft.mode === "give" && !itemFile) || (draft.mode === "event" && !eventFile) ? (
+        {((draft.mode === "give" && !itemFile) || (draft.mode === "event" && !eventFile)) && (
           <div
             style={{
               marginTop: 12,
               padding: 10,
               borderRadius: 14,
-              background: "#fffbeb",
-              border: "1px solid #fde68a",
-              color: "#92400e",
+              background: "#fff7ed",
+              border: "1px solid #fdba74",
+              color: "#9a3412",
               fontWeight: 800,
             }}
           >
-            Drafts save your text and choices, but browser refreshes do not safely preserve the actual uploaded file.
-            Please re-select the image before posting if needed.
+            Your text draft was restored, but the browser may not preserve the actual uploaded file after refresh.
+            Re-select the image before posting if needed.
           </div>
-        ) : null}
+        )}
       </div>
     );
   }
 
   function renderStepContent() {
-    if (!draft.mode || currentStep === 0) return renderTypeChoice();
+    if (!draft.mode) return null;
 
-    // GIVE
-    if (draft.mode === "give") {
-      if (currentStep === 1) {
+    // STEP 1
+    if (currentStep === 0) {
+      if (draft.mode === "give") {
         return (
           <div style={card}>
-            <div style={{ fontWeight: 950 }}>What are you giving away?</div>
-            <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 18, fontWeight: 1000 }}>Give details</div>
+
+            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
               <input
                 value={draft.title}
                 onChange={(e) => patchDraft("title", e.target.value)}
                 style={input}
-                placeholder={`Example: "Bedford Handbook (good condition)"`}
+                placeholder="Item title"
                 autoFocus
               />
-            </div>
-          </div>
-        );
-      }
 
-      if (currentStep === 2) {
-        return (
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>Any details someone should know?</div>
-            <div style={{ marginTop: 10 }}>
               <textarea
                 value={draft.description}
                 onChange={(e) => patchDraft("description", e.target.value)}
                 style={textarea}
                 rows={5}
-                placeholder="Condition, what's included, any flaws."
-                autoFocus
+                placeholder="Describe the item, condition, and useful details."
               />
-            </div>
-          </div>
-        );
-      }
 
-      if (currentStep === 3) {
-        return (
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>Add a photo (required)</div>
-            <div style={{ marginTop: 10, fontSize: 13, color: "#6b7280" }}>
-              JPG / PNG / WEBP • max {MAX_ITEM_PHOTO_MB}MB
-            </div>
-
-            <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <input
-                ref={itemFileInputRef}
-                type="file"
-                accept="image/jpeg,image/png,image/webp"
-                onChange={(e) => pickItemFile(e.target.files?.[0] ?? null)}
-                style={{ display: "none" }}
-              />
-              <button type="button" style={button} onClick={() => itemFileInputRef.current?.click()}>
-                {itemFile ? "Change photo" : "Choose photo"}
-              </button>
-              {itemFile && (
-                <button type="button" style={danger} onClick={() => pickItemFile(null)}>
-                  Remove
-                </button>
-              )}
-            </div>
-
-            <div style={{ marginTop: 10, fontSize: 13, color: "#6b7280" }}>
-              {itemFile ? `Selected: ${itemFile.name}` : draft.itemFileName ? `Saved draft file name: ${draft.itemFileName}` : "No file selected yet."}
-            </div>
-
-            {itemPreviewUrl && (
-              <div style={{ marginTop: 12 }}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={itemPreviewUrl}
-                  alt="Item preview"
-                  style={{
-                    width: "100%",
-                    height: 280,
-                    objectFit: "cover",
-                    borderRadius: 16,
-                    border: "1px solid #e5e7eb",
-                  }}
-                />
-              </div>
-            )}
-          </div>
-        );
-      }
-
-      if (currentStep === 4) {
-        return (
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>Choose a category</div>
-            <div style={{ marginTop: 10 }}>
-              <select
-                value={draft.giveCategory}
-                onChange={(e) => patchDraft("giveCategory", e.target.value as GiveCategory)}
-                style={select}
-                autoFocus
-              >
-                <option value="books">Books</option>
-                <option value="notes">Notes</option>
-                <option value="electronics">Electronics</option>
-                <option value="furniture">Furniture</option>
-                <option value="clothing">Clothing</option>
-                <option value="sport equipment">Sport equipment</option>
-                <option value="stationary item">Stationary item</option>
-                <option value="health & beauty">Health & Beauty</option>
-                <option value="home & kitchen">Home & Kitchen</option>
-                <option value="musical instruments">Musical Instruments</option>
-                <option value="jeweleries">Jeweleries</option>
-                <option value="art pieces">Art pieces</option>
-                <option value="ride">Ride</option>
-                <option value="others">Others</option>
-              </select>
-            </div>
-          </div>
-        );
-      }
-
-      if (currentStep === 5) {
-        return (
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>Choose a pickup spot</div>
-            <div style={{ marginTop: 10 }}>
-              <select
-                value={draft.pickupLocation}
-                onChange={(e) => patchDraft("pickupLocation", e.target.value as PickupLocation)}
-                style={select}
-                autoFocus
-              >
-                <option value="College Quad">College Quad</option>
-                <option value="Safety Service Office">Safety Service Office</option>
-                <option value="Dining Hall">Dining Hall</option>
-              </select>
-            </div>
-          </div>
-        );
-      }
-
-      if (currentStep === 6) {
-        return (
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>More options</div>
-
-            <div style={{ marginTop: 12, ...row2 }}>
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Hide my name</div>
-                <button
-                  type="button"
-                  onClick={() => patchDraft("hideName", !draft.hideName)}
-                  style={{
-                    ...button,
-                    width: "100%",
-                    background: draft.hideName ? "rgba(16,185,129,0.10)" : "white",
-                  }}
-                >
-                  {draft.hideName ? "Hidden: ON" : "Hidden: OFF"}
-                </button>
-              </div>
-
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Automatically close after</div>
+              <div style={row2}>
                 <select
-                  value={draft.expireChoice}
-                  onChange={(e) => patchDraft("expireChoice", e.target.value as ExpireChoice)}
+                  value={draft.giveCategory}
+                  onChange={(e) => patchDraft("giveCategory", e.target.value as GiveCategory)}
                   style={select}
                 >
-                  <option value="urgent24">Urgent (24 hours)</option>
-                  <option value="7">7 days</option>
-                  <option value="14">14 days</option>
-                  <option value="30">30 days</option>
-                  <option value="never">Until I cancel</option>
+                  <option value="books">Books</option>
+                  <option value="notes">Notes</option>
+                  <option value="electronics">Electronics</option>
+                  <option value="furniture">Furniture</option>
+                  <option value="clothing">Clothing</option>
+                  <option value="sport equipment">Sport Equipment</option>
+                  <option value="stationary item">Stationary Item</option>
+                  <option value="ride">Ride</option>
+                  <option value="art pieces">Art Pieces</option>
+                  <option value="health & beauty">Health & Beauty</option>
+                  <option value="home & kitchen">Home & Kitchen</option>
+                  <option value="jeweleries">Jeweleries</option>
+                  <option value="musical instruments">Musical Instruments</option>
+                  <option value="lost & found">Lost & Found</option>
+                  <option value="others">Others</option>
+                </select>
+
+                <select
+                  value={draft.pickupLocation}
+                  onChange={(e) => patchDraft("pickupLocation", e.target.value as PickupLocation)}
+                  style={select}
+                >
+                  <option value="College Quad">College Quad</option>
+                  <option value="Safety Service Office">Safety Service Office</option>
+                  <option value="Dining Hall">Dining Hall</option>
+                  <option value="Library">Library</option>
+                  <option value="Student Center">Student Center</option>
                 </select>
               </div>
             </div>
@@ -1580,446 +1298,345 @@ export default function CreatePage() {
         );
       }
 
-      return (
-        <>
-          {renderReviewCard()}
-          {renderReviewDetails()}
-        </>
-      );
-    }
-
-    // REQUEST
-    if (draft.mode === "request") {
-      if (currentStep === 1) {
+      if (draft.mode === "request") {
         return (
           <div style={card}>
-            <div style={{ fontWeight: 950 }}>What do you need?</div>
-            <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 18, fontWeight: 1000 }}>Request details</div>
+
+            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
               <input
                 value={draft.title}
                 onChange={(e) => patchDraft("title", e.target.value)}
                 style={input}
-                placeholder={`Example: "Need a ride Friday 6am"`}
+                placeholder="What do you need?"
                 autoFocus
               />
-            </div>
-          </div>
-        );
-      }
 
-      if (currentStep === 2) {
-        return (
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>Add context so people can help fast</div>
-            <div style={{ marginTop: 10 }}>
               <textarea
                 value={draft.description}
                 onChange={(e) => patchDraft("description", e.target.value)}
                 style={textarea}
                 rows={5}
-                placeholder="Where/when/how urgent? Keep it simple."
-                autoFocus
+                placeholder="Add the details people need in order to help you."
               />
-            </div>
-          </div>
-        );
-      }
 
-      if (currentStep === 3) {
-        return (
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>Choose request type</div>
-            <div style={{ marginTop: 10 }}>
               <select
                 value={draft.requestGroup}
                 onChange={(e) => patchDraft("requestGroup", e.target.value as RequestGroup)}
                 style={select}
-                autoFocus
               >
-                <option value="logistics">Logistics (ride / moving / borrow)</option>
-                <option value="services">Services (tutoring / tech help / haircut)</option>
-                <option value="urgent">Urgent (charger / calculator / meds)</option>
-                <option value="collaboration">Collaboration (club / hackathon / project)</option>
+                <option value="logistics">Logistics</option>
+                <option value="services">Services</option>
+                <option value="urgent">Urgent</option>
+                <option value="collaboration">Collaboration</option>
+                <option value="lost & found">Lost & Found</option>
               </select>
             </div>
           </div>
         );
       }
 
-      if (currentStep === 4) {
-        return (
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>Choose timeframe</div>
-            <div style={{ marginTop: 10 }}>
-              <select
-                value={draft.requestTimeframe}
-                onChange={(e) => patchDraft("requestTimeframe", e.target.value as RequestTimeframe)}
-                style={select}
-                autoFocus
-              >
-                <option value="today">Today</option>
-                <option value="this_week">This week</option>
-                <option value="flexible">Flexible</option>
-              </select>
-            </div>
-          </div>
-        );
-      }
-
-      if (currentStep === 5) {
-        return (
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>Location (optional)</div>
-            <div style={{ marginTop: 10 }}>
-              <input
-                value={draft.requestLocation}
-                onChange={(e) => patchDraft("requestLocation", e.target.value)}
-                style={input}
-                placeholder={`Example: "Dorm A" or "Near dining hall"`}
-                autoFocus
-              />
-            </div>
-          </div>
-        );
-      }
-
-      if (currentStep === 6) {
-        return (
-          <div style={card}>
-            <div style={{ fontWeight: 950 }}>More options</div>
-
-            <div style={{ marginTop: 12, ...row2 }}>
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Hide my name</div>
-                <button
-                  type="button"
-                  onClick={() => patchDraft("hideName", !draft.hideName)}
-                  style={{
-                    ...button,
-                    width: "100%",
-                    background: draft.hideName ? "rgba(16,185,129,0.10)" : "white",
-                  }}
-                >
-                  {draft.hideName ? "Hidden: ON" : "Hidden: OFF"}
-                </button>
-              </div>
-
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Automatically close after</div>
-                <select
-                  value={draft.expireChoice}
-                  onChange={(e) => patchDraft("expireChoice", e.target.value as ExpireChoice)}
-                  style={select}
-                >
-                  <option value="urgent24">Urgent (24 hours)</option>
-                  <option value="7">7 days</option>
-                  <option value="14">14 days</option>
-                  <option value="30">30 days</option>
-                  <option value="never">Until I cancel</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        );
-      }
-
-      return (
-        <>
-          {renderReviewCard()}
-          {renderReviewDetails()}
-        </>
-      );
-    }
-
-    // EVENT
-    if (currentStep === 1) {
       return (
         <div style={card}>
-          <div style={{ fontWeight: 950 }}>Event title</div>
-          <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 18, fontWeight: 1000 }}>Event details</div>
+
+          <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
             <input
               value={draft.title}
               onChange={(e) => patchDraft("title", e.target.value)}
               style={input}
-              placeholder={`Example: "Finance Club Guest Speaker Night"`}
+              placeholder="Event title"
               autoFocus
             />
-          </div>
-        </div>
-      );
-    }
 
-    if (currentStep === 2) {
-      return (
-        <div style={card}>
-          <div style={{ fontWeight: 950 }}>Short description</div>
-          <div style={{ marginTop: 10 }}>
             <textarea
               value={draft.description}
               onChange={(e) => patchDraft("description", e.target.value)}
               style={textarea}
               rows={5}
-              placeholder="What is it? Who is it for? Any key details."
-              autoFocus
+              placeholder="Write a short event description."
             />
+
+            <div style={row2}>
+              <select
+                value={draft.eventCategory}
+                onChange={(e) => patchDraft("eventCategory", e.target.value as EventCategory)}
+                style={select}
+              >
+                <option value="career">Career</option>
+                <option value="club">Club</option>
+                <option value="sports">Sports</option>
+                <option value="music">Music</option>
+                <option value="arts">Arts</option>
+                <option value="volunteering">Volunteering</option>
+                <option value="academic">Academic</option>
+                <option value="social">Social</option>
+                <option value="other">Other</option>
+              </select>
+
+              <input
+                value={draft.hostOrg}
+                onChange={(e) => patchDraft("hostOrg", e.target.value)}
+                style={input}
+                placeholder="Host club / organisation"
+              />
+            </div>
           </div>
         </div>
       );
     }
 
-    if (currentStep === 3) {
-      return (
-        <div style={card}>
-          <div style={{ fontWeight: 950 }}>Choose event category</div>
-          <div style={{ marginTop: 10 }}>
-            <select
-              value={draft.eventCategory}
-              onChange={(e) => patchDraft("eventCategory", e.target.value as EventCategory)}
-              style={select}
-              autoFocus
-            >
-              <option value="career">Career</option>
-              <option value="club">Club</option>
-              <option value="sports">Sports</option>
-              <option value="music">Music</option>
-              <option value="arts">Arts</option>
-              <option value="volunteering">Volunteering</option>
-              <option value="academic">Academic</option>
-              <option value="social">Social</option>
-              <option value="other">Other</option>
-            </select>
+    // STEP 2
+    if (currentStep === 1) {
+      if (draft.mode === "give") {
+        return (
+          <div style={card}>
+            <div style={{ fontSize: 18, fontWeight: 1000 }}>Image & options</div>
+
+            <div style={{ marginTop: 12, display: "grid", gap: 14 }}>
+              <div>
+                <input
+                  ref={itemFileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={(e) => pickItemFile(e.target.files?.[0] ?? null)}
+                  style={{ display: "none" }}
+                />
+
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <button type="button" style={button} onClick={() => itemFileInputRef.current?.click()}>
+                    {itemFile ? "Change image" : "Upload image"}
+                  </button>
+
+                  {itemFile && (
+                    <button type="button" style={danger} onClick={() => pickItemFile(null)}>
+                      Remove
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ marginTop: 8, fontSize: 13, color: "#64748b" }}>
+                  {itemFile
+                    ? itemFile.name
+                    : draft.itemFileName
+                    ? `Saved draft file: ${draft.itemFileName}`
+                    : "No image selected"}
+                </div>
+
+                {itemPreviewUrl && (
+                  <div style={{ marginTop: 12 }}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={itemPreviewUrl}
+                      alt="Item preview"
+                      style={{
+                        width: "100%",
+                        height: 290,
+                        objectFit: "cover",
+                        borderRadius: 16,
+                        border: "1px solid #e5e7eb",
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div style={row2}>
+                <button
+                  type="button"
+                  onClick={() => patchDraft("hideName", !draft.hideName)}
+                  style={{
+                    ...button,
+                    background: draft.hideName ? "#eef2ff" : "#ffffff",
+                    borderColor: draft.hideName ? "#c7d2fe" : "#e5e7eb",
+                    width: "100%",
+                  }}
+                >
+                  {draft.hideName ? "Anonymous: ON" : "Anonymous: OFF"}
+                </button>
+
+                <select
+                  value={draft.expireChoice}
+                  onChange={(e) => patchDraft("expireChoice", e.target.value as ExpireChoice)}
+                  style={select}
+                >
+                  <option value="urgent24">24 hours</option>
+                  <option value="7">7 days</option>
+                  <option value="14">14 days</option>
+                  <option value="30">30 days</option>
+                  <option value="never">Until I cancel</option>
+                </select>
+              </div>
+            </div>
           </div>
-        </div>
-      );
-    }
+        );
+      }
 
-    if (currentStep === 4) {
-      return (
-        <div style={card}>
-          <div style={{ fontWeight: 950 }}>Host Club / Organisation</div>
-          <div style={{ marginTop: 10 }}>
-            <input
-              value={draft.hostOrg}
-              onChange={(e) => patchDraft("hostOrg", e.target.value)}
-              style={input}
-              placeholder={`Example: "Finance Club"`}
-              autoFocus
-            />
+      if (draft.mode === "request") {
+        return (
+          <div style={card}>
+            <div style={{ fontSize: 18, fontWeight: 1000 }}>Location & options</div>
+
+            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+              <div style={row2}>
+                <select
+                  value={draft.requestTimeframe}
+                  onChange={(e) => patchDraft("requestTimeframe", e.target.value as RequestTimeframe)}
+                  style={select}
+                >
+                  <option value="today">Today</option>
+                  <option value="this_week">This week</option>
+                  <option value="flexible">Flexible</option>
+                </select>
+
+                <input
+                  value={draft.requestLocation}
+                  onChange={(e) => patchDraft("requestLocation", e.target.value)}
+                  style={input}
+                  placeholder="Location (optional)"
+                />
+              </div>
+
+              <div style={row2}>
+                <button
+                  type="button"
+                  onClick={() => patchDraft("hideName", !draft.hideName)}
+                  style={{
+                    ...button,
+                    background: draft.hideName ? "#eef2ff" : "#ffffff",
+                    borderColor: draft.hideName ? "#c7d2fe" : "#e5e7eb",
+                    width: "100%",
+                  }}
+                >
+                  {draft.hideName ? "Anonymous: ON" : "Anonymous: OFF"}
+                </button>
+
+                <select
+                  value={draft.expireChoice}
+                  onChange={(e) => patchDraft("expireChoice", e.target.value as ExpireChoice)}
+                  style={select}
+                >
+                  <option value="urgent24">24 hours</option>
+                  <option value="7">7 days</option>
+                  <option value="14">14 days</option>
+                  <option value="30">30 days</option>
+                  <option value="never">Until I cancel</option>
+                </select>
+              </div>
+            </div>
           </div>
-        </div>
-      );
-    }
+        );
+      }
 
-    if (currentStep === 5) {
       return (
         <div style={card}>
-          <div style={{ fontWeight: 950 }}>Where is the event?</div>
-          <div style={{ marginTop: 10 }}>
-            <input
-              value={draft.eventLocation}
-              onChange={(e) => patchDraft("eventLocation", e.target.value)}
-              style={input}
-              placeholder={`Example: "Dauch 125"`}
-              autoFocus
-            />
-          </div>
-        </div>
-      );
-    }
+          <div style={{ fontSize: 18, fontWeight: 1000 }}>Time, place & image</div>
 
-    if (currentStep === 6) {
-      return (
-        <div style={card}>
-          <div style={{ fontWeight: 950 }}>Choose time</div>
+          <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+            <div style={row2}>
+              <input
+                value={draft.eventLocation}
+                onChange={(e) => patchDraft("eventLocation", e.target.value)}
+                style={input}
+                placeholder="Location"
+              />
 
-          <div style={{ marginTop: 12, ...row2 }}>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Date</div>
+              <input
+                value={draft.eventLink}
+                onChange={(e) => patchDraft("eventLink", e.target.value)}
+                style={input}
+                placeholder="Link (optional)"
+              />
+            </div>
+
+            <div style={row2}>
               <input
                 type="date"
                 value={draft.eventDate}
                 onChange={(e) => patchDraft("eventDate", e.target.value)}
                 style={input}
               />
-            </div>
-
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Start time</div>
               <input
                 type="time"
                 value={draft.eventStartTime}
-                onChange={(e) => {
-                  patchDraft("eventStartTime", e.target.value);
-                  if (draft.eventDurationPreset !== "custom" && e.target.value) {
-                    const mins = Number(draft.eventDurationPreset);
-                    if (!Number.isNaN(mins)) patchDraft("eventEndTime", addMinutesToTime(e.target.value, mins));
-                  }
-                }}
+                onChange={(e) => patchDraft("eventStartTime", e.target.value)}
                 style={input}
               />
             </div>
-          </div>
 
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 8 }}>
-              Quick duration
-            </div>
-
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {[
-                { label: "30 min", value: 30, preset: "30" as EventDurationPreset },
-                { label: "1 hour", value: 60, preset: "60" as EventDurationPreset },
-                { label: "90 min", value: 90, preset: "90" as EventDurationPreset },
-                { label: "2 hours", value: 120, preset: "120" as EventDurationPreset },
-              ].map((x) => {
-                const active = draft.eventDurationPreset === x.preset;
-                return (
-                  <button
-                    key={x.preset}
-                    type="button"
-                    onClick={() => applyDurationPreset(x.value, x.preset)}
-                    style={{
-                      ...button,
-                      borderRadius: 999,
-                      background: active ? "rgba(16,185,129,0.10)" : "white",
-                    }}
-                  >
-                    {x.label}
-                  </button>
-                );
-              })}
-
+            <div style={row2}>
+              <input
+                type="time"
+                value={draft.eventEndTime}
+                onChange={(e) => patchDraft("eventEndTime", e.target.value)}
+                style={input}
+              />
               <button
                 type="button"
-                onClick={() => patchDraft("eventDurationPreset", "custom")}
+                onClick={() => patchDraft("hideName", !draft.hideName)}
                 style={{
                   ...button,
-                  borderRadius: 999,
-                  background: draft.eventDurationPreset === "custom" ? "rgba(16,185,129,0.10)" : "white",
+                  background: draft.hideName ? "#eef2ff" : "#ffffff",
+                  borderColor: draft.hideName ? "#c7d2fe" : "#e5e7eb",
+                  width: "100%",
                 }}
               >
-                Custom
+                {draft.hideName ? "Anonymous: ON" : "Anonymous: OFF"}
               </button>
             </div>
-          </div>
 
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>
-              End time (optional)
-            </div>
-            <input
-              type="time"
-              value={draft.eventEndTime}
-              onChange={(e) => {
-                patchDraft("eventDurationPreset", "custom");
-                patchDraft("eventEndTime", e.target.value);
-              }}
-              style={input}
-            />
-          </div>
-
-          <div style={{ marginTop: 12, fontSize: 13, color: "#6b7280" }}>
-            Preview: {eventTimeSummary}
-          </div>
-        </div>
-      );
-    }
-
-    if (currentStep === 7) {
-      return (
-        <div style={card}>
-          <div style={{ fontWeight: 950 }}>Flyer / poster (required)</div>
-          <div style={{ marginTop: 10, fontSize: 13, color: "#6b7280" }}>
-            JPG / PNG / WEBP • max {MAX_EVENT_FLYER_MB}MB
-          </div>
-
-          <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <input
-              ref={eventFileInputRef}
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              onChange={(e) => pickEventFile(e.target.files?.[0] ?? null)}
-              style={{ display: "none" }}
-            />
-            <button type="button" style={button} onClick={() => eventFileInputRef.current?.click()}>
-              {eventFile ? "Change flyer" : "Choose flyer"}
-            </button>
-            {eventFile && (
-              <button type="button" style={danger} onClick={() => pickEventFile(null)}>
-                Remove
-              </button>
-            )}
-          </div>
-
-          <div style={{ marginTop: 10, fontSize: 13, color: "#6b7280" }}>
-            {eventFile ? `Selected: ${eventFile.name}` : draft.eventFileName ? `Saved draft file name: ${draft.eventFileName}` : "No file selected yet."}
-          </div>
-
-          {eventPreviewUrl && (
-            <div style={{ marginTop: 12 }}>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={eventPreviewUrl}
-                alt="Flyer preview"
-                style={{
-                  width: "100%",
-                  height: 280,
-                  objectFit: "cover",
-                  borderRadius: 16,
-                  border: "1px solid #e5e7eb",
-                }}
+            <div>
+              <input
+                ref={eventFileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={(e) => pickEventFile(e.target.files?.[0] ?? null)}
+                style={{ display: "none" }}
               />
-            </div>
-          )}
-        </div>
-      );
-    }
 
-    if (currentStep === 8) {
-      return (
-        <div style={card}>
-          <div style={{ fontWeight: 950 }}>Optional link</div>
-          <div style={{ marginTop: 10 }}>
-            <input
-              value={draft.eventLink}
-              onChange={(e) => patchDraft("eventLink", e.target.value)}
-              style={input}
-              placeholder={`Example: "https://instagram.com/p/..."`}
-              autoFocus
-            />
-          </div>
-          <div style={{ marginTop: 8, fontSize: 12, color: "#6b7280" }}>
-            If provided, must start with http:// or https://
-          </div>
-        </div>
-      );
-    }
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button type="button" style={button} onClick={() => eventFileInputRef.current?.click()}>
+                  {eventFile ? "Change image" : "Upload image"}
+                </button>
 
-    if (currentStep === 9) {
-      return (
-        <div style={card}>
-          <div style={{ fontWeight: 950 }}>More options</div>
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280", marginBottom: 6 }}>Hide my name</div>
-            <button
-              type="button"
-              onClick={() => patchDraft("hideName", !draft.hideName)}
-              style={{
-                ...button,
-                width: "100%",
-                background: draft.hideName ? "rgba(16,185,129,0.10)" : "white",
-              }}
-            >
-              {draft.hideName ? "Hidden: ON" : "Hidden: OFF"}
-            </button>
-            <div style={{ marginTop: 6, fontSize: 12, color: "#6b7280" }}>
-              When ON, your name won’t show publicly.
+                {eventFile && (
+                  <button type="button" style={danger} onClick={() => pickEventFile(null)}>
+                    Remove
+                  </button>
+                )}
+              </div>
+
+              <div style={{ marginTop: 8, fontSize: 13, color: "#64748b" }}>
+                {eventFile
+                  ? eventFile.name
+                  : draft.eventFileName
+                  ? `Saved draft file: ${draft.eventFileName}`
+                  : "No image selected"}
+              </div>
+
+              {eventPreviewUrl && (
+                <div style={{ marginTop: 12 }}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={eventPreviewUrl}
+                    alt="Event preview"
+                    style={{
+                      width: "100%",
+                      height: 290,
+                      objectFit: "cover",
+                      borderRadius: 16,
+                      border: "1px solid #e5e7eb",
+                    }}
+                  />
+                </div>
+              )}
             </div>
           </div>
         </div>
       );
     }
 
+    // STEP 3
     return (
       <>
         {renderReviewCard()}
@@ -2028,98 +1645,160 @@ export default function CreatePage() {
     );
   }
 
-  // ---------------- render ----------------
+  if (!hydratedDraft || authLoading || profileLoading) {
+    return (
+      <div style={pageStyle}>
+        <div style={shell}>
+          <div style={card}>
+            <div style={{ fontWeight: 1000 }}>Loading…</div>
+            <div style={{ marginTop: 6, color: "#64748b", fontSize: 14 }}>
+              Restoring your draft and checking account status.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isLoggedIn) {
+    return (
+      <div style={pageStyle}>
+        <div style={shell}>
+          <div style={card}>
+            <div style={{ fontWeight: 1000, fontSize: 22 }}>You need your Ashland email</div>
+            <div style={{ marginTop: 8, color: "#64748b" }}>
+              Log in with your <b>@ashland.edu</b> account before posting.
+            </div>
+            <button onClick={() => router.push("/me")} style={{ ...primary(false), marginTop: 14 }}>
+              Go to account
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!profileComplete) {
+    return (
+      <div style={pageStyle}>
+        <div style={shell}>
+          <div style={card}>
+            <div style={{ fontWeight: 1000, fontSize: 22 }}>Complete your profile</div>
+            <div style={{ marginTop: 8, color: "#64748b" }}>
+              Add your full name and choose Student or Faculty first.
+            </div>
+            <button onClick={() => router.push("/me")} style={{ ...primary(false), marginTop: 14 }}>
+              Finish profile
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={pageStyle}>
       <div style={shell}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 10,
-            marginBottom: 12,
-          }}
-        >
+        <div style={brandWrap}>
+          <div>
+            <div style={brandTitle}>ScholarSwap</div>
+            <div style={brandSub}>List something for campus</div>
+          </div>
+
           <button onClick={() => router.push("/feed")} style={{ ...button, borderRadius: 999 }}>
-            ← Back
+            ← Feed
           </button>
-          <div
-            style={{
-              fontSize: 12,
-              color: "#374151",
-              border: "1px solid #e5e7eb",
-              background: "white",
-              padding: "8px 10px",
-              borderRadius: 999,
-            }}
-          >
+        </div>
+
+        <div style={{ ...card, marginBottom: 12 }}>
+          <div style={{ fontSize: 13, color: "#475569", fontWeight: 800 }}>
             Posting as <b>{email}</b>
           </div>
         </div>
 
-        {renderProgress()}
+        {renderModePicker()}
 
-        <div style={{ ...card, marginTop: draft.mode ? 12 : 0 }}>
-          <div style={{ fontSize: 22, fontWeight: 950 }}>{stepTitle}</div>
-          <div style={{ marginTop: 6, color: "#4b5563" }}>
-            {!draft.mode
-              ? "Pick one path and go step by step."
-              : draft.mode === "give"
-              ? "Give flow: item with required photo, category, and pickup."
-              : draft.mode === "request"
-              ? "Request flow: no photo, faster completion."
-              : "Event flow: efficient date and time setup with required flyer."}
-          </div>
-        </div>
+        {draft.mode && (
+          <>
+            <div style={{ marginTop: 12 }}>{renderStepTabs()}</div>
 
-        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
-          {renderStepContent()}
-
-          {msg && (
-            <div
-              style={{
-                ...card,
-                borderColor: "#fecdd3",
-                background: "#fff1f2",
-                color: "#9f1239",
-                fontWeight: 850,
-              }}
-            >
-              {msg}
+            <div style={{ ...card, marginTop: 12 }}>
+              <div style={{ fontSize: 22, fontWeight: 1000 }}>
+                {steps[currentStep]}
+              </div>
+              <div style={{ marginTop: 6, color: "#64748b", fontSize: 14 }}>
+                Step {currentStep + 1} of 3
+              </div>
             </div>
-          )}
-        </div>
+
+            <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+              {renderStepContent()}
+
+              {msg && (
+                <div
+                  style={{
+                    ...card,
+                    borderColor: "#fecdd3",
+                    background: "#fff1f2",
+                    color: "#9f1239",
+                    fontWeight: 850,
+                  }}
+                >
+                  {msg}
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </div>
 
-      {/* Sticky controls */}
-      <div style={sticky}>
-        <div style={stickyInner}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 12, color: "#6b7280" }}>{stickyHint}</div>
+      {draft.mode && (
+        <div style={sticky}>
+          <div style={stickyInner}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12, color: "#64748b", fontWeight: 700 }}>
+                {stickyHint}
+              </div>
+            </div>
+
+            {canGoBack ? (
+              <button type="button" onClick={prevStep} style={ghostBtn} disabled={saving}>
+                Back
+              </button>
+            ) : (
+              <button type="button" onClick={resetWizard} style={ghostBtn} disabled={saving}>
+                Reset
+              </button>
+            )}
+
+            {!isReviewStep ? (
+              <button
+                type="button"
+                onClick={nextStep}
+                disabled={saving}
+                style={primary(saving)}
+              >
+                Next
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleSubmit}
+                disabled={saving}
+                style={primary(saving)}
+              >
+                {saving
+                  ? "Posting…"
+                  : draft.mode === "event"
+                  ? "Post event"
+                  : draft.mode === "request"
+                  ? "Post request"
+                  : "Post item"}
+              </button>
+            )}
           </div>
-
-          {canGoBack ? (
-            <button type="button" onClick={prevStep} style={ghostBtn} disabled={saving}>
-              Back
-            </button>
-          ) : (
-            <button type="button" onClick={() => router.push("/feed")} style={ghostBtn} disabled={saving}>
-              Cancel
-            </button>
-          )}
-
-          {!isReviewStep ? (
-            <button type="button" onClick={nextStep} disabled={saving || !canGoNext} style={primary(saving || !canGoNext)}>
-              Next
-            </button>
-          ) : (
-            <button type="button" onClick={handleSubmit} disabled={saving} style={primary(saving)}>
-              {saving ? "Posting…" : draft.mode === "event" ? "Post event" : draft.mode === "request" ? "Post request" : "Post item"}
-            </button>
-          )}
         </div>
-      </div>
+      )}
     </div>
   );
 }
