@@ -3,13 +3,26 @@
 export const dynamic = "force-dynamic";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
-import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
+import { ensureThread } from "@/lib/ensureThread";
 
 /* ==============================
    TYPES
 ============================== */
+
+type TabKey = "overview" | "listings" | "requests" | "activity" | "history";
+type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
+type ToastState = { msg: string; kind?: "ok" | "err" } | null;
+
+type ConfirmState =
+  | null
+  | {
+      title: string;
+      body: string;
+      actionLabel: string;
+      onYes: () => Promise<void>;
+    };
 
 type ProfileRow = {
   id: string;
@@ -26,39 +39,42 @@ type MyItemRow = {
   status: string | null;
   created_at: string;
   photo_url: string | null;
-  post_type?: "give" | "request" | null;
+  post_type?: "give" | "request" | "event" | null;
+};
+
+type ItemMini = {
+  id: string;
+  title: string | null;
+  photo_url?: string | null;
+  status: string | null;
+  post_type?: "give" | "request" | "event" | null;
+  owner_id?: string | null;
 };
 
 type MyRequestRow = {
   item_id: string;
   created_at?: string | null;
-  items: {
-    id: string;
-    title: string;
-    photo_url: string | null;
-    status: string | null;
-    post_type?: "give" | "request" | null;
-  } | null;
+  item: ItemMini | null;
 };
 
-type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
+type MyOfferRow = {
+  id: string;
+  request_id: string;
+  helper_id: string;
+  status: OfferStatus | null;
+  availability: string | null;
+  note: string | null;
+  created_at: string | null;
+  request_item: ItemMini | null;
+};
 
 type IncomingInterestRow = {
   id: string;
   item_id: string;
   user_id: string;
   created_at: string | null;
-  owner_seen_at: string | null;
-  owner_dismissed_at: string | null;
   status: string | null;
-  items: {
-    id: string;
-    title: string | null;
-    photo_url: string | null;
-    status: string | null;
-    owner_id: string;
-    post_type?: "give" | "request" | null;
-  } | null;
+  item: ItemMini | null;
   requester: {
     full_name: string | null;
     email: string | null;
@@ -75,13 +91,7 @@ type IncomingOfferRow = {
   note: string | null;
   created_at: string | null;
   updated_at: string | null;
-  request_item: {
-    id: string;
-    title: string | null;
-    status: string | null;
-    owner_id: string;
-    post_type?: "give" | "request" | null;
-  } | null;
+  request_item: ItemMini | null;
   helper: {
     full_name: string | null;
     email: string | null;
@@ -89,33 +99,21 @@ type IncomingOfferRow = {
   } | null;
 };
 
-type MyOfferRow = {
+type NotificationRow = {
   id: string;
-  request_id: string;
-  helper_id: string;
-  status: OfferStatus | null;
-  availability: string | null;
-  note: string | null;
-  created_at: string | null;
-  request_item: {
-    id: string;
-    title: string | null;
-    status: string | null;
-    post_type?: "give" | "request" | null;
+  type: "item_interest" | "help_offer";
+  item_id: string | null;
+  interest_id: string | null;
+  offer_id: string | null;
+  title: string;
+  body: string | null;
+  seen_at: string | null;
+  created_at: string;
+  actor: {
+    full_name: string | null;
+    email: string | null;
   } | null;
 };
-
-type TabKey = "overview" | "listings" | "requests" | "activity" | "history";
-type ToastState = { msg: string; kind?: "ok" | "err" } | null;
-
-type ConfirmState =
-  | null
-  | {
-      title: string;
-      body: string;
-      actionLabel: string;
-      onYes: () => Promise<void>;
-    };
 
 type StatsState = {
   listed: number;
@@ -125,8 +123,163 @@ type StatsState = {
 };
 
 /* ==============================
+   QUERY SHAPES
+============================== */
+
+type MyRequestQueryRow = {
+  item_id: string;
+  created_at: string | null;
+  items:
+    | {
+        id: string;
+        title: string | null;
+        photo_url: string | null;
+        status: string | null;
+        post_type?: "give" | "request" | "event" | null;
+      }
+    | {
+        id: string;
+        title: string | null;
+        photo_url: string | null;
+        status: string | null;
+        post_type?: "give" | "request" | "event" | null;
+      }[]
+    | null;
+};
+
+type MyOfferQueryRow = {
+  id: string;
+  request_id: string;
+  helper_id: string;
+  status: OfferStatus | null;
+  availability: string | null;
+  note: string | null;
+  created_at: string | null;
+  request_item:
+    | {
+        id: string;
+        title: string | null;
+        status: string | null;
+        post_type?: "give" | "request" | "event" | null;
+        owner_id?: string | null;
+      }
+    | {
+        id: string;
+        title: string | null;
+        status: string | null;
+        post_type?: "give" | "request" | "event" | null;
+        owner_id?: string | null;
+      }[]
+    | null;
+};
+
+type IncomingInterestQueryRow = {
+  id: string;
+  item_id: string;
+  user_id: string;
+  created_at: string | null;
+  status: string | null;
+  items:
+    | {
+        id: string;
+        title: string | null;
+        photo_url: string | null;
+        status: string | null;
+        owner_id: string | null;
+        post_type?: "give" | "request" | "event" | null;
+      }
+    | {
+        id: string;
+        title: string | null;
+        photo_url: string | null;
+        status: string | null;
+        owner_id: string | null;
+        post_type?: "give" | "request" | "event" | null;
+      }[]
+    | null;
+  requester:
+    | {
+        full_name: string | null;
+        email: string | null;
+        user_role: string | null;
+      }
+    | {
+        full_name: string | null;
+        email: string | null;
+        user_role: string | null;
+      }[]
+    | null;
+};
+
+type IncomingOfferQueryRow = {
+  id: string;
+  request_id: string;
+  helper_id: string;
+  status: OfferStatus | null;
+  availability: string | null;
+  note: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  request_item:
+    | {
+        id: string;
+        title: string | null;
+        status: string | null;
+        owner_id: string | null;
+        post_type?: "give" | "request" | "event" | null;
+      }
+    | {
+        id: string;
+        title: string | null;
+        status: string | null;
+        owner_id: string | null;
+        post_type?: "give" | "request" | "event" | null;
+      }[]
+    | null;
+  helper:
+    | {
+        full_name: string | null;
+        email: string | null;
+        user_role: string | null;
+      }
+    | {
+        full_name: string | null;
+        email: string | null;
+        user_role: string | null;
+      }[]
+    | null;
+};
+
+type NotificationQueryRow = {
+  id: string;
+  type: "item_interest" | "help_offer";
+  item_id: string | null;
+  interest_id: string | null;
+  offer_id: string | null;
+  title: string;
+  body: string | null;
+  seen_at: string | null;
+  created_at: string;
+  actor:
+    | {
+        full_name: string | null;
+        email: string | null;
+      }
+    | {
+        full_name: string | null;
+        email: string | null;
+      }[]
+    | null;
+};
+
+/* ==============================
    HELPERS
 ============================== */
+
+function singleRelation<T>(value: T | T[] | null | undefined): T | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
 
 function isAshlandEmail(email: string) {
   return email.trim().toLowerCase().endsWith("@ashland.edu");
@@ -162,19 +315,29 @@ function readableRole(role: string | null | undefined) {
   return raw;
 }
 
-function itemVerb(type: "give" | "request" | null | undefined) {
-  return type === "request" ? "Request" : "Give";
-}
-
-function niceNameFromProfile(
-  p: { full_name: string | null; email: string | null } | null,
-  fallbackLabel: string
+function readableName(
+  p: { full_name: string | null; email?: string | null } | null | undefined,
+  fallback = "Ashland user"
 ) {
   const name = (p?.full_name ?? "").trim();
   if (name) return name;
   const email = (p?.email ?? "").trim();
   if (email) return email.split("@")[0];
-  return fallbackLabel;
+  return fallback;
+}
+
+function itemTypeLabel(type: "give" | "request" | "event" | null | undefined) {
+  if (type === "request") return "Request";
+  if (type === "event") return "Event";
+  return "Give";
+}
+
+function toneForStatus(status: string | null | undefined): "green" | "amber" | "red" | "gray" {
+  const s = normStatus(status);
+  if (["accepted", "reserved", "claimed", "completed"].includes(s)) return "green";
+  if (["pending", "hold"].includes(s)) return "amber";
+  if (["declined", "expired"].includes(s)) return "red";
+  return "gray";
 }
 
 function getFriendlyError(e: unknown) {
@@ -184,24 +347,17 @@ function getFriendlyError(e: unknown) {
   return "Something went wrong.";
 }
 
-function statusTone(status: string | null | undefined): "green" | "amber" | "red" | "gray" {
-  const s = normStatus(status);
-  if (s === "accepted" || s === "claimed" || s === "completed") return "green";
-  if (s === "pending" || s === "hold") return "amber";
-  if (s === "declined") return "red";
-  return "gray";
-}
-
 /* ==============================
    PAGE
 ============================== */
 
 export default function AccountPage() {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
 
   const mountedRef = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const requestVersionRef = useRef(0);
 
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -210,8 +366,6 @@ export default function AccountPage() {
   const [err, setErr] = useState<string | null>(null);
 
   const [tab, setTab] = useState<TabKey>("overview");
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = useState("");
@@ -224,7 +378,7 @@ export default function AccountPage() {
   const [myOffers, setMyOffers] = useState<MyOfferRow[]>([]);
   const [incomingInterests, setIncomingInterests] = useState<IncomingInterestRow[]>([]);
   const [incomingOffers, setIncomingOffers] = useState<IncomingOfferRow[]>([]);
-  const [incomingLoading, setIncomingLoading] = useState(false);
+  const [notifications, setNotifications] = useState<NotificationRow[]>([]);
 
   const [stats, setStats] = useState<StatsState>({
     listed: 0,
@@ -237,10 +391,9 @@ export default function AccountPage() {
   const [confirm, setConfirm] = useState<ConfirmState>(null);
 
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [deletingNotifId, setDeletingNotifId] = useState<string | null>(null);
-  const [offerActingId, setOfferActingId] = useState<string | null>(null);
-  const [myOfferActingId, setMyOfferActingId] = useState<string | null>(null);
-  const [offersSeenAt, setOffersSeenAt] = useState<string | null>(null);
+  const [incomingOfferBusyId, setIncomingOfferBusyId] = useState<string | null>(null);
+  const [myOfferBusyId, setMyOfferBusyId] = useState<string | null>(null);
+  const [markingNotifs, setMarkingNotifs] = useState(false);
 
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && isAshlandEmail(userEmail);
@@ -264,41 +417,33 @@ export default function AccountPage() {
     [myItems]
   );
 
-  const unseenIncomingInterestCount = useMemo(() => {
-    return incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at).length;
-  }, [incomingInterests]);
+  const unseenNotificationCount = useMemo(() => {
+    return notifications.filter((n) => !n.seen_at).length;
+  }, [notifications]);
 
-  const unseenIncomingOfferCount = useMemo(() => {
-    const pending = incomingOffers.filter((o) => (o.status ?? "pending") === "pending");
-    if (!offersSeenAt) return pending.length;
-    const seenTime = new Date(offersSeenAt).getTime();
-    return pending.filter((o) => {
-      const created = o.created_at ? new Date(o.created_at).getTime() : 0;
-      return created > seenTime;
-    }).length;
-  }, [incomingOffers, offersSeenAt]);
-
-  const pendingIncomingOffers = useMemo(() => {
-    return incomingOffers.filter((o) => (o.status ?? "pending") === "pending").length;
-  }, [incomingOffers]);
-
-  const acceptedIncomingOffers = useMemo(() => {
-    return incomingOffers.filter((o) => (o.status ?? "pending") === "accepted").length;
+  const incomingPendingOfferCount = useMemo(() => {
+    return incomingOffers.filter((x) => (x.status ?? "pending") === "pending").length;
   }, [incomingOffers]);
 
   const acceptedMyOffers = useMemo(() => {
-    return myOffers.filter((o) => (o.status ?? "pending") === "accepted").length;
+    return myOffers.filter((x) => (x.status ?? "pending") === "accepted").length;
   }, [myOffers]);
-
-  const hasNewRequests = unseenIncomingInterestCount + unseenIncomingOfferCount > 0;
 
   const showToast = useCallback((msg: string, kind: "ok" | "err" = "ok") => {
     setToast({ msg, kind });
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => {
       if (mountedRef.current) setToast(null);
-    }, 2400);
+    }, 2200);
   }, []);
+
+  const setTabAndUrl = useCallback(
+    (nextTab: TabKey) => {
+      setTab(nextTab);
+      router.replace(`${pathname}?tab=${nextTab}`, { scroll: false });
+    },
+    [pathname, router]
+  );
 
   const clearAll = useCallback(() => {
     setProfile(null);
@@ -307,10 +452,8 @@ export default function AccountPage() {
     setMyOffers([]);
     setIncomingInterests([]);
     setIncomingOffers([]);
+    setNotifications([]);
     setStats({ listed: 0, interests: 0, offers: 0, chats: 0 });
-    setOffersSeenAt(null);
-    setActiveMenuId(null);
-    setDrawerOpen(false);
     setConfirm(null);
     setErr(null);
   }, []);
@@ -323,6 +466,7 @@ export default function AccountPage() {
       .maybeSingle<ProfileRow>();
 
     if (!mountedRef.current) return null;
+
     if (error) {
       setProfile(null);
       return null;
@@ -340,12 +484,13 @@ export default function AccountPage() {
       .order("created_at", { ascending: false });
 
     if (!mountedRef.current) return [] as MyItemRow[];
+
     if (error) {
       setMyItems([]);
       return [];
     }
 
-    const rows = (((data ?? []) as unknown) as MyItemRow[]).filter(Boolean);
+    const rows = ((data ?? []) as MyItemRow[]).filter(Boolean);
     setMyItems(rows);
     return rows;
   }
@@ -358,34 +503,51 @@ export default function AccountPage() {
       .order("created_at", { ascending: false });
 
     if (!mountedRef.current) return [] as MyRequestRow[];
+
     if (error) {
       setMyRequests([]);
       return [];
     }
 
-    const rows = (((data ?? []) as unknown) as MyRequestRow[]).filter(Boolean);
-    setMyRequests(rows);
-    return rows;
+    const normalized: MyRequestRow[] = (((data ?? []) as unknown) as MyRequestQueryRow[]).map((row) => ({
+      item_id: row.item_id,
+      created_at: row.created_at,
+      item: singleRelation(row.items),
+    }));
+
+    setMyRequests(normalized);
+    return normalized;
   }
 
   async function loadMyOffers(uid: string) {
     const { data, error } = await supabase
       .from("request_offers")
       .select(
-        "id,request_id,helper_id,status,availability,note,created_at,request_item:items(id,title,status,post_type)"
+        "id,request_id,helper_id,status,availability,note,created_at,request_item:items(id,title,status,post_type,owner_id)"
       )
       .eq("helper_id", uid)
       .order("created_at", { ascending: false });
 
     if (!mountedRef.current) return [] as MyOfferRow[];
+
     if (error) {
       setMyOffers([]);
       return [];
     }
 
-    const rows = (((data ?? []) as unknown) as MyOfferRow[]).filter(Boolean);
-    setMyOffers(rows);
-    return rows;
+    const normalized: MyOfferRow[] = (((data ?? []) as unknown) as MyOfferQueryRow[]).map((row) => ({
+      id: row.id,
+      request_id: row.request_id,
+      helper_id: row.helper_id,
+      status: row.status,
+      availability: row.availability,
+      note: row.note,
+      created_at: row.created_at,
+      request_item: singleRelation(row.request_item),
+    }));
+
+    setMyOffers(normalized);
+    return normalized;
   }
 
   async function loadIncomingInterests(uid: string) {
@@ -396,25 +558,32 @@ export default function AccountPage() {
         item_id,
         user_id,
         created_at,
-        owner_seen_at,
-        owner_dismissed_at,
         status,
         items:items(id,title,photo_url,status,owner_id,post_type),
         requester:profiles!interests_user_id_fkey(full_name,email,user_role)
       `)
-      .is("owner_dismissed_at", null)
       .order("created_at", { ascending: false });
 
     if (!mountedRef.current) return [] as IncomingInterestRow[];
+
     if (error) {
       setIncomingInterests([]);
       return [];
     }
 
-    const filtered = (((data ?? []) as unknown) as IncomingInterestRow[]).filter(
-      (row) => row.items?.owner_id === uid
+    const normalizedAll: IncomingInterestRow[] = (((data ?? []) as unknown) as IncomingInterestQueryRow[]).map(
+      (row) => ({
+        id: row.id,
+        item_id: row.item_id,
+        user_id: row.user_id,
+        created_at: row.created_at,
+        status: row.status,
+        item: singleRelation(row.items),
+        requester: singleRelation(row.requester),
+      })
     );
 
+    const filtered = normalizedAll.filter((row) => row.item?.owner_id === uid);
     setIncomingInterests(filtered);
     return filtered;
   }
@@ -437,12 +606,26 @@ export default function AccountPage() {
       .order("created_at", { ascending: false });
 
     if (!mountedRef.current) return [] as IncomingOfferRow[];
+
     if (error) {
       setIncomingOffers([]);
       return [];
     }
 
-    const filtered = (((data ?? []) as unknown) as IncomingOfferRow[]).filter(
+    const normalizedAll: IncomingOfferRow[] = (((data ?? []) as unknown) as IncomingOfferQueryRow[]).map((row) => ({
+      id: row.id,
+      request_id: row.request_id,
+      helper_id: row.helper_id,
+      status: row.status,
+      availability: row.availability,
+      note: row.note,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      request_item: singleRelation(row.request_item),
+      helper: singleRelation(row.helper),
+    }));
+
+    const filtered = normalizedAll.filter(
       (row) => row.request_item?.owner_id === uid && row.request_item?.post_type === "request"
     );
 
@@ -450,37 +633,47 @@ export default function AccountPage() {
     return filtered;
   }
 
-  async function loadIncomingAll(uid: string) {
-    const requestId = ++requestVersionRef.current;
-    setIncomingLoading(true);
+  async function loadNotifications(uid: string) {
+    const { data, error } = await supabase
+      .from("notifications")
+      .select(`
+        id,
+        type,
+        item_id,
+        interest_id,
+        offer_id,
+        title,
+        body,
+        seen_at,
+        created_at,
+        actor:profiles!notifications_actor_id_fkey(full_name,email)
+      `)
+      .eq("user_id", uid)
+      .order("created_at", { ascending: false })
+      .limit(30);
 
-    try {
-      const [interests, offers] = await Promise.all([loadIncomingInterests(uid), loadIncomingOffers(uid)]);
-      if (!mountedRef.current) return;
-      if (requestId !== requestVersionRef.current) return;
+    if (!mountedRef.current) return [] as NotificationRow[];
 
-      setIncomingInterests(interests);
-      setIncomingOffers(offers);
-    } finally {
-      if (mountedRef.current && requestId === requestVersionRef.current) {
-        setIncomingLoading(false);
-      }
+    if (error) {
+      setNotifications([]);
+      return [];
     }
-  }
 
-  async function markIncomingSeen() {
-    const unseen = incomingInterests.filter((r) => !r.owner_seen_at && !r.owner_dismissed_at);
-    if (unseen.length === 0) return;
+    const normalized: NotificationRow[] = (((data ?? []) as unknown) as NotificationQueryRow[]).map((row) => ({
+      id: row.id,
+      type: row.type,
+      item_id: row.item_id,
+      interest_id: row.interest_id,
+      offer_id: row.offer_id,
+      title: row.title,
+      body: row.body,
+      seen_at: row.seen_at,
+      created_at: row.created_at,
+      actor: singleRelation(row.actor),
+    }));
 
-    const nowIso = new Date().toISOString();
-    const ids = unseen.map((r) => r.id).filter(Boolean);
-
-    const { error } = await supabase.from("interests").update({ owner_seen_at: nowIso }).in("id", ids);
-    if (error || !mountedRef.current) return;
-
-    setIncomingInterests((prev) =>
-      prev.map((r) => (r.owner_seen_at || r.owner_dismissed_at ? r : { ...r, owner_seen_at: nowIso }))
-    );
+    setNotifications(normalized);
+    return normalized;
   }
 
   const loadAllFor = useCallback(async (uid: string) => {
@@ -488,14 +681,16 @@ export default function AccountPage() {
     setErr(null);
 
     try {
-      const [, itemsRows, requestRows, offerRows] = await Promise.all([
-        loadProfile(uid),
-        loadMyListings(uid),
-        loadMyRequests(uid),
-        loadMyOffers(uid),
-      ]);
-
-      await loadIncomingAll(uid);
+      const [profileRow, itemsRows, requestRows, offerRows, incomingReqRows, incomingOfferRows, notifRows] =
+        await Promise.all([
+          loadProfile(uid),
+          loadMyListings(uid),
+          loadMyRequests(uid),
+          loadMyOffers(uid),
+          loadIncomingInterests(uid),
+          loadIncomingOffers(uid),
+          loadNotifications(uid),
+        ]);
 
       let chats = 0;
       try {
@@ -511,12 +706,17 @@ export default function AccountPage() {
 
       if (!mountedRef.current) return;
 
+      setProfile(profileRow);
       setStats({
         listed: itemsRows.length,
-        interests: requestRows.length,
-        offers: offerRows.length,
+        interests: requestRows.length + incomingReqRows.length,
+        offers: offerRows.length + incomingOfferRows.length,
         chats,
       });
+
+      if (notifRows.length === 0 && incomingReqRows.length === 0 && incomingOfferRows.length === 0) {
+        // no-op, just keeps the page calm
+      }
     } catch (e) {
       if (!mountedRef.current) return;
       setErr(getFriendlyError(e));
@@ -525,78 +725,43 @@ export default function AccountPage() {
     }
   }, []);
 
-  const openRequestsTab = useCallback(() => {
-    setTab("requests");
-    setOffersSeenAt(new Date().toISOString());
-    void markIncomingSeen();
-  }, [incomingInterests]);
+  async function markNotificationsSeen() {
+    if (!userId) return;
 
-  const overviewHighlights = useMemo(() => {
-    const rows: Array<{ key: string; title: string; body: string; cta: string; onClick: () => void }> = [];
+    const unseenIds = notifications.filter((n) => !n.seen_at).map((n) => n.id);
+    if (unseenIds.length === 0) return;
 
-    if (unseenIncomingInterestCount > 0) {
-      rows.push({
-        key: "incoming-interests",
-        title: `${unseenIncomingInterestCount} new item request${unseenIncomingInterestCount > 1 ? "s" : ""}`,
-        body: "People want one of your give posts.",
-        cta: "Open requests",
-        onClick: () => openRequestsTab(),
-      });
+    setMarkingNotifs(true);
+
+    try {
+      const nowIso = new Date().toISOString();
+
+      const { error } = await supabase
+        .from("notifications")
+        .update({ seen_at: nowIso })
+        .in("id", unseenIds)
+        .eq("user_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      if (!mountedRef.current) return;
+
+      setNotifications((prev) => prev.map((n) => (n.seen_at ? n : { ...n, seen_at: nowIso })));
+    } catch (e) {
+      showToast(getFriendlyError(e), "err");
+    } finally {
+      if (mountedRef.current) setMarkingNotifs(false);
+    }
+  }
+
+  function openNotification(notification: NotificationRow) {
+    if (notification.item_id) {
+      router.push(`/manage/${notification.item_id}`);
+      return;
     }
 
-    if (pendingIncomingOffers > 0) {
-      rows.push({
-        key: "incoming-offers",
-        title: `${pendingIncomingOffers} helper offer${pendingIncomingOffers > 1 ? "s" : ""} waiting`,
-        body: "Accept one, hold some, or decline.",
-        cta: "Review offers",
-        onClick: () => openRequestsTab(),
-      });
-    }
-
-    if (acceptedIncomingOffers > 0) {
-      rows.push({
-        key: "accepted-helper",
-        title: `${acceptedIncomingOffers} accepted helper${acceptedIncomingOffers > 1 ? "s" : ""}`,
-        body: "Open chat and finalize details.",
-        cta: "Go to requests",
-        onClick: () => setTab("requests"),
-      });
-    }
-
-    if (acceptedMyOffers > 0) {
-      rows.push({
-        key: "my-accepted-offers",
-        title: `${acceptedMyOffers} of your offers got accepted`,
-        body: "Continue the coordination in chat.",
-        cta: "View activity",
-        onClick: () => setTab("activity"),
-      });
-    }
-
-    if (rows.length === 0) {
-      rows.push({
-        key: "caught-up",
-        title: "You’re all caught up",
-        body: "Nothing urgent right now.",
-        cta: "Create post",
-        onClick: () => router.push("/create"),
-      });
-    }
-
-    return rows.slice(0, 3);
-  }, [
-    acceptedIncomingOffers,
-    acceptedMyOffers,
-    openRequestsTab,
-    pendingIncomingOffers,
-    router,
-    unseenIncomingInterestCount,
-  ]);
-
-  /* ==============================
-     ACTIONS
-  ============================== */
+    setTabAndUrl("requests");
+  }
 
   async function deleteListing(id: string) {
     setConfirm({
@@ -619,67 +784,52 @@ export default function AccountPage() {
 
         setMyItems((prev) => prev.filter((x) => x.id !== id));
         setStats((prev) => ({ ...prev, listed: Math.max(0, prev.listed - 1) }));
-        setActiveMenuId(null);
         showToast("Deleted.");
       },
     });
   }
 
-  async function deleteNotification(row: IncomingInterestRow) {
-    setConfirm({
-      title: "Remove this request?",
-      body: "This removes it from your incoming list.",
-      actionLabel: "Remove",
-      onYes: async () => {
-        setConfirm(null);
-        setDeletingNotifId(row.id);
+  async function updateIncomingOfferStatus(offer: IncomingOfferRow, next: OfferStatus) {
+    if (incomingOfferBusyId) return;
 
-        const { error } = await supabase.from("interests").delete().eq("id", row.id);
+    setIncomingOfferBusyId(offer.id);
 
-        if (!mountedRef.current) return;
-        setDeletingNotifId(null);
+    try {
+      const nowIso = new Date().toISOString();
 
-        if (error) {
-          showToast(error.message, "err");
-          return;
-        }
+      if (next === "accepted" && offer.request_item?.id) {
+        const { error: otherErr } = await supabase
+          .from("request_offers")
+          .update({ status: "hold", updated_at: nowIso })
+          .eq("request_id", offer.request_item.id)
+          .neq("id", offer.id)
+          .in("status", ["pending", "accepted"]);
 
-        setIncomingInterests((prev) => prev.filter((x) => x.id !== row.id));
-        showToast("Removed.");
-      },
-    });
-  }
+        if (otherErr) throw new Error(otherErr.message);
+      }
 
-  async function updateOfferStatus(offer: IncomingOfferRow, next: OfferStatus) {
-    if (offerActingId) return;
+      const { error } = await supabase
+        .from("request_offers")
+        .update({ status: next, updated_at: nowIso })
+        .eq("id", offer.id);
 
-    setOfferActingId(offer.id);
+      if (error) throw new Error(error.message);
 
-    const { error } = await supabase
-      .from("request_offers")
-      .update({ status: next, updated_at: new Date().toISOString() })
-      .eq("id", offer.id);
+      if (!mountedRef.current) return;
 
-    if (!mountedRef.current) return;
-    setOfferActingId(null);
+      setIncomingOffers((prev) =>
+        prev.map((x) => (x.id === offer.id ? { ...x, status: next, updated_at: nowIso } : x))
+      );
 
-    if (error) {
-      showToast(error.message, "err");
-      return;
+      showToast(`Set to ${next}.`);
+    } catch (e) {
+      showToast(getFriendlyError(e), "err");
+    } finally {
+      if (mountedRef.current) setIncomingOfferBusyId(null);
     }
-
-    setIncomingOffers((prev) =>
-      prev.map((x) =>
-        x.id === offer.id
-          ? { ...x, status: next, updated_at: new Date().toISOString() }
-          : x
-      )
-    );
-
-    showToast(`Set to ${next}.`);
   }
 
-  async function startChatWithHelper(offer: IncomingOfferRow) {
+  async function openIncomingOfferChat(offer: IncomingOfferRow) {
     if (!userId) return;
 
     if ((offer.status ?? "pending") !== "accepted") {
@@ -687,36 +837,26 @@ export default function AccountPage() {
       return;
     }
 
-    if (!offer.request_item?.id) {
-      showToast("Missing request.", "err");
-      return;
-    }
-
-    if (!offer.helper_id) {
-      showToast("Missing helper.", "err");
+    const itemId = offer.request_item?.id;
+    if (!itemId) {
+      showToast("Missing request post.", "err");
       return;
     }
 
     try {
-      setOfferActingId(offer.id);
+      setIncomingOfferBusyId(offer.id);
 
       const threadId = await ensureThread({
-        itemId: offer.request_item.id,
+        itemId,
         ownerId: userId,
         requesterId: offer.helper_id,
-      });
-
-      await insertSystemMessage({
-        threadId,
-        senderId: userId,
-        body: "✅ Offer accepted. Use this chat to finalize details and confirm completion.",
       });
 
       router.push(`/messages/${threadId}`);
     } catch (e) {
       showToast(getFriendlyError(e), "err");
     } finally {
-      if (mountedRef.current) setOfferActingId(null);
+      if (mountedRef.current) setIncomingOfferBusyId(null);
     }
   }
 
@@ -734,12 +874,12 @@ export default function AccountPage() {
       actionLabel: "Withdraw",
       onYes: async () => {
         setConfirm(null);
-        setMyOfferActingId(offer.id);
+        setMyOfferBusyId(offer.id);
 
         const { error } = await supabase.from("request_offers").delete().eq("id", offer.id);
 
         if (!mountedRef.current) return;
-        setMyOfferActingId(null);
+        setMyOfferBusyId(null);
 
         if (error) {
           showToast(error.message, "err");
@@ -747,61 +887,46 @@ export default function AccountPage() {
         }
 
         setMyOffers((prev) => prev.filter((x) => x.id !== offer.id));
-        setStats((prev) => ({ ...prev, offers: Math.max(0, prev.offers - 1) }));
         showToast("Offer withdrawn.");
       },
     });
   }
 
-  async function startChatFromMyOffer(offer: MyOfferRow) {
+  async function openMyOfferChat(offer: MyOfferRow) {
     if (!userId) return;
 
-    const st = (offer.status ?? "pending") as OfferStatus;
-    if (st !== "accepted") {
+    if ((offer.status ?? "pending") !== "accepted") {
       showToast("Chat unlocks after acceptance.", "err");
       return;
     }
 
-    const requestId = offer.request_item?.id ?? offer.request_id;
-    if (!requestId) {
-      showToast("Missing request.", "err");
+    const itemId = offer.request_item?.id ?? offer.request_id;
+    const ownerId = offer.request_item?.owner_id ?? null;
+
+    if (!itemId || !ownerId) {
+      showToast("Missing request owner.", "err");
       return;
     }
 
     try {
-      setMyOfferActingId(offer.id);
-
-      const { data, error } = await supabase.from("items").select("owner_id").eq("id", requestId).single();
-      if (error) throw new Error(error.message);
-
-      const ownerId = (data as { owner_id?: string | null } | null)?.owner_id ?? null;
-      if (!ownerId) throw new Error("Missing request owner.");
+      setMyOfferBusyId(offer.id);
 
       const threadId = await ensureThread({
-        itemId: requestId,
+        itemId,
         ownerId,
         requesterId: userId,
-      });
-
-      await insertSystemMessage({
-        threadId,
-        senderId: userId,
-        body: "✅ Helper here. My offer was accepted — ready to finalize details.",
       });
 
       router.push(`/messages/${threadId}`);
     } catch (e) {
       showToast(getFriendlyError(e), "err");
     } finally {
-      if (mountedRef.current) setMyOfferActingId(null);
+      if (mountedRef.current) setMyOfferBusyId(null);
     }
   }
 
   async function signOut() {
     await supabase.auth.signOut();
-    if (!mountedRef.current) return;
-    setDrawerOpen(false);
-    setActiveMenuId(null);
   }
 
   async function handleAuth() {
@@ -877,8 +1002,6 @@ export default function AccountPage() {
 
       setUserId(uid);
       setUserEmail(email);
-      setActiveMenuId(null);
-      setDrawerOpen(false);
 
       if (!uid || !email || !isAshlandEmail(email)) {
         clearAll();
@@ -897,28 +1020,57 @@ export default function AccountPage() {
   }, [clearAll, loadAllFor]);
 
   useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        setDrawerOpen(false);
-        setConfirm(null);
-        setActiveMenuId(null);
-      }
+    const q = searchParams.get("tab");
+    if (q === "overview" || q === "listings" || q === "requests" || q === "activity" || q === "history") {
+      setTab(q);
+    }
+  }, [searchParams]);
+
+  const overviewHighlights = useMemo(() => {
+    const rows: Array<{ key: string; title: string; body: string; cta: string; onClick: () => void }> = [];
+
+    if (unseenNotificationCount > 0) {
+      rows.push({
+        key: "notifs",
+        title: `${unseenNotificationCount} new notification${unseenNotificationCount > 1 ? "s" : ""}`,
+        body: "New requests and help offers are waiting.",
+        cta: "Open requests",
+        onClick: () => setTabAndUrl("requests"),
+      });
     }
 
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  useEffect(() => {
-    function onDocClick() {
-      setActiveMenuId(null);
+    if (incomingPendingOfferCount > 0) {
+      rows.push({
+        key: "offers",
+        title: `${incomingPendingOfferCount} helper offer${incomingPendingOfferCount > 1 ? "s" : ""} waiting`,
+        body: "Accept one or put others on hold.",
+        cta: "Review offers",
+        onClick: () => setTabAndUrl("requests"),
+      });
     }
 
-    if (activeMenuId) {
-      document.addEventListener("click", onDocClick);
-      return () => document.removeEventListener("click", onDocClick);
+    if (acceptedMyOffers > 0) {
+      rows.push({
+        key: "accepted",
+        title: `${acceptedMyOffers} of your offers got accepted`,
+        body: "Open chat and finalize details.",
+        cta: "Go to activity",
+        onClick: () => setTabAndUrl("activity"),
+      });
     }
-  }, [activeMenuId]);
+
+    if (rows.length === 0) {
+      rows.push({
+        key: "empty",
+        title: "You’re caught up",
+        body: "Nothing urgent is waiting right now.",
+        cta: "Create post",
+        onClick: () => router.push("/create"),
+      });
+    }
+
+    return rows.slice(0, 3);
+  }, [acceptedMyOffers, incomingPendingOfferCount, router, setTabAndUrl, unseenNotificationCount]);
 
   /* ==============================
      LOADING / AUTH
@@ -932,11 +1084,7 @@ export default function AccountPage() {
             <div className="skel skel-avatar" />
             <div className="skel skel-line lg" />
             <div className="skel skel-line md" />
-            <div className="action-grid compact">
-              <div className="skel skel-btn" />
-              <div className="skel skel-btn" />
-              <div className="skel skel-btn" />
-            </div>
+            <div className="skel skel-btn" />
           </div>
         </div>
         <PageStyles />
@@ -952,7 +1100,7 @@ export default function AccountPage() {
             <div className="eyebrow">My account</div>
             <h1 className="hero-title">Sign in to manage your campus activity</h1>
             <p className="hero-sub">
-              Use your <b>@ashland.edu</b> email to manage listings, requests, offers, and chats.
+              Use your <b>@ashland.edu</b> email to manage listings, requests, offers, and messages.
             </p>
 
             <div className="seg-row">
@@ -974,8 +1122,8 @@ export default function AccountPage() {
           </section>
 
           <section className="panel auth-form-panel">
-            <h2 className="panel-title">{authMode === "signin" ? "Welcome back" : "Create your account"}</h2>
-            <p className="panel-hint">Keep everything in one place: your posts, requests, offers, and chats.</p>
+            <h2 className="section-title">{authMode === "signin" ? "Welcome back" : "Create your account"}</h2>
+            <p className="section-hint">One place for your posts, requests, offers, and messages.</p>
 
             <input
               value={authEmail}
@@ -1045,10 +1193,7 @@ export default function AccountPage() {
 
           <div className="hero-chip-row">
             <Chip label={`${activeListings.length} active`} tone="green" />
-            <Chip
-              label={`${unseenIncomingInterestCount + unseenIncomingOfferCount} new`}
-              tone={hasNewRequests ? "red" : "gray"}
-            />
+            <Chip label={`${unseenNotificationCount} new`} tone={unseenNotificationCount ? "red" : "gray"} />
             <Chip label={`${stats.chats} chats`} tone="gray" />
           </div>
 
@@ -1059,32 +1204,27 @@ export default function AccountPage() {
             <button onClick={() => router.push("/messages")} className="btn btn-secondary" type="button">
               Messages
             </button>
-            <button
-              onClick={() => setDrawerOpen(true)}
-              className="btn btn-icon"
-              aria-label="Open menu"
-              type="button"
-            >
-              ☰
+            <button onClick={() => void signOut()} className="btn btn-secondary" type="button">
+              Sign out
             </button>
           </div>
 
           <div className="stats-grid mobile-stats-grid">
-            <MetricCard label="Active" value={activeListings.length} hint="Live posts" onClick={() => setTab("listings")} />
+            <MetricCard label="Active" value={activeListings.length} hint="Live posts" onClick={() => setTabAndUrl("listings")} />
             <MetricCard
               label="Requests"
               value={incomingInterests.length + incomingOffers.length}
               hint="Waiting on you"
-              onClick={() => openRequestsTab()}
-              highlight={hasNewRequests}
+              onClick={() => setTabAndUrl("requests")}
+              highlight={incomingInterests.length + incomingOffers.length > 0}
             />
             <MetricCard
               label="Activity"
               value={myRequests.length + myOffers.length}
               hint="Your actions"
-              onClick={() => setTab("activity")}
+              onClick={() => setTabAndUrl("activity")}
             />
-            <MetricCard label="Done" value={completedListings.length} hint="Finished" onClick={() => setTab("history")} />
+            <MetricCard label="Done" value={completedListings.length} hint="Finished" onClick={() => setTabAndUrl("history")} />
           </div>
         </section>
 
@@ -1092,7 +1232,7 @@ export default function AccountPage() {
           <div className="section-head">
             <div>
               <h2 className="section-title">Needs attention</h2>
-              <p className="section-hint">See the next best thing to handle first.</p>
+              <p className="section-hint">Only the next important things show here.</p>
             </div>
           </div>
 
@@ -1105,20 +1245,20 @@ export default function AccountPage() {
 
         <section className="tab-sticky-wrap">
           <div className="tabs-shell">
-            <button onClick={() => setTab("overview")} className={`tab-btn ${tab === "overview" ? "active" : ""}`} type="button">
+            <button onClick={() => setTabAndUrl("overview")} className={`tab-btn ${tab === "overview" ? "active" : ""}`} type="button">
               Overview
             </button>
-            <button onClick={() => setTab("listings")} className={`tab-btn ${tab === "listings" ? "active" : ""}`} type="button">
+            <button onClick={() => setTabAndUrl("listings")} className={`tab-btn ${tab === "listings" ? "active" : ""}`} type="button">
               Listings
             </button>
-            <button onClick={() => openRequestsTab()} className={`tab-btn ${tab === "requests" ? "active" : ""}`} type="button">
+            <button onClick={() => setTabAndUrl("requests")} className={`tab-btn ${tab === "requests" ? "active" : ""}`} type="button">
               Requests
-              {hasNewRequests ? <span className="badge-red">{unseenIncomingInterestCount + unseenIncomingOfferCount}</span> : null}
+              {unseenNotificationCount ? <span className="badge-red">{unseenNotificationCount}</span> : null}
             </button>
-            <button onClick={() => setTab("activity")} className={`tab-btn ${tab === "activity" ? "active" : ""}`} type="button">
+            <button onClick={() => setTabAndUrl("activity")} className={`tab-btn ${tab === "activity" ? "active" : ""}`} type="button">
               Activity
             </button>
-            <button onClick={() => setTab("history")} className={`tab-btn ${tab === "history" ? "active" : ""}`} type="button">
+            <button onClick={() => setTabAndUrl("history")} className={`tab-btn ${tab === "history" ? "active" : ""}`} type="button">
               History
             </button>
           </div>
@@ -1129,8 +1269,43 @@ export default function AccountPage() {
             <section className="panel">
               <div className="section-head">
                 <div>
-                  <h2 className="section-title">Quick actions</h2>
-                  <p className="section-hint">Keep the most common actions easy to reach.</p>
+                  <h2 className="section-title sm">Latest notifications</h2>
+                  <p className="section-hint">Keep the homepage light. Handle details in Requests or Manage.</p>
+                </div>
+
+                <button
+                  onClick={() => void markNotificationsSeen()}
+                  disabled={markingNotifs || unseenNotificationCount === 0}
+                  className="btn btn-secondary compact-btn"
+                  type="button"
+                >
+                  {markingNotifs ? "Working…" : "Mark seen"}
+                </button>
+              </div>
+
+              {notifications.length === 0 ? (
+                <EmptyState title="No notifications" body="New requests and help offers will appear here." compact />
+              ) : (
+                <div className="stack-list">
+                  {notifications.slice(0, 3).map((n) => (
+                    <NotificationCard
+                      key={n.id}
+                      title={n.title}
+                      body={n.body || `${readableName(n.actor)} did something on one of your posts.`}
+                      meta={fmtWhen(n.created_at)}
+                      isNew={!n.seen_at}
+                      onClick={() => openNotification(n)}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="panel">
+              <div className="section-head">
+                <div>
+                  <h2 className="section-title sm">Quick actions</h2>
+                  <p className="section-hint">Common things you likely want next.</p>
                 </div>
               </div>
 
@@ -1138,7 +1313,7 @@ export default function AccountPage() {
                 <QuickActionCard
                   emoji="📝"
                   title="Create a new post"
-                  body="Share a give item, ask for help, or publish an event."
+                  body="Share a give item, request help, or publish an event."
                   actionLabel="Create"
                   onClick={() => router.push("/create")}
                   primary
@@ -1151,18 +1326,18 @@ export default function AccountPage() {
                   onClick={() => router.push("/messages")}
                 />
                 <QuickActionCard
+                  emoji="📦"
+                  title="Manage live posts"
+                  body="Open your listings and take action."
+                  actionLabel="Listings"
+                  onClick={() => setTabAndUrl("listings")}
+                />
+                <QuickActionCard
                   emoji="🔎"
                   title="Browse the feed"
                   body="See what the campus community is posting now."
                   actionLabel="Browse"
                   onClick={() => router.push("/feed")}
-                />
-                <QuickActionCard
-                  emoji="📦"
-                  title="My pickups"
-                  body="Check pickup progress and next steps."
-                  actionLabel="Pickups"
-                  onClick={() => router.push("/pickups")}
                 />
               </div>
             </section>
@@ -1174,13 +1349,13 @@ export default function AccountPage() {
                     <h2 className="section-title sm">Recent listings</h2>
                     <p className="section-hint">Your latest live posts.</p>
                   </div>
-                  <button onClick={() => setTab("listings")} className="link-btn" type="button">
+                  <button onClick={() => setTabAndUrl("listings")} className="link-btn" type="button">
                     See all
                   </button>
                 </div>
 
                 {activeListings.slice(0, 3).length === 0 ? (
-                  <EmptyState title="No active listings yet" body="Your active give posts and request posts will show here." compact />
+                  <EmptyState title="No active listings yet" body="Your live give, request, and event posts show here." compact />
                 ) : (
                   <div className="stack-list">
                     {activeListings.slice(0, 3).map((item) => (
@@ -1189,7 +1364,7 @@ export default function AccountPage() {
                         title={item.title}
                         subtitle={item.description || "No description"}
                         photoUrl={item.photo_url}
-                        chip1={itemVerb(item.post_type)}
+                        chip1={itemTypeLabel(item.post_type)}
                         chip2={item.status ?? "—"}
                         onClick={() => router.push(`/manage/${item.id}`)}
                         ctaLabel="Manage"
@@ -1203,22 +1378,22 @@ export default function AccountPage() {
                 <div className="section-head">
                   <div>
                     <h2 className="section-title sm">Latest activity</h2>
-                    <p className="section-hint">Your recent interests and help offers.</p>
+                    <p className="section-hint">Things you requested or offered recently.</p>
                   </div>
-                  <button onClick={() => setTab("activity")} className="link-btn" type="button">
+                  <button onClick={() => setTabAndUrl("activity")} className="link-btn" type="button">
                     See all
                   </button>
                 </div>
 
                 {myRequests.length === 0 && myOffers.length === 0 ? (
-                  <EmptyState title="No activity yet" body="When you request an item or offer help, it will appear here." compact />
+                  <EmptyState title="No activity yet" body="When you request an item or offer help, it will show here." compact />
                 ) : (
                   <div className="stack-list">
                     {myRequests.slice(0, 2).map((r, i) => (
                       <CompactTextRow
                         key={`req-${r.item_id}-${r.created_at ?? i}`}
                         icon="🙋"
-                        title={r.items?.title ?? "Unknown item"}
+                        title={r.item?.title ?? "Unknown post"}
                         subtitle={`Interest sent${r.created_at ? ` • ${fmtWhen(r.created_at)}` : ""}`}
                         onClick={() => router.push(`/item/${r.item_id}`)}
                         ctaLabel="View"
@@ -1252,20 +1427,18 @@ export default function AccountPage() {
             {activeListings.length === 0 ? (
               <EmptyState
                 title="No active listings"
-                body="Post your first give item or request to get started."
+                body="Create your first give, request, or event post to get started."
                 actionLabel="Create post"
                 onAction={() => router.push("/create")}
               />
             ) : (
               <div className="card-grid">
                 {activeListings.map((item) => (
-                  <ListingCardModern
+                  <ListingCard
                     key={item.id}
                     item={item}
                     deleting={deletingId === item.id}
-                    menuOpen={activeMenuId === item.id}
-                    onToggleMenu={() => setActiveMenuId((prev) => (prev === item.id ? null : item.id))}
-                    onOpen={() => router.push(`/manage/${item.id}`)}
+                    onManage={() => router.push(`/manage/${item.id}`)}
                     onEdit={() => router.push(`/item/${item.id}/edit`)}
                     onDelete={() => void deleteListing(item.id)}
                   />
@@ -1277,64 +1450,68 @@ export default function AccountPage() {
 
         {tab === "requests" ? (
           <div className="content-stack">
-            <section className="panel-soft">
+            <section className="panel">
               <div className="section-head">
                 <div>
-                  <h2 className="section-title sm">Requests waiting on you</h2>
-                  <p className="section-hint">Use this as your decision center.</p>
+                  <h2 className="section-title sm">Incoming notifications</h2>
+                  <p className="section-hint">Use this section as the decision center, not the homepage.</p>
                 </div>
+
                 <button
-                  onClick={() => userId && void loadIncomingAll(userId)}
-                  disabled={incomingLoading}
+                  onClick={() => void markNotificationsSeen()}
+                  disabled={markingNotifs || unseenNotificationCount === 0}
                   className="btn btn-secondary compact-btn"
                   type="button"
                 >
-                  {incomingLoading ? "Refreshing…" : "Refresh"}
+                  {markingNotifs ? "Working…" : "Mark all seen"}
                 </button>
               </div>
+
+              {notifications.length === 0 ? (
+                <EmptyState title="No notifications" body="New requests and offers will appear here." compact />
+              ) : (
+                <div className="stack-list">
+                  {notifications.map((n) => (
+                    <NotificationCard
+                      key={n.id}
+                      title={n.title}
+                      body={n.body || `${readableName(n.actor)} interacted with your post.`}
+                      meta={fmtWhen(n.created_at)}
+                      isNew={!n.seen_at}
+                      onClick={() => openNotification(n)}
+                    />
+                  ))}
+                </div>
+              )}
             </section>
 
             <section className="panel">
               <div className="section-head">
                 <div>
                   <h2 className="section-title sm">Incoming item requests</h2>
-                  <p className="section-hint">People who requested your give listings.</p>
+                  <p className="section-hint">People who requested your give posts.</p>
                 </div>
                 <Chip label={`${incomingInterests.length}`} tone={incomingInterests.length ? "green" : "gray"} />
               </div>
 
               {incomingInterests.length === 0 ? (
-                <EmptyState
-                  title="No incoming item requests"
-                  body="When someone requests one of your give posts, it will appear here."
-                  compact
-                />
+                <EmptyState title="No incoming item requests" body="When someone requests your give post, it will show here." compact />
               ) : (
                 <div className="stack-list">
-                  {incomingInterests.map((r) => {
-                    const title = r.items?.title?.trim() ? r.items.title : "Unknown item";
-                    const who = niceNameFromProfile(r.requester, "Ashland user");
-                    const deleting = deletingNotifId === r.id;
-
-                    return (
-                      <RequestRowCard
-                        key={r.id}
-                        photoUrl={r.items?.photo_url ?? null}
-                        title={`${who} requested ${title}`}
-                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}${r.owner_seen_at ? "Seen" : "New"}`}
-                        chips={[
-                          { label: r.owner_seen_at ? "Seen" : "New", tone: r.owner_seen_at ? "gray" : "red" },
-                          { label: r.items?.status ?? "—", tone: statusTone(r.items?.status) },
-                        ]}
-                        primaryLabel="Open"
-                        onPrimary={() => router.push(`/manage/${r.item_id}`)}
-                        secondaryLabel={deleting ? "Removing…" : "Remove"}
-                        onSecondary={() => void deleteNotification(r)}
-                        secondaryDanger
-                        secondaryDisabled={deleting}
-                      />
-                    );
-                  })}
+                  {incomingInterests.map((r) => (
+                    <RequestRowCard
+                      key={r.id}
+                      photoUrl={r.item?.photo_url ?? null}
+                      title={`${readableName(r.requester)} requested ${r.item?.title ?? "your post"}`}
+                      subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${r.item?.status ?? "—"}`}
+                      chips={[
+                        { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
+                        { label: r.item?.status ?? "—", tone: toneForStatus(r.item?.status) },
+                      ]}
+                      primaryLabel="Manage"
+                      onPrimary={() => router.push(`/manage/${r.item_id}`)}
+                    />
+                  ))}
                 </div>
               )}
             </section>
@@ -1343,39 +1520,33 @@ export default function AccountPage() {
               <div className="section-head">
                 <div>
                   <h2 className="section-title sm">Incoming helper offers</h2>
-                  <p className="section-hint">Accept one, hold others, or decline.</p>
+                  <p className="section-hint">Accept one, hold some, or decline.</p>
                 </div>
                 <Chip label={`${incomingOffers.length}`} tone={incomingOffers.length ? "green" : "gray"} />
               </div>
 
               {incomingOffers.length === 0 ? (
-                <EmptyState
-                  title="No incoming help offers"
-                  body="When someone offers help on your request post, it will appear here."
-                  compact
-                />
+                <EmptyState title="No incoming helper offers" body="When someone offers help on your request post, it will show here." compact />
               ) : (
                 <div className="stack-list">
                   {incomingOffers.map((o) => {
-                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
-                    const who = niceNameFromProfile(o.helper, "Ashland user");
                     const status = (o.status ?? "pending") as OfferStatus;
-                    const acting = offerActingId === o.id;
+                    const busy = incomingOfferBusyId === o.id;
 
                     return (
                       <OfferRowCard
                         key={o.id}
                         icon="🤝"
-                        title={`${who} offered help on ${title}`}
+                        title={`${readableName(o.helper)} offered help on ${o.request_item?.title ?? "your request"}`}
                         subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
                         note={o.note}
                         statusLabel={status}
-                        onView={() => router.push(`/item/${o.request_id}`)}
-                        onAccept={() => void updateOfferStatus(o, "accepted")}
-                        onHold={() => void updateOfferStatus(o, "hold")}
-                        onDecline={() => void updateOfferStatus(o, "declined")}
-                        onChat={() => void startChatWithHelper(o)}
-                        busy={acting}
+                        onView={() => router.push(`/manage/${o.request_id}`)}
+                        onAccept={() => void updateIncomingOfferStatus(o, "accepted")}
+                        onHold={() => void updateIncomingOfferStatus(o, "hold")}
+                        onDecline={() => void updateIncomingOfferStatus(o, "declined")}
+                        onChat={() => void openIncomingOfferChat(o)}
+                        busy={busy}
                         accepted={status === "accepted"}
                         completed={status === "completed"}
                         declined={status === "declined"}
@@ -1409,23 +1580,20 @@ export default function AccountPage() {
                 />
               ) : (
                 <div className="stack-list">
-                  {myRequests.map((r, i) => {
-                    const item = r.items;
-                    return (
-                      <RequestRowCard
-                        key={`${r.item_id}-${r.created_at ?? i}`}
-                        photoUrl={item?.photo_url ?? null}
-                        title={item?.title ?? "Unknown item"}
-                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${item?.status ?? "—"}`}
-                        chips={[
-                          { label: "Interest sent", tone: "green" },
-                          { label: item?.status ?? "—", tone: statusTone(item?.status) },
-                        ]}
-                        primaryLabel="View"
-                        onPrimary={() => router.push(`/item/${r.item_id}`)}
-                      />
-                    );
-                  })}
+                  {myRequests.map((r, i) => (
+                    <RequestRowCard
+                      key={`${r.item_id}-${r.created_at ?? i}`}
+                      photoUrl={r.item?.photo_url ?? null}
+                      title={r.item?.title ?? "Unknown post"}
+                      subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${r.item?.status ?? "—"}`}
+                      chips={[
+                        { label: "Interest sent", tone: "green" },
+                        { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
+                      ]}
+                      primaryLabel="View"
+                      onPrimary={() => router.push(`/item/${r.item_id}`)}
+                    />
+                  ))}
                 </div>
               )}
             </section>
@@ -1450,20 +1618,19 @@ export default function AccountPage() {
               ) : (
                 <div className="stack-list">
                   {myOffers.map((o) => {
-                    const title = o.request_item?.title?.trim() ? o.request_item.title : "Unknown request";
                     const status = (o.status ?? "pending") as OfferStatus;
-                    const acting = myOfferActingId === o.id;
+                    const acting = myOfferBusyId === o.id;
 
                     return (
                       <OfferRowCard
                         key={o.id}
                         icon="🙌"
-                        title={`You offered help on ${title}`}
+                        title={`You offered help on ${o.request_item?.title ?? "a request"}`}
                         subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
                         note={o.note}
                         statusLabel={status}
                         onView={() => router.push(`/item/${o.request_id}`)}
-                        onChat={() => void startChatFromMyOffer(o)}
+                        onChat={() => void openMyOfferChat(o)}
                         onDecline={() => void withdrawMyOffer(o)}
                         busy={acting}
                         accepted={status === "accepted"}
@@ -1485,11 +1652,11 @@ export default function AccountPage() {
           <div className="content-stack">
             <section className="panel-soft">
               <h2 className="section-title sm">Completed listings</h2>
-              <p className="section-hint">These were picked up or finished and are now archived.</p>
+              <p className="section-hint">These were claimed or completed and are now archived.</p>
             </section>
 
             {completedListings.length === 0 ? (
-              <EmptyState title="No completed listings yet" body="When a listing is claimed or completed, it moves here." compact />
+              <EmptyState title="No completed listings yet" body="Finished posts will move here automatically." compact />
             ) : (
               <div className="card-grid">
                 {completedListings.map((item) => (
@@ -1497,68 +1664,6 @@ export default function AccountPage() {
                 ))}
               </div>
             )}
-          </div>
-        ) : null}
-
-        {drawerOpen ? (
-          <div className="overlay" onClick={() => setDrawerOpen(false)}>
-            <div className="sheet" onClick={(e) => e.stopPropagation()}>
-              <div className="sheet-head">
-                <div>
-                  <div className="sheet-title">Account menu</div>
-                  <div className="sheet-sub">{displayName}</div>
-                </div>
-                <button onClick={() => setDrawerOpen(false)} className="btn btn-icon small" type="button">
-                  ✕
-                </button>
-              </div>
-
-              <div className="sheet-actions">
-                <button
-                  onClick={() => {
-                    setDrawerOpen(false);
-                    router.push("/create");
-                  }}
-                  className="btn btn-primary full"
-                  type="button"
-                >
-                  Create post
-                </button>
-                <button
-                  onClick={() => {
-                    setDrawerOpen(false);
-                    router.push("/messages");
-                  }}
-                  className="btn btn-secondary full"
-                  type="button"
-                >
-                  Messages
-                </button>
-                <button
-                  onClick={() => {
-                    setDrawerOpen(false);
-                    router.push("/pickups");
-                  }}
-                  className="btn btn-secondary full"
-                  type="button"
-                >
-                  My pickups
-                </button>
-                <button
-                  onClick={() => {
-                    setDrawerOpen(false);
-                    router.push("/feed");
-                  }}
-                  className="btn btn-secondary full"
-                  type="button"
-                >
-                  Browse feed
-                </button>
-                <button onClick={() => void signOut()} className="btn btn-danger full" type="button">
-                  Sign out
-                </button>
-              </div>
-            </div>
           </div>
         ) : null}
 
@@ -1657,6 +1762,33 @@ function QuickActionCard({
   );
 }
 
+function NotificationCard({
+  title,
+  body,
+  meta,
+  isNew,
+  onClick,
+}: {
+  title: string;
+  body: string;
+  meta: string;
+  isNew: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button className="notif-card" onClick={onClick} type="button">
+      <div className="notif-head">
+        <div className="notif-title-wrap">
+          <div className="notif-title">{title}</div>
+          <div className="notif-body">{body}</div>
+        </div>
+        <Chip label={isNew ? "New" : "Seen"} tone={isNew ? "red" : "gray"} />
+      </div>
+      <div className="notif-meta">{meta}</div>
+    </button>
+  );
+}
+
 function CompactItemRow({
   title,
   subtitle,
@@ -1682,7 +1814,7 @@ function CompactItemRow({
         <div className="compact-sub">{subtitle}</div>
         <div className="chip-row top-gap-sm">
           {chip1 ? <Chip label={chip1} tone="gray" /> : null}
-          {chip2 ? <Chip label={chip2} tone={statusTone(chip2)} /> : null}
+          {chip2 ? <Chip label={chip2} tone={toneForStatus(chip2)} /> : null}
         </div>
       </div>
       <button onClick={onClick} className="btn btn-secondary inline" type="button">
@@ -1719,20 +1851,16 @@ function CompactTextRow({
   );
 }
 
-function ListingCardModern({
+function ListingCard({
   item,
   deleting,
-  menuOpen,
-  onToggleMenu,
-  onOpen,
+  onManage,
   onEdit,
   onDelete,
 }: {
   item: MyItemRow;
   deleting: boolean;
-  menuOpen: boolean;
-  onToggleMenu: () => void;
-  onOpen: () => void;
+  onManage: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
@@ -1743,12 +1871,12 @@ function ListingCardModern({
           // eslint-disable-next-line @next/next/no-img-element
           <img src={item.photo_url} alt={item.title} className="listing-image" />
         ) : (
-          <div className="listing-image-fallback">{item.post_type === "request" ? "Request" : "No image"}</div>
+          <div className="listing-image-fallback">{itemTypeLabel(item.post_type)}</div>
         )}
 
         <div className="listing-top-badges">
-          <Chip label={itemVerb(item.post_type)} tone="gray" />
-          <Chip label={item.status ?? "—"} tone={statusTone(item.status)} />
+          <Chip label={itemTypeLabel(item.post_type)} tone="gray" />
+          <Chip label={item.status ?? "—"} tone={toneForStatus(item.status)} />
         </div>
       </div>
 
@@ -1758,35 +1886,15 @@ function ListingCardModern({
         <div className="listing-meta">Posted {fmtWhen(item.created_at)}</div>
 
         <div className="listing-actions">
-          <button onClick={onOpen} className="btn btn-primary inline" type="button">
+          <button onClick={onManage} className="btn btn-primary inline" type="button">
             Manage
           </button>
           <button onClick={onEdit} className="btn btn-secondary inline" type="button">
             Edit
           </button>
-
-          <div className="menu-wrap" onClick={(e) => e.stopPropagation()}>
-            <button
-              onClick={onToggleMenu}
-              className="btn btn-icon menu-btn"
-              type="button"
-              aria-label="Open post actions"
-              aria-expanded={menuOpen}
-            >
-              ⋯
-            </button>
-
-            {menuOpen ? (
-              <div className="mini-menu">
-                <button onClick={onEdit} className="mini-menu-btn" type="button">
-                  Edit post
-                </button>
-                <button onClick={onDelete} disabled={deleting} className="mini-menu-btn danger" type="button">
-                  {deleting ? "Deleting…" : "Delete post"}
-                </button>
-              </div>
-            ) : null}
-          </div>
+          <button onClick={onDelete} disabled={deleting} className="btn btn-danger inline" type="button">
+            {deleting ? "Deleting…" : "Delete"}
+          </button>
         </div>
       </div>
     </div>
@@ -1809,7 +1917,7 @@ function HistoryCard({ item }: { item: MyItemRow }) {
         <div className="listing-title">{item.title}</div>
         <div className="listing-sub">{item.description || "No description provided."}</div>
         <div className="chip-row top-gap-sm">
-          <Chip label={itemVerb(item.post_type)} tone="gray" />
+          <Chip label={itemTypeLabel(item.post_type)} tone="gray" />
           <Chip label="Completed" tone="green" />
         </div>
         <div className="listing-meta">Posted {fmtWhen(item.created_at)}</div>
@@ -1825,10 +1933,6 @@ function RequestRowCard({
   chips,
   primaryLabel,
   onPrimary,
-  secondaryLabel,
-  onSecondary,
-  secondaryDanger,
-  secondaryDisabled,
 }: {
   photoUrl: string | null;
   title: string;
@@ -1836,10 +1940,6 @@ function RequestRowCard({
   chips?: Array<{ label: string; tone: "green" | "amber" | "red" | "gray" }>;
   primaryLabel: string;
   onPrimary: () => void;
-  secondaryLabel?: string;
-  onSecondary?: () => void;
-  secondaryDanger?: boolean;
-  secondaryDisabled?: boolean;
 }) {
   return (
     <div className="row-card">
@@ -1862,16 +1962,6 @@ function RequestRowCard({
         <button onClick={onPrimary} className="btn btn-primary inline" type="button">
           {primaryLabel}
         </button>
-        {secondaryLabel && onSecondary ? (
-          <button
-            onClick={onSecondary}
-            disabled={secondaryDisabled}
-            className={`btn ${secondaryDanger ? "btn-danger" : "btn-secondary"} inline`}
-            type="button"
-          >
-            {secondaryLabel}
-          </button>
-        ) : null}
       </div>
     </div>
   );
@@ -1922,7 +2012,7 @@ function OfferRowCard({
           <div className="row-title">{title}</div>
           <div className="row-meta">{subtitle}</div>
           <div className="chip-row top-gap-sm">
-            <Chip label={statusLabel} tone={statusTone(statusLabel)} />
+            <Chip label={statusLabel} tone={toneForStatus(statusLabel)} />
           </div>
           {note ? <div className="note-box">{note}</div> : null}
         </div>
@@ -1940,7 +2030,7 @@ function OfferRowCard({
         ) : null}
 
         {!hideHold && onHold ? (
-          <button onClick={onHold} disabled={busy || accepted || completed} className="btn btn-secondary inline" type="button">
+          <button onClick={onHold} disabled={busy || completed} className="btn btn-secondary inline" type="button">
             Hold
           </button>
         ) : null}
@@ -2045,7 +2135,7 @@ function ConfirmModal({
   return (
     <div className="overlay" onClick={onCancel} role="dialog" aria-modal="true">
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="sheet-title">{title}</div>
+        <div className="modal-title">{title}</div>
         <div className="modal-body">{body}</div>
         <div className="confirm-actions">
           <button onClick={onCancel} disabled={busy} className="btn btn-secondary full" type="button">
@@ -2075,9 +2165,12 @@ function ConfirmModal({
 function PageStyles() {
   return (
     <style jsx global>{`
-      * { box-sizing: border-box; }
+      * {
+        box-sizing: border-box;
+      }
 
-      html, body {
+      html,
+      body {
         max-width: 100%;
         overflow-x: hidden;
       }
@@ -2096,7 +2189,9 @@ function PageStyles() {
         padding-bottom: calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 24px);
       }
 
-      .page-shell.narrow { max-width: 760px; }
+      .page-shell.narrow {
+        max-width: 760px;
+      }
 
       .hero-card,
       .panel,
@@ -2107,7 +2202,8 @@ function PageStyles() {
       .quick-card,
       .metric-card,
       .empty-box,
-      .auth-form-panel {
+      .auth-form-panel,
+      .notif-card {
         min-width: 0;
       }
 
@@ -2115,8 +2211,6 @@ function PageStyles() {
         border-radius: 28px;
         border: 1px solid rgba(229, 231, 235, 0.9);
         background: linear-gradient(180deg, rgba(255,255,255,0.97) 0%, rgba(255,255,255,0.90) 100%);
-        backdrop-filter: blur(14px);
-        -webkit-backdrop-filter: blur(14px);
         box-shadow: 0 20px 60px rgba(15,23,42,0.08);
         padding: 16px;
       }
@@ -2168,7 +2262,6 @@ function PageStyles() {
         font-size: 14px;
         line-height: 1.5;
         overflow-wrap: anywhere;
-        word-break: break-word;
       }
 
       .hero-copy-sub {
@@ -2178,7 +2271,9 @@ function PageStyles() {
         align-items: center;
       }
 
-      .dot { color: #9ca3af; }
+      .dot {
+        color: #9ca3af;
+      }
 
       .email-chip {
         max-width: 100%;
@@ -2209,7 +2304,7 @@ function PageStyles() {
 
       .hero-action-grid {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 56px;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 10px;
         align-items: stretch;
       }
@@ -2229,7 +2324,9 @@ function PageStyles() {
         cursor: not-allowed;
       }
 
-      .btn.full { width: 100%; }
+      .btn.full {
+        width: 100%;
+      }
 
       .btn.inline {
         min-height: 42px;
@@ -2240,12 +2337,6 @@ function PageStyles() {
       .btn.compact-btn {
         min-height: 42px;
         padding: 0 14px;
-        border-radius: 14px;
-      }
-
-      .btn.small {
-        width: 42px;
-        height: 42px;
         border-radius: 14px;
       }
 
@@ -2274,24 +2365,6 @@ function PageStyles() {
         color: #991b1b;
         border-radius: 16px;
         padding: 0 16px;
-      }
-
-      .btn-icon {
-        width: 56px;
-        min-width: 56px;
-        min-height: 48px;
-        border-radius: 16px;
-        border: 1px solid #e5e7eb;
-        background: #fff;
-        color: #111827;
-        font-size: 20px;
-      }
-
-      .menu-btn {
-        width: 42px;
-        min-width: 42px;
-        min-height: 42px;
-        border-radius: 14px;
       }
 
       .stats-grid {
@@ -2360,10 +2433,11 @@ function PageStyles() {
         color: #111827;
       }
 
-      .section-title.sm { font-size: 18px; }
+      .section-title.sm {
+        font-size: 18px;
+      }
 
-      .section-hint,
-      .panel-hint {
+      .section-hint {
         margin: 6px 0 0;
         font-size: 13px;
         color: #6b7280;
@@ -2378,10 +2452,21 @@ function PageStyles() {
         gap: 12px;
       }
 
-      .attention-grid { grid-template-columns: 1fr; }
-      .quick-grid { grid-template-columns: 1fr; }
-      .two-col-grid { grid-template-columns: 1fr; }
-      .card-grid { grid-template-columns: 1fr; }
+      .attention-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .quick-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .two-col-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .card-grid {
+        grid-template-columns: 1fr;
+      }
 
       .attention-card {
         border-radius: 22px;
@@ -2421,11 +2506,12 @@ function PageStyles() {
         border: 1px solid #e5e7eb;
         background: rgba(255,255,255,0.88);
         backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
         scrollbar-width: none;
       }
 
-      .tabs-shell::-webkit-scrollbar { display: none; }
+      .tabs-shell::-webkit-scrollbar {
+        display: none;
+      }
 
       .tab-btn {
         flex: 0 0 auto;
@@ -2525,6 +2611,47 @@ function PageStyles() {
         line-height: 1.45;
       }
 
+      .notif-card {
+        width: 100%;
+        text-align: left;
+        border-radius: 18px;
+        border: 1px solid #e5e7eb;
+        background: #fff;
+        padding: 14px;
+        box-shadow: 0 8px 22px rgba(15,23,42,0.04);
+      }
+
+      .notif-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 10px;
+      }
+
+      .notif-title-wrap {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .notif-title {
+        font-size: 15px;
+        font-weight: 950;
+        color: #111827;
+      }
+
+      .notif-body {
+        margin-top: 4px;
+        color: #6b7280;
+        line-height: 1.45;
+      }
+
+      .notif-meta {
+        margin-top: 8px;
+        font-size: 12px;
+        color: #6b7280;
+        font-weight: 800;
+      }
+
       .compact-row,
       .row-card {
         border-radius: 20px;
@@ -2549,8 +2676,7 @@ function PageStyles() {
       .row-title,
       .listing-title,
       .empty-title,
-      .sheet-title,
-      .panel-title {
+      .modal-title {
         font-weight: 950;
         color: #111827;
       }
@@ -2615,7 +2741,7 @@ function PageStyles() {
       }
 
       .listing-card {
-        overflow: visible;
+        overflow: hidden;
         box-shadow: 0 14px 32px rgba(15,23,42,0.06);
         border-radius: 24px;
         border: 1px solid #e5e7eb;
@@ -2695,42 +2821,6 @@ function PageStyles() {
         flex-wrap: wrap;
       }
 
-      .menu-wrap {
-        position: relative;
-        margin-left: auto;
-      }
-
-      .mini-menu {
-        position: absolute;
-        right: 0;
-        top: 48px;
-        width: 180px;
-        border-radius: 16px;
-        border: 1px solid #e5e7eb;
-        background: #fff;
-        box-shadow: 0 18px 40px rgba(15,23,42,0.14);
-        padding: 8px;
-        z-index: 30;
-      }
-
-      .mini-menu-btn {
-        width: 100%;
-        text-align: left;
-        border: none;
-        background: transparent;
-        color: #111827;
-        padding: 10px;
-        border-radius: 10px;
-        cursor: pointer;
-        font-weight: 800;
-      }
-
-      .mini-menu-btn.danger { color: #991b1b; }
-
-      .mini-menu-btn:hover {
-        background: #f9fafb;
-      }
-
       .row-card {
         padding: 14px;
         box-shadow: 0 10px 24px rgba(15,23,42,0.05);
@@ -2780,7 +2870,9 @@ function PageStyles() {
         border-radius: 18px;
       }
 
-      .empty-title { font-size: 18px; }
+      .empty-title {
+        font-size: 18px;
+      }
 
       .modal-body,
       .empty-body {
@@ -2799,7 +2891,10 @@ function PageStyles() {
         font-weight: 800;
       }
 
-      .auth-card { display: grid; gap: 12px; }
+      .auth-card {
+        display: grid;
+        gap: 12px;
+      }
 
       .seg-row {
         display: flex;
@@ -2842,40 +2937,6 @@ function PageStyles() {
         z-index: 9998;
       }
 
-      .sheet {
-        position: fixed;
-        left: 12px;
-        right: 12px;
-        bottom: calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 12px);
-        background: #fff;
-        border: 1px solid #e5e7eb;
-        border-radius: 24px;
-        box-shadow: 0 30px 80px rgba(0,0,0,0.14);
-        overflow: hidden;
-      }
-
-      .sheet-head {
-        padding: 16px;
-        border-bottom: 1px solid #e5e7eb;
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 12px;
-      }
-
-      .sheet-sub {
-        margin-top: 4px;
-        color: #6b7280;
-        font-size: 13px;
-        overflow-wrap: anywhere;
-      }
-
-      .sheet-actions {
-        padding: 14px;
-        display: grid;
-        gap: 10px;
-      }
-
       .modal {
         position: fixed;
         left: 12px;
@@ -2914,8 +2975,13 @@ function PageStyles() {
         max-width: min(560px, calc(100vw - 24px));
       }
 
-      .toast-mark.ok { color: #065f46; }
-      .toast-mark.err { color: #b91c1c; }
+      .toast-mark.ok {
+        color: #065f46;
+      }
+
+      .toast-mark.err {
+        color: #b91c1c;
+      }
 
       .chip {
         display: inline-flex;
@@ -2962,43 +3028,81 @@ function PageStyles() {
         padding: 0;
       }
 
-      .top-gap { margin-top: 14px; }
-      .top-gap-sm { margin-top: 8px; }
+      .top-gap {
+        margin-top: 14px;
+      }
 
-      .skeleton-shell { display: grid; gap: 12px; }
+      .top-gap-sm {
+        margin-top: 8px;
+      }
+
+      .skeleton-shell {
+        display: grid;
+        gap: 12px;
+      }
 
       .skel {
         background: #e5e7eb;
         border-radius: 14px;
       }
 
-      .skel-avatar { width: 72px; height: 72px; border-radius: 22px; }
-      .skel-line.lg { width: 68%; height: 24px; }
-      .skel-line.md { width: 84%; height: 16px; }
-      .skel-btn { height: 46px; width: 100%; }
+      .skel-avatar {
+        width: 72px;
+        height: 72px;
+        border-radius: 22px;
+      }
 
-      .action-grid.compact {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 10px;
+      .skel-line.lg {
+        width: 68%;
+        height: 24px;
+      }
+
+      .skel-line.md {
+        width: 84%;
+        height: 16px;
+      }
+
+      .skel-btn {
+        height: 46px;
+        width: 100%;
       }
 
       @media (min-width: 700px) {
-        .page-shell { padding: 16px; }
-        .hero-card { padding: 18px; }
-
-        .hero-action-grid {
-          grid-template-columns: repeat(2, minmax(0, 180px)) 56px;
-          justify-content: start;
+        .page-shell {
+          padding: 16px;
         }
 
-        .mobile-stats-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-        .attention-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-        .quick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .two-col-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .confirm-actions { grid-template-columns: 1fr 1fr; }
-        .auth-button-stack { grid-template-columns: 1fr 1fr; }
+        .hero-card {
+          padding: 18px;
+        }
+
+        .mobile-stats-grid {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+
+        .attention-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .quick-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .two-col-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .card-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .confirm-actions {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .auth-button-stack {
+          grid-template-columns: 1fr 1fr;
+        }
 
         .modal {
           left: 50%;
@@ -3006,31 +3110,20 @@ function PageStyles() {
           width: min(520px, calc(100vw - 24px));
           transform: translate(-50%, -50%);
         }
-
-        .sheet {
-          left: auto;
-          right: 16px;
-          width: min(360px, calc(100vw - 32px));
-          bottom: 16px;
-        }
       }
 
-      @media (max-width: 520px) {
+      @media (max-width: 560px) {
         .page-shell {
           padding-left: 10px;
           padding-right: 10px;
         }
 
-        .hero-title { font-size: 24px; }
-
-        .hero-action-grid {
-          grid-template-columns: 1fr 1fr 50px;
+        .hero-title {
+          font-size: 24px;
         }
 
-        .btn-primary,
-        .btn-secondary,
-        .btn-danger {
-          padding: 0 12px;
+        .hero-action-grid {
+          grid-template-columns: 1fr;
         }
 
         .compact-row {
@@ -3054,17 +3147,6 @@ function PageStyles() {
         .listing-actions > .btn.inline {
           width: 100%;
           min-width: 0;
-        }
-
-        .menu-wrap {
-          margin-left: 0;
-          grid-column: span 2;
-          justify-self: end;
-        }
-
-        .mini-menu {
-          right: 0;
-          width: min(180px, calc(100vw - 48px));
         }
       }
 

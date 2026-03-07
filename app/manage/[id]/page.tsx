@@ -1,21 +1,28 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+export const dynamic = "force-dynamic";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { ensureThread, insertSystemMessage } from "@/lib/ensureThread";
 
+type PostType = "give" | "request" | "event";
+type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
+
 type Item = {
   id: string;
   title: string;
   description: string | null;
-  status: string | null; // available | reserved | claimed
+  status: string | null;
   created_at: string;
   owner_id: string;
   reserved_interest_id: string | null;
   reserved_at?: string | null;
   claimed_at?: string | null;
+  photo_url?: string | null;
+  post_type?: PostType | null;
 };
 
 type InterestRow = {
@@ -36,21 +43,131 @@ type InterestRow = {
 type ProfileRow = {
   id: string;
   full_name: string | null;
+  email: string | null;
 };
 
-function formatTimeLeft(expiresAt: string | null) {
+type OfferRow = {
+  id: string;
+  request_id: string;
+  helper_id: string;
+  status: OfferStatus | null;
+  availability: string | null;
+  note: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  helper: {
+    full_name: string | null;
+    email: string | null;
+    user_role: string | null;
+  } | null;
+};
+
+type EventAttendeeRow = {
+  id: string;
+  event_id: string;
+  user_id: string;
+  created_at: string;
+  profile: {
+    full_name: string | null;
+    email: string | null;
+  } | null;
+};
+
+type OfferQueryRow = {
+  id: string;
+  request_id: string;
+  helper_id: string;
+  status: OfferStatus | null;
+  availability: string | null;
+  note: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  helper:
+    | {
+        full_name: string | null;
+        email: string | null;
+        user_role: string | null;
+      }
+    | {
+        full_name: string | null;
+        email: string | null;
+        user_role: string | null;
+      }[]
+    | null;
+};
+
+type EventAttendeeQueryRow = {
+  id: string;
+  event_id: string;
+  user_id: string;
+  created_at: string;
+  profile:
+    | {
+        full_name: string | null;
+        email: string | null;
+      }
+    | {
+        full_name: string | null;
+        email: string | null;
+      }[]
+    | null;
+};
+
+function singleRelation<T>(value: T | T[] | null | undefined): T | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
+
+function fmtWhen(ts: string | null | undefined) {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString();
+}
+
+function normStatus(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function formatTimeLeft(expiresAt: string | null, nowMs: number) {
   if (!expiresAt) return null;
   const end = new Date(expiresAt).getTime();
-  const now = Date.now();
-  const ms = end - now;
-  if (ms <= 0) return "expired";
+  const diff = end - nowMs;
 
-  const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  const mm = String(m).padStart(2, "0");
-  const ss = String(s).padStart(2, "0");
-  return `${mm}:${ss}`;
+  if (diff <= 0) return "expired";
+
+  const totalSec = Math.floor(diff / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function toneForStatus(status: string | null | undefined): "green" | "amber" | "red" | "gray" {
+  const s = normStatus(status);
+  if (["accepted", "reserved", "claimed", "completed"].includes(s)) return "green";
+  if (["pending", "hold"].includes(s)) return "amber";
+  if (["declined", "expired"].includes(s)) return "red";
+  return "gray";
+}
+
+function readableName(
+  profile: { full_name: string | null; email?: string | null } | null | undefined,
+  fallbackId?: string | null
+) {
+  const name = (profile?.full_name ?? "").trim();
+  if (name) return name;
+
+  const email = (profile?.email ?? "").trim();
+  if (email) return email.split("@")[0];
+
+  if (fallbackId) return `${fallbackId.slice(0, 8)}…`;
+  return "Unknown user";
 }
 
 export default function ManageItemPage() {
@@ -58,75 +175,245 @@ export default function ManageItemPage() {
   const params = useParams();
   const id = params?.id as string;
 
+  const [viewerId, setViewerId] = useState<string | null>(null);
+
   const [item, setItem] = useState<Item | null>(null);
   const [interests, setInterests] = useState<InterestRow[]>([]);
   const [profilesById, setProfilesById] = useState<Record<string, ProfileRow>>({});
+  const [offers, setOffers] = useState<OfferRow[]>([]);
+  const [attendees, setAttendees] = useState<EventAttendeeRow[]>([]);
 
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [accessDenied, setAccessDenied] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const [busyAcceptId, setBusyAcceptId] = useState<string | null>(null);
   const [busyPickup, setBusyPickup] = useState(false);
+  const [busyOfferId, setBusyOfferId] = useState<string | null>(null);
+  const [busyChatId, setBusyChatId] = useState<string | null>(null);
 
-  const activeAccepted = useMemo(() => interests.find((x) => x.status === "accepted"), [interests]);
-  const activeReserved = useMemo(() => interests.find((x) => x.status === "reserved"), [interests]);
-  const itemStatus = item?.status ?? "available";
+  const [nowMs, setNowMs] = useState(Date.now());
 
-  async function loadAll() {
-    if (!id) return;
+  useEffect(() => {
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, []);
 
-    setLoading(true);
-    setErr(null);
+  const postType = (item?.post_type ?? "give") as PostType;
+  const isGivePost = postType === "give";
+  const isRequestPost = postType === "request";
+  const isEventPost = postType === "event";
+  const itemStatus = normStatus(item?.status) || "available";
 
-    try {
-      const { data: it, error: itErr } = await supabase
-        .from("items")
-        .select("id,title,description,status,created_at,owner_id,reserved_interest_id,reserved_at,claimed_at")
-        .eq("id", id)
-        .single();
+  const activeAcceptedInterest = useMemo(
+    () => interests.find((x) => normStatus(x.status) === "accepted"),
+    [interests]
+  );
 
-      if (itErr) throw new Error(itErr.message);
-      setItem((it as Item) || null);
+  const activeReservedInterest = useMemo(
+    () => interests.find((x) => normStatus(x.status) === "reserved"),
+    [interests]
+  );
 
-      const { data: ints, error: iErr } = await supabase
-        .from("interests")
-        .select("id,item_id,user_id,status,earliest_pickup,time_window,note,created_at,accepted_at,accepted_expires_at,reserved_at,completed_at")
-        .eq("item_id", id)
-        .order("created_at", { ascending: true });
+  const acceptedOffer = useMemo(
+    () => offers.find((x) => normStatus(x.status) === "accepted"),
+    [offers]
+  );
 
-      if (iErr) throw new Error(iErr.message);
+  const canMarkPickedUp =
+    isGivePost &&
+    itemStatus === "reserved" &&
+    !!item?.reserved_interest_id &&
+    !busyPickup;
 
-      const list = (ints as InterestRow[]) || [];
-      setInterests(list);
+  const loadAll = useCallback(
+    async (showRefreshing = false) => {
+      if (!id) return;
 
-      const uniqueUserIds = Array.from(new Set(list.map((x) => x.user_id)));
-      if (uniqueUserIds.length > 0) {
-        const { data: profs, error: pErr } = await supabase
-          .from("profiles")
-          .select("id,full_name")
-          .in("id", uniqueUserIds);
+      if (showRefreshing) setRefreshing(true);
+      else setLoading(true);
 
-        if (pErr) {
+      setErr(null);
+
+      try {
+        const {
+          data: { user },
+          error: userErr,
+        } = await supabase.auth.getUser();
+
+        if (userErr) throw new Error(userErr.message);
+
+        const uid = user?.id ?? null;
+        setViewerId(uid);
+
+        if (!uid) {
+          setAccessDenied(true);
+          setItem(null);
+          setInterests([]);
+          setOffers([]);
+          setAttendees([]);
           setProfilesById({});
-        } else {
-          const map: Record<string, ProfileRow> = {};
-          (profs as ProfileRow[] | null)?.forEach((p) => (map[p.id] = p));
-          setProfilesById(map);
+          setErr("Sign in to manage this post.");
+          return;
         }
-      } else {
-        setProfilesById({});
-      }
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load.");
-      setItem(null);
-      setInterests([]);
-      setProfilesById({});
-    } finally {
-      setLoading(false);
-    }
-  }
 
-  // ✅ ACCEPT: accept_interest RPC + ensure thread + system msg + redirect seller to thread
+        const { data: itemRow, error: itemErr } = await supabase
+          .from("items")
+          .select(
+            "id,title,description,status,created_at,owner_id,reserved_interest_id,reserved_at,claimed_at,photo_url,post_type"
+          )
+          .eq("id", id)
+          .maybeSingle();
+
+        if (itemErr) throw new Error(itemErr.message);
+
+        if (!itemRow) {
+          setAccessDenied(false);
+          setItem(null);
+          setInterests([]);
+          setOffers([]);
+          setAttendees([]);
+          setProfilesById({});
+          setErr("Post not found.");
+          return;
+        }
+
+        const loadedItem = itemRow as Item;
+        setItem(loadedItem);
+
+        if (loadedItem.owner_id !== uid) {
+          setAccessDenied(true);
+          setInterests([]);
+          setOffers([]);
+          setAttendees([]);
+          setProfilesById({});
+          setErr("You can only manage your own post.");
+          return;
+        }
+
+        setAccessDenied(false);
+
+        if ((loadedItem.post_type ?? "give") === "event") {
+          const { data: attendeeRows, error: attendeeErr } = await supabase
+            .from("event_attendees")
+            .select(`
+              id,
+              event_id,
+              user_id,
+              created_at,
+              profile:profiles!event_attendees_user_id_fkey(full_name,email)
+            `)
+            .eq("event_id", loadedItem.id)
+            .order("created_at", { ascending: false });
+
+          if (attendeeErr) throw new Error(attendeeErr.message);
+
+          const normalizedAttendees: EventAttendeeRow[] = (
+            ((attendeeRows ?? []) as unknown as EventAttendeeQueryRow[])
+          ).map((row) => ({
+            id: row.id,
+            event_id: row.event_id,
+            user_id: row.user_id,
+            created_at: row.created_at,
+            profile: singleRelation(row.profile),
+          }));
+
+          setAttendees(normalizedAttendees);
+          setOffers([]);
+          setInterests([]);
+          setProfilesById({});
+          return;
+        }
+
+        if ((loadedItem.post_type ?? "give") === "request") {
+          const { data: offerRows, error: offerErr } = await supabase
+            .from("request_offers")
+            .select(`
+              id,
+              request_id,
+              helper_id,
+              status,
+              availability,
+              note,
+              created_at,
+              updated_at,
+              helper:profiles!request_offers_helper_id_fkey(full_name,email,user_role)
+            `)
+            .eq("request_id", loadedItem.id)
+            .order("created_at", { ascending: false });
+
+          if (offerErr) throw new Error(offerErr.message);
+
+          const normalizedOffers: OfferRow[] = (((offerRows ?? []) as unknown) as OfferQueryRow[]).map((row) => ({
+            id: row.id,
+            request_id: row.request_id,
+            helper_id: row.helper_id,
+            status: row.status,
+            availability: row.availability,
+            note: row.note,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            helper: singleRelation(row.helper),
+          }));
+
+          setOffers(normalizedOffers);
+          setAttendees([]);
+          setInterests([]);
+          setProfilesById({});
+          return;
+        }
+
+        const { data: ints, error: interestErr } = await supabase
+          .from("interests")
+          .select(
+            "id,item_id,user_id,status,earliest_pickup,time_window,note,created_at,accepted_at,accepted_expires_at,reserved_at,completed_at"
+          )
+          .eq("item_id", loadedItem.id)
+          .order("created_at", { ascending: true });
+
+        if (interestErr) throw new Error(interestErr.message);
+
+        const interestList = ((ints ?? []) as InterestRow[]);
+        setInterests(interestList);
+        setOffers([]);
+        setAttendees([]);
+
+        const uniqueUserIds = Array.from(new Set(interestList.map((x) => x.user_id))).filter(Boolean);
+
+        if (uniqueUserIds.length > 0) {
+          const { data: profs, error: profErr } = await supabase
+            .from("profiles")
+            .select("id,full_name,email")
+            .in("id", uniqueUserIds);
+
+          if (profErr) {
+            setProfilesById({});
+          } else {
+            const map: Record<string, ProfileRow> = {};
+            ((profs ?? []) as ProfileRow[]).forEach((profile) => {
+              map[profile.id] = profile;
+            });
+            setProfilesById(map);
+          }
+        } else {
+          setProfilesById({});
+        }
+      } catch (e: any) {
+        setErr(e?.message || "Failed to load.");
+        setItem(null);
+        setInterests([]);
+        setOffers([]);
+        setAttendees([]);
+        setProfilesById({});
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [id]
+  );
+
   async function acceptInterest(interestId: string) {
     if (!item) return;
 
@@ -134,31 +421,27 @@ export default function ManageItemPage() {
     setBusyAcceptId(interestId);
 
     try {
-      const acceptedInterest = interests.find((x) => x.id === interestId);
-      if (!acceptedInterest) throw new Error("Could not find the selected request.");
+      const selected = interests.find((x) => x.id === interestId);
+      if (!selected) throw new Error("Could not find the selected request.");
 
-      // 1) accept in DB
       const { error } = await supabase.rpc("accept_interest", { p_interest_id: interestId });
       if (error) throw new Error(error.message);
 
-      // 2) create/find thread for seller(owner_id) & buyer(user_id)
       const threadId = await ensureThread({
         itemId: item.id,
         ownerId: item.owner_id,
-        requesterId: acceptedInterest.user_id,
+        requesterId: selected.user_id,
       });
 
-      // 3) notify buyer inside chat (system message)
       await insertSystemMessage({
         threadId,
-        senderId: item.owner_id, // seller
+        senderId: item.owner_id,
         body: "✅ Seller accepted your request. Please confirm pickup on the item page, then coordinate here.",
       });
 
-      // 4) redirect seller to thread now
       router.push(`/messages/${threadId}`);
     } catch (e: any) {
-      setErr(e?.message || "Could not accept.");
+      setErr(e?.message || "Could not accept the request.");
     } finally {
       setBusyAcceptId(null);
     }
@@ -173,7 +456,7 @@ export default function ManageItemPage() {
     try {
       const { error } = await supabase.rpc("mark_picked_up", { p_item_id: item.id });
       if (error) throw new Error(error.message);
-      await loadAll();
+      await loadAll(true);
     } catch (e: any) {
       setErr(e?.message || "Could not mark picked up.");
     } finally {
@@ -181,230 +464,873 @@ export default function ManageItemPage() {
     }
   }
 
-  useEffect(() => {
-    const t = setInterval(() => {
-      setInterests((prev) => [...prev]);
-    }, 1000);
-    return () => clearInterval(t);
-  }, []);
+  async function updateOfferStatus(offer: OfferRow, next: OfferStatus) {
+    if (!item) return;
+
+    setErr(null);
+    setBusyOfferId(offer.id);
+
+    try {
+      const nowIso = new Date().toISOString();
+
+      if (next === "accepted") {
+        const { error: othersErr } = await supabase
+          .from("request_offers")
+          .update({ status: "hold", updated_at: nowIso })
+          .eq("request_id", item.id)
+          .neq("id", offer.id)
+          .in("status", ["pending", "accepted"]);
+
+        if (othersErr) throw new Error(othersErr.message);
+      }
+
+      const { error } = await supabase
+        .from("request_offers")
+        .update({ status: next, updated_at: nowIso })
+        .eq("id", offer.id);
+
+      if (error) throw new Error(error.message);
+
+      await loadAll(true);
+    } catch (e: any) {
+      setErr(e?.message || `Could not set offer to ${next}.`);
+    } finally {
+      setBusyOfferId(null);
+    }
+  }
+
+  async function openHelperChat(offer: OfferRow) {
+    if (!item || !viewerId) return;
+
+    if (normStatus(offer.status) !== "accepted") {
+      setErr("Accept this helper first before opening chat.");
+      return;
+    }
+
+    setErr(null);
+    setBusyChatId(offer.id);
+
+    try {
+      const threadId = await ensureThread({
+        itemId: item.id,
+        ownerId: item.owner_id,
+        requesterId: offer.helper_id,
+      });
+
+      router.push(`/messages/${threadId}`);
+    } catch (e: any) {
+      setErr(e?.message || "Could not open chat.");
+    } finally {
+      setBusyChatId(null);
+    }
+  }
 
   useEffect(() => {
-    if (id) loadAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+    if (id) void loadAll(false);
+  }, [id, loadAll]);
 
-  const canMarkPickedUp = itemStatus === "reserved" && !!item?.reserved_interest_id && !busyPickup;
-
-  return (
-    <div style={{ minHeight: "100vh", background: "black", color: "white", padding: 24 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-        <Link
-          href="/feed"
-          style={{
-            border: "1px solid #334155",
-            padding: "10px 12px",
-            borderRadius: 12,
-            color: "white",
-            textDecoration: "none",
-            fontWeight: 800,
-          }}
-        >
-          ← Back to feed
-        </Link>
-
-        <button
-          onClick={() => router.push(`/item/${id}`)}
-          style={{
-            border: "1px solid #334155",
-            background: "transparent",
-            color: "white",
-            padding: "10px 12px",
-            borderRadius: 12,
-            cursor: "pointer",
-            fontWeight: 800,
-          }}
-        >
-          View item
-        </button>
-      </div>
-
-      {err && <p style={{ color: "#f87171", marginTop: 14 }}>{err}</p>}
-      {loading && <p style={{ marginTop: 14, opacity: 0.8 }}>Loading…</p>}
-
-      {item && (
-        <div style={{ marginTop: 16, maxWidth: 980 }}>
-          <div style={{ background: "#0b1730", borderRadius: 14, padding: 16, border: "1px solid #0f223f" }}>
-            <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>{item.title}</h1>
-            <div style={{ marginTop: 10, opacity: 0.8 }}>{item.description || "—"}</div>
-
-            <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <Pill label={`Status: ${itemStatus}`} />
-              <Pill label={`Requests: ${interests.length}`} />
-              <Pill label={`Posted: ${new Date(item.created_at).toLocaleString()}`} />
-            </div>
-
-            {activeAccepted && itemStatus === "available" && (
-              <div
-                style={{
-                  marginTop: 14,
-                  border: "1px solid #334155",
-                  borderRadius: 12,
-                  padding: 12,
-                  background: "#020617",
-                }}
-              >
-                <div style={{ fontWeight: 900 }}>Someone is selected (awaiting confirm)</div>
-                <div style={{ opacity: 0.85, marginTop: 6 }}>
-                  Expires in: <b>{formatTimeLeft(activeAccepted.accepted_expires_at) ?? "—"}</b>
-                </div>
-                <div style={{ opacity: 0.75, marginTop: 4, fontSize: 12 }}>
-                  If time hits 00:00 and they don’t confirm, you can accept another person.
-                </div>
-              </div>
-            )}
-
-            {itemStatus === "reserved" && (
-              <div
-                style={{
-                  marginTop: 14,
-                  border: "1px solid #14532d",
-                  borderRadius: 12,
-                  padding: 12,
-                  background: "#052e16",
-                }}
-              >
-                <div style={{ fontWeight: 900 }}>Reserved ✅</div>
-                <div style={{ opacity: 0.9, marginTop: 6 }}>
-                  The selected person confirmed. After pickup, mark it as picked up.
-                </div>
-
-                <button
-                  onClick={markPickedUp}
-                  disabled={!canMarkPickedUp}
-                  style={{
-                    marginTop: 12,
-                    border: "1px solid #16a34a",
-                    background: canMarkPickedUp ? "#16a34a" : "transparent",
-                    color: "white",
-                    padding: "10px 12px",
-                    borderRadius: 12,
-                    cursor: canMarkPickedUp ? "pointer" : "not-allowed",
-                    fontWeight: 900,
-                    opacity: canMarkPickedUp ? 1 : 0.5,
-                  }}
-                >
-                  {busyPickup ? "Marking..." : "Mark picked up"}
-                </button>
-              </div>
-            )}
-
-            {itemStatus === "claimed" && <div style={{ marginTop: 14, opacity: 0.85 }}>✅ This item is claimed.</div>}
-          </div>
-
-          <div style={{ marginTop: 14 }}>
-            <h2 style={{ fontSize: 18, fontWeight: 900, margin: 0 }}>Requests</h2>
-            <div style={{ marginTop: 10, opacity: 0.75 }}>
-              Choose one person. They’ll have <b>2 hours</b> to confirm.
-            </div>
-
-            {interests.length === 0 ? (
-              <div style={{ marginTop: 12, opacity: 0.75 }}>No requests yet.</div>
-            ) : (
-              <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-                {interests.map((r) => {
-                  const prof = profilesById[r.user_id];
-                  const display = prof?.full_name || `${r.user_id.slice(0, 8)}…`;
-                  const timeLeft = r.status === "accepted" ? formatTimeLeft(r.accepted_expires_at) : null;
-
-                  const alreadyLocked = itemStatus !== "available" || !!activeReserved || !!activeAccepted;
-                  const canAccept =
-                    r.status === "pending" &&
-                    itemStatus === "available" &&
-                    !activeAccepted &&
-                    !activeReserved &&
-                    busyAcceptId === null;
-
-                  return (
-                    <div
-                      key={r.id}
-                      style={{
-                        border: "1px solid #0f223f",
-                        background: "#071022",
-                        borderRadius: 14,
-                        padding: 14,
-                      }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                        <div style={{ fontWeight: 900 }}>{display}</div>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                          <Pill label={`Status: ${r.status}`} />
-                          {r.status === "accepted" && <Pill label={`Expires: ${timeLeft ?? "—"}`} />}
-                          {r.earliest_pickup && <Pill label={`Pickup: ${r.earliest_pickup}`} />}
-                          {r.time_window && <Pill label={`Window: ${r.time_window}`} />}
-                        </div>
-                      </div>
-
-                      {r.note ? (
-                        <div style={{ marginTop: 10, opacity: 0.9, whiteSpace: "pre-wrap" }}>{r.note}</div>
-                      ) : (
-                        <div style={{ marginTop: 10, opacity: 0.55 }}>No note</div>
-                      )}
-
-                      <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                        <button
-                          onClick={() => acceptInterest(r.id)}
-                          disabled={!canAccept || busyAcceptId !== null}
-                          style={{
-                            ...outlineBtn,
-                            opacity: canAccept ? 1 : 0.5,
-                            cursor: canAccept ? "pointer" : "not-allowed",
-                            background: canAccept ? "#052e16" : "transparent",
-                            borderColor: canAccept ? "#14532d" : "#334155",
-                          }}
-                        >
-                          {busyAcceptId === r.id ? "Selecting..." : "Accept"}
-                        </button>
-
-                        <div style={{ opacity: 0.6, fontSize: 12, alignSelf: "center" }}>
-                          Requested: {new Date(r.created_at).toLocaleString()}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+  if (loading) {
+    return (
+      <div className="manage-page">
+        <div className="shell">
+          <div className="card skeleton">
+            <div className="skel skel-lg" />
+            <div className="skel skel-md" />
+            <div className="skel skel-md" />
           </div>
         </div>
-      )}
+        <PageStyles />
+      </div>
+    );
+  }
+
+  return (
+    <div className="manage-page">
+      <div className="shell">
+        <div className="topbar">
+          <Link href="/feed" className="ghost-btn">
+            ← Back to feed
+          </Link>
+
+          <div className="topbar-actions">
+            <button onClick={() => void loadAll(true)} className="ghost-btn" type="button" disabled={refreshing}>
+              {refreshing ? "Refreshing…" : "Refresh"}
+            </button>
+
+            <button onClick={() => router.push(`/item/${id}`)} className="ghost-btn" type="button">
+              View post
+            </button>
+          </div>
+        </div>
+
+        {err ? <div className="error-box">{err}</div> : null}
+
+        {!item ? (
+          <div className="card">
+            <h1 className="title">Manage post</h1>
+            <p className="muted">We could not load this post.</p>
+          </div>
+        ) : accessDenied ? (
+          <div className="stack">
+            <section className="hero-card">
+              <div className="hero-main">
+                {item.photo_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.photo_url} alt={item.title} className="hero-image" />
+                ) : (
+                  <div className="hero-image-fallback">
+                    {isEventPost ? "Event" : isRequestPost ? "Request" : "Give"}
+                  </div>
+                )}
+
+                <div className="hero-copy">
+                  <div className="eyebrow">Manage post</div>
+                  <h1 className="title clamp">{item.title}</h1>
+                  <p className="muted">{item.description || "No description provided."}</p>
+
+                  <div className="pill-row top-gap">
+                    <Pill label={`Type: ${postType}`} tone="gray" />
+                    <Pill label={`Status: ${item.status ?? "—"}`} tone="gray" />
+                    <Pill label={`Posted: ${fmtWhen(item.created_at)}`} tone="gray" />
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="card">
+              <h2 className="section-title">No access</h2>
+              <p className="muted">Only the owner of this post can manage it.</p>
+
+              <div className="action-row">
+                <button onClick={() => router.push(`/item/${item.id}`)} className="primary-btn" type="button">
+                  Open post
+                </button>
+                <button onClick={() => router.push("/feed")} className="secondary-btn" type="button">
+                  Go to feed
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : (
+          <div className="stack">
+            <section className="hero-card">
+              <div className="hero-main">
+                {item.photo_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.photo_url} alt={item.title} className="hero-image" />
+                ) : (
+                  <div className="hero-image-fallback">
+                    {isEventPost ? "Event" : isRequestPost ? "Request" : "Give"}
+                  </div>
+                )}
+
+                <div className="hero-copy">
+                  <div className="eyebrow">Manage post</div>
+                  <h1 className="title clamp">{item.title}</h1>
+                  <p className="muted">{item.description || "No description provided."}</p>
+
+                  <div className="pill-row top-gap">
+                    <Pill label={`Type: ${postType}`} tone="gray" />
+                    <Pill label={`Status: ${item.status ?? "—"}`} tone={toneForStatus(item.status)} />
+                    <Pill
+                      label={
+                        isEventPost
+                          ? `Attending: ${attendees.length}`
+                          : isRequestPost
+                          ? `Offers: ${offers.length}`
+                          : `Requests: ${interests.length}`
+                      }
+                      tone={isEventPost ? "green" : "amber"}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {isGivePost && activeAcceptedInterest && itemStatus === "available" ? (
+                <div className="status-box amber-box">
+                  <div className="status-title">Someone is selected and waiting to confirm</div>
+                  <div className="status-text">
+                    Expires in <b>{formatTimeLeft(activeAcceptedInterest.accepted_expires_at, nowMs) ?? "—"}</b>
+                  </div>
+                  <div className="fine-print">
+                    If the timer expires without confirmation, you can accept someone else.
+                  </div>
+                </div>
+              ) : null}
+
+              {isGivePost && itemStatus === "reserved" ? (
+                <div className="status-box green-box">
+                  <div className="status-title">Reserved ✅</div>
+                  <div className="status-text">
+                    The selected person confirmed pickup. Mark it as picked up after the handoff.
+                  </div>
+
+                  <div className="action-row top-gap">
+                    <button
+                      onClick={markPickedUp}
+                      disabled={!canMarkPickedUp}
+                      className="primary-btn"
+                      type="button"
+                    >
+                      {busyPickup ? "Marking…" : "Mark picked up"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {isGivePost && itemStatus === "claimed" ? (
+                <div className="status-box gray-box">
+                  <div className="status-title">Claimed ✅</div>
+                  <div className="status-text">This item is already claimed.</div>
+                </div>
+              ) : null}
+            </section>
+
+            {isGivePost ? (
+              <section className="card">
+                <div className="section-head">
+                  <div>
+                    <h2 className="section-title">Incoming item requests</h2>
+                    <p className="muted">
+                      Choose one person. They will have <b>2 hours</b> to confirm.
+                    </p>
+                  </div>
+
+                  <Pill label={`${interests.length}`} tone={interests.length ? "green" : "gray"} />
+                </div>
+
+                {interests.length === 0 ? (
+                  <EmptyState
+                    title="No requests yet"
+                    body="When someone requests this item, it will appear here."
+                  />
+                ) : (
+                  <div className="list">
+                    {interests.map((request) => {
+                      const profile = profilesById[request.user_id];
+                      const name = readableName(profile, request.user_id);
+
+                      const anotherLocked =
+                        (!!activeAcceptedInterest && activeAcceptedInterest.id !== request.id) ||
+                        !!activeReservedInterest;
+
+                      const canAccept =
+                        normStatus(request.status) === "pending" &&
+                        itemStatus === "available" &&
+                        !anotherLocked &&
+                        busyAcceptId === null;
+
+                      return (
+                        <div key={request.id} className="row-card">
+                          <div className="row-top">
+                            <div>
+                              <div className="row-title">{name}</div>
+                              <div className="row-meta">Requested {fmtWhen(request.created_at)}</div>
+                            </div>
+
+                            <div className="pill-row">
+                              <Pill label={request.status} tone={toneForStatus(request.status)} />
+                              {request.status === "accepted" ? (
+                                <Pill
+                                  label={`Expires: ${formatTimeLeft(request.accepted_expires_at, nowMs) ?? "—"}`}
+                                  tone="amber"
+                                />
+                              ) : null}
+                              {request.earliest_pickup ? (
+                                <Pill label={`Pickup: ${request.earliest_pickup}`} tone="gray" />
+                              ) : null}
+                              {request.time_window ? (
+                                <Pill label={`Window: ${request.time_window}`} tone="gray" />
+                              ) : null}
+                            </div>
+                          </div>
+
+                          <div className="note-box">
+                            {request.note?.trim() ? request.note : "No note provided."}
+                          </div>
+
+                          <div className="action-row">
+                            <button
+                              onClick={() => void acceptInterest(request.id)}
+                              disabled={!canAccept}
+                              className="primary-btn"
+                              type="button"
+                            >
+                              {busyAcceptId === request.id ? "Selecting…" : "Accept"}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            ) : null}
+
+            {isRequestPost ? (
+              <section className="card">
+                <div className="section-head">
+                  <div>
+                    <h2 className="section-title">Incoming helper offers</h2>
+                    <p className="muted">
+                      Review who offered help, then accept one and continue in chat.
+                    </p>
+                  </div>
+
+                  <Pill label={`${offers.length}`} tone={offers.length ? "green" : "gray"} />
+                </div>
+
+                {offers.length === 0 ? (
+                  <EmptyState
+                    title="No helper offers yet"
+                    body="When someone offers help on this request post, it will appear here."
+                  />
+                ) : (
+                  <div className="list">
+                    {offers.map((offer) => {
+                      const name = readableName(offer.helper, offer.helper_id);
+                      const status = (offer.status ?? "pending") as OfferStatus;
+                      const otherAcceptedExists = !!acceptedOffer && acceptedOffer.id !== offer.id;
+                      const busy = busyOfferId === offer.id || busyChatId === offer.id;
+
+                      return (
+                        <div key={offer.id} className="row-card">
+                          <div className="row-top">
+                            <div>
+                              <div className="row-title">{name}</div>
+                              <div className="row-meta">
+                                Offered {fmtWhen(offer.created_at)}
+                                {offer.availability ? ` • Availability: ${offer.availability}` : ""}
+                              </div>
+                            </div>
+
+                            <div className="pill-row">
+                              <Pill label={status} tone={toneForStatus(status)} />
+                            </div>
+                          </div>
+
+                          <div className="note-box">
+                            {offer.note?.trim() ? offer.note : "No note provided."}
+                          </div>
+
+                          <div className="action-row">
+                            <button
+                              onClick={() => void updateOfferStatus(offer, "accepted")}
+                              disabled={busy || status === "accepted" || status === "completed" || otherAcceptedExists}
+                              className="primary-btn"
+                              type="button"
+                            >
+                              {busyOfferId === offer.id ? "Working…" : "Accept"}
+                            </button>
+
+                            <button
+                              onClick={() => void updateOfferStatus(offer, "hold")}
+                              disabled={busy || status === "completed"}
+                              className="secondary-btn"
+                              type="button"
+                            >
+                              Hold
+                            </button>
+
+                            <button
+                              onClick={() => void updateOfferStatus(offer, "declined")}
+                              disabled={busy || status === "completed" || status === "declined"}
+                              className="danger-btn"
+                              type="button"
+                            >
+                              Decline
+                            </button>
+
+                            <button
+                              onClick={() => void openHelperChat(offer)}
+                              disabled={busy || status !== "accepted"}
+                              className="secondary-btn"
+                              type="button"
+                            >
+                              {busyChatId === offer.id ? "Opening…" : "Open chat"}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            ) : null}
+
+            {isEventPost ? (
+              <section className="card">
+                <div className="section-head">
+                  <div>
+                    <h2 className="section-title">Attendees</h2>
+                    <p className="muted">People who clicked attend for this event.</p>
+                  </div>
+
+                  <Pill label={`${attendees.length}`} tone={attendees.length ? "green" : "gray"} />
+                </div>
+
+                {attendees.length === 0 ? (
+                  <EmptyState
+                    title="No attendees yet"
+                    body="Once people start attending, they will appear here."
+                  />
+                ) : (
+                  <div className="list">
+                    {attendees.map((attendee) => (
+                      <div key={attendee.id} className="row-card">
+                        <div className="row-top">
+                          <div>
+                            <div className="row-title">
+                              {readableName(attendee.profile, attendee.user_id)}
+                            </div>
+                            <div className="row-meta">Joined {fmtWhen(attendee.created_at)}</div>
+                          </div>
+
+                          <div className="pill-row">
+                            <Pill label="Attending" tone="green" />
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            ) : null}
+          </div>
+        )}
+      </div>
+
+      <PageStyles />
     </div>
   );
 }
 
-function Pill({ label }: { label: string }) {
+function EmptyState({ title, body }: { title: string; body: string }) {
   return (
-    <span
-      style={{
-        fontSize: 12,
-        fontWeight: 900,
-        padding: "6px 10px",
-        borderRadius: 999,
-        background: "#071022",
-        border: "1px solid #0f223f",
-        opacity: 0.95,
-      }}
-    >
-      {label}
-    </span>
+    <div className="empty-box">
+      <div className="empty-title">{title}</div>
+      <div className="empty-body">{body}</div>
+    </div>
   );
 }
 
-const outlineBtn: React.CSSProperties = {
-  border: "1px solid #334155",
-  background: "transparent",
-  color: "white",
-  padding: "10px 12px",
-  borderRadius: 12,
-  cursor: "pointer",
-  fontWeight: 900,
-};
+function Pill({
+  label,
+  tone = "gray",
+}: {
+  label: string;
+  tone?: "green" | "amber" | "red" | "gray";
+}) {
+  return <span className={`pill ${tone}`}>{label}</span>;
+}
+
+function PageStyles() {
+  return (
+    <style jsx global>{`
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        max-width: 100%;
+        overflow-x: hidden;
+      }
+
+      .manage-page {
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at top, rgba(16, 185, 129, 0.08), transparent 30%),
+          linear-gradient(180deg, #f8fafc 0%, #f3f4f6 100%);
+        color: #0f172a;
+      }
+
+      .shell {
+        width: 100%;
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 12px;
+        padding-bottom: calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 24px);
+      }
+
+      .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+
+      .topbar-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .hero-card,
+      .card,
+      .row-card,
+      .empty-box {
+        min-width: 0;
+        border-radius: 24px;
+        border: 1px solid #e5e7eb;
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: 0 14px 38px rgba(15, 23, 42, 0.06);
+      }
+
+      .hero-card,
+      .card {
+        padding: 16px;
+      }
+
+      .hero-main {
+        display: grid;
+        gap: 14px;
+      }
+
+      .hero-image,
+      .hero-image-fallback {
+        width: 100%;
+        height: 220px;
+        border-radius: 20px;
+        object-fit: cover;
+        display: block;
+        background: #e5e7eb;
+      }
+
+      .hero-image-fallback {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #475569;
+        font-size: 20px;
+        font-weight: 900;
+      }
+
+      .hero-copy {
+        min-width: 0;
+      }
+
+      .eyebrow {
+        font-size: 12px;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0.35px;
+        color: #047857;
+      }
+
+      .title {
+        margin: 6px 0 0;
+        font-size: clamp(24px, 7vw, 34px);
+        line-height: 1.05;
+        font-weight: 950;
+        color: #0f172a;
+      }
+
+      .clamp {
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+
+      .section-title {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 950;
+        color: #0f172a;
+      }
+
+      .muted {
+        margin: 8px 0 0;
+        color: #64748b;
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
+
+      .fine-print {
+        margin-top: 6px;
+        font-size: 12px;
+        line-height: 1.45;
+        color: #64748b;
+      }
+
+      .section-head,
+      .row-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .row-title {
+        font-size: 16px;
+        font-weight: 950;
+        color: #0f172a;
+        line-height: 1.3;
+      }
+
+      .row-meta {
+        margin-top: 4px;
+        font-size: 13px;
+        color: #64748b;
+        line-height: 1.45;
+      }
+
+      .pill-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 28px;
+        padding: 0 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 900;
+        white-space: nowrap;
+      }
+
+      .pill.green {
+        color: #065f46;
+        border: 1px solid rgba(16, 185, 129, 0.25);
+        background: rgba(16, 185, 129, 0.1);
+      }
+
+      .pill.amber {
+        color: #92400e;
+        border: 1px solid rgba(245, 158, 11, 0.25);
+        background: rgba(245, 158, 11, 0.12);
+      }
+
+      .pill.red {
+        color: #991b1b;
+        border: 1px solid rgba(239, 68, 68, 0.25);
+        background: rgba(239, 68, 68, 0.1);
+      }
+
+      .pill.gray {
+        color: #334155;
+        border: 1px solid #e5e7eb;
+        background: #f8fafc;
+      }
+
+      .status-box {
+        margin-top: 14px;
+        padding: 14px;
+        border-radius: 18px;
+      }
+
+      .green-box {
+        border: 1px solid rgba(16, 185, 129, 0.28);
+        background: rgba(16, 185, 129, 0.08);
+      }
+
+      .amber-box {
+        border: 1px solid rgba(245, 158, 11, 0.28);
+        background: rgba(245, 158, 11, 0.1);
+      }
+
+      .gray-box {
+        border: 1px solid #e5e7eb;
+        background: #f8fafc;
+      }
+
+      .status-title {
+        font-weight: 950;
+        color: #0f172a;
+      }
+
+      .status-text {
+        margin-top: 6px;
+        color: #475569;
+        line-height: 1.45;
+      }
+
+      .list {
+        margin-top: 14px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .row-card {
+        padding: 14px;
+      }
+
+      .note-box {
+        margin-top: 12px;
+        padding: 12px;
+        border-radius: 16px;
+        border: 1px solid #eef2f7;
+        background: #f8fafc;
+        color: #334155;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .action-row {
+        margin-top: 14px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .ghost-btn,
+      .primary-btn,
+      .secondary-btn,
+      .danger-btn {
+        appearance: none;
+        border: none;
+        outline: none;
+        cursor: pointer;
+        font-weight: 900;
+        transition: 0.18s ease;
+        min-height: 46px;
+        padding: 0 14px;
+        border-radius: 14px;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .ghost-btn:disabled,
+      .primary-btn:disabled,
+      .secondary-btn:disabled,
+      .danger-btn:disabled {
+        cursor: not-allowed;
+        opacity: 0.6;
+      }
+
+      .ghost-btn {
+        border: 1px solid #dbe2ea;
+        background: #fff;
+        color: #0f172a;
+      }
+
+      .primary-btn {
+        border: 1px solid rgba(16, 185, 129, 0.32);
+        background: linear-gradient(180deg, rgba(16, 185, 129, 0.18), rgba(16, 185, 129, 0.1));
+        color: #065f46;
+      }
+
+      .secondary-btn {
+        border: 1px solid #e5e7eb;
+        background: #fff;
+        color: #0f172a;
+      }
+
+      .danger-btn {
+        border: 1px solid rgba(239, 68, 68, 0.28);
+        background: #fff;
+        color: #991b1b;
+      }
+
+      .empty-box {
+        padding: 18px;
+        border-style: dashed;
+      }
+
+      .empty-title {
+        font-size: 18px;
+        font-weight: 950;
+        color: #0f172a;
+      }
+
+      .empty-body {
+        margin-top: 6px;
+        color: #64748b;
+        line-height: 1.5;
+      }
+
+      .error-box {
+        margin-bottom: 12px;
+        border-radius: 18px;
+        border: 1px solid rgba(239, 68, 68, 0.22);
+        background: rgba(254, 242, 242, 0.95);
+        color: #991b1b;
+        padding: 14px;
+        font-weight: 800;
+      }
+
+      .skeleton {
+        display: grid;
+        gap: 12px;
+      }
+
+      .skel {
+        border-radius: 14px;
+        background: #e5e7eb;
+      }
+
+      .skel-lg {
+        height: 34px;
+        width: 60%;
+      }
+
+      .skel-md {
+        height: 18px;
+        width: 88%;
+      }
+
+      .top-gap {
+        margin-top: 12px;
+      }
+
+      @media (min-width: 760px) {
+        .shell {
+          padding: 16px;
+        }
+
+        .hero-main {
+          grid-template-columns: 280px minmax(0, 1fr);
+          align-items: start;
+        }
+
+        .hero-image,
+        .hero-image-fallback {
+          height: 220px;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .shell {
+          padding-left: 10px;
+          padding-right: 10px;
+        }
+
+        .action-row {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .action-row > * {
+          width: 100%;
+          min-width: 0;
+        }
+
+        .topbar-actions {
+          width: 100%;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .topbar-actions > * {
+          width: 100%;
+        }
+      }
+    `}</style>
+  );
+}
