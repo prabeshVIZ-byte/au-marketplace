@@ -84,7 +84,8 @@ type DraftState = {
   eventFileName: string | null;
 };
 
-type ErrorSection = "media" | "title" | "details" | "options" | "account" | null;
+type Step = 1 | 2 | 3 | 4;
+type ErrorSection = "account" | "type" | "media" | "details" | "review" | null;
 
 const ITEMS_TABLE = "items";
 const ITEM_PHOTOS_TABLE = "item_photos";
@@ -96,7 +97,7 @@ const EVENT_FLYERS_BUCKET = "event-flyers";
 const MAX_ITEM_PHOTO_MB = 6;
 const MAX_EVENT_FLYER_MB = 8;
 
-const DRAFT_KEY = "scholarswap_create_responsive_v2";
+const DRAFT_KEY = "scholarswap_create_modern_mobile_v1";
 const SUCCESS_ROUTE = "/feed";
 
 /* ---------------- utilities ---------------- */
@@ -201,10 +202,10 @@ function eventCategoryLabel(v: EventCategory) {
 }
 
 function expireChoiceLabel(v: ExpireChoice) {
-  if (v === "urgent24") return "24h";
-  if (v === "7") return "7d";
-  if (v === "14") return "14d";
-  if (v === "30") return "30d";
+  if (v === "urgent24") return "24 hours";
+  if (v === "7") return "7 days";
+  if (v === "14") return "14 days";
+  if (v === "30") return "30 days";
   return "Until canceled";
 }
 
@@ -239,6 +240,10 @@ function getDefaultDraft(): DraftState {
   };
 }
 
+function getInitialStepForMode(mode: Mode): Step {
+  return mode === "request" ? 2 : 1;
+}
+
 /* ---------------- component ---------------- */
 
 export default function CreatePage() {
@@ -246,12 +251,7 @@ export default function CreatePage() {
 
   const itemFileInputRef = useRef<HTMLInputElement | null>(null);
   const eventFileInputRef = useRef<HTMLInputElement | null>(null);
-
   const topRef = useRef<HTMLDivElement | null>(null);
-  const mediaRef = useRef<HTMLDivElement | null>(null);
-  const titleRef = useRef<HTMLDivElement | null>(null);
-  const detailsRef = useRef<HTMLDivElement | null>(null);
-  const optionsRef = useRef<HTMLDivElement | null>(null);
 
   const [authLoading, setAuthLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(true);
@@ -262,6 +262,8 @@ export default function CreatePage() {
 
   const [draft, setDraft] = useState<DraftState>(getDefaultDraft());
   const [hydratedDraft, setHydratedDraft] = useState(false);
+
+  const [step, setStep] = useState<Step>(1);
 
   const [itemFile, setItemFile] = useState<File | null>(null);
   const [eventFile, setEventFile] = useState<File | null>(null);
@@ -292,7 +294,7 @@ export default function CreatePage() {
 
   useEffect(() => {
     const updateDevice = () => {
-      setIsDesktop(window.innerWidth >= 980);
+      setIsDesktop(window.innerWidth >= 1024);
     };
     updateDevice();
     window.addEventListener("resize", updateDevice);
@@ -326,10 +328,15 @@ export default function CreatePage() {
         setHydratedDraft(true);
         return;
       }
-      const parsed = JSON.parse(raw) as Partial<DraftState>;
-      setDraft({ ...getDefaultDraft(), ...parsed });
+      const parsed = JSON.parse(raw) as Partial<DraftState & { step?: Step }>;
+      const next = { ...getDefaultDraft(), ...parsed };
+      setDraft(next);
+      if (next.mode) {
+        const safeStep = parsed.step && parsed.step >= 1 && parsed.step <= 4 ? parsed.step : getInitialStepForMode(next.mode);
+        setStep(safeStep as Step);
+      }
     } catch {
-      // ignore broken storage
+      // ignore
     } finally {
       setHydratedDraft(true);
     }
@@ -338,11 +345,11 @@ export default function CreatePage() {
   useEffect(() => {
     if (!hydratedDraft) return;
     try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...draft, step }));
     } catch {
-      // ignore storage failure
+      // ignore
     }
-  }, [draft, hydratedDraft]);
+  }, [draft, step, hydratedDraft]);
 
   useEffect(() => {
     const update = () => {
@@ -437,25 +444,23 @@ export default function CreatePage() {
     setFieldError(null);
   }
 
-  function resetComposer(keepMode = false) {
-    const nextMode = keepMode ? draft.mode : null;
-    setDraft({ ...getDefaultDraft(), mode: nextMode });
+  function resetComposer() {
+    setDraft(getDefaultDraft());
+    setStep(1);
     setItemFile(null);
     setEventFile(null);
     setMsg(null);
     setFieldError(null);
 
-    if (!keepMode) {
-      try {
-        localStorage.removeItem(DRAFT_KEY);
-      } catch {
-        // ignore
-      }
+    try {
+      localStorage.removeItem(DRAFT_KEY);
+    } catch {
+      // ignore
     }
   }
 
-  function goBackToModes() {
-    resetComposer(false);
+  function goBackToTypes() {
+    resetComposer();
     requestAnimationFrame(() => {
       topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
@@ -467,7 +472,7 @@ export default function CreatePage() {
     setItemFile(null);
     setEventFile(null);
     setDraft({ ...getDefaultDraft(), mode });
-
+    setStep(getInitialStepForMode(mode));
     requestAnimationFrame(() => {
       topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
@@ -486,14 +491,12 @@ export default function CreatePage() {
     if (!isAllowedImage(file)) {
       setMsg("Upload JPG, PNG, or WEBP.");
       setFieldError("media");
-      mediaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
     if (file.size > MAX_ITEM_PHOTO_MB * 1024 * 1024) {
       setMsg(`Image is too large. Max ${MAX_ITEM_PHOTO_MB}MB.`);
       setFieldError("media");
-      mediaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
@@ -514,14 +517,12 @@ export default function CreatePage() {
     if (!isAllowedImage(file)) {
       setMsg("Upload JPG, PNG, or WEBP.");
       setFieldError("media");
-      mediaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
     if (file.size > MAX_EVENT_FLYER_MB * 1024 * 1024) {
       setMsg(`Image is too large. Max ${MAX_EVENT_FLYER_MB}MB.`);
       setFieldError("media");
-      mediaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
@@ -529,85 +530,90 @@ export default function CreatePage() {
     patchDraft("eventFileName", file.name);
   }
 
-  const hasRequiredMedia =
-    draft.mode === "request" ? true : draft.mode === "give" ? !!itemFile : draft.mode === "event" ? !!eventFile : false;
-
-  const hasTitle = cleanTitle.length >= 3;
-  const hasDesc = cleanDesc.length >= 3;
-
-  const progressValue = useMemo(() => {
-    if (!draft.mode) return 0;
-    let score = 0;
-    if (hasRequiredMedia) score += 1;
-    if (hasTitle && hasDesc) score += 1;
-
-    if (draft.mode === "give" && draft.giveCategory && draft.pickupLocation) score += 1;
-    if (draft.mode === "request" && draft.requestGroup && draft.requestTimeframe) score += 1;
-    if (
-      draft.mode === "event" &&
-      draft.hostOrg.trim() &&
-      draft.eventCategory &&
-      draft.eventLocation.trim() &&
-      draft.eventDate &&
-      draft.eventStartTime &&
-      eventStartIso &&
-      isValidHttpUrlMaybeEmpty(draft.eventLink) &&
-      !(draft.eventEndTime && eventEndIso && new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime())
-    ) {
-      score += 1;
+  function canAdvanceFromCurrentStep(): { ok: boolean; message?: string; section?: ErrorSection } {
+    if (!draft.mode) {
+      return { ok: false, message: "Choose Give, Request, or Event first.", section: "type" };
     }
 
-    return score / 3;
-  }, [
-    draft.mode,
-    hasRequiredMedia,
-    hasTitle,
-    hasDesc,
-    draft.giveCategory,
-    draft.pickupLocation,
-    draft.requestGroup,
-    draft.requestTimeframe,
-    draft.hostOrg,
-    draft.eventCategory,
-    draft.eventLocation,
-    draft.eventDate,
-    draft.eventStartTime,
-    draft.eventLink,
-    draft.eventEndTime,
-    eventStartIso,
-    eventEndIso,
-  ]);
+    if (step === 1) {
+      if (draft.mode === "request") return { ok: true };
+      if (draft.mode === "give" && !itemFile) {
+        return { ok: false, message: "Add a photo to continue.", section: "media" };
+      }
+      if (draft.mode === "event" && !eventFile) {
+        return { ok: false, message: "Add a flyer image to continue.", section: "media" };
+      }
+    }
 
-  const eventTimeSummary = eventStartIso
-    ? `${formatLongDateTime(eventStartIso)}${eventEndIso ? ` → ${formatLongDateTime(eventEndIso)}` : ""}`
-    : "—";
+    if (step === 2) {
+      if (cleanTitle.length < 3) {
+        return { ok: false, message: "Title must be at least 3 characters.", section: "details" };
+      }
+      if (cleanDesc.length < 3) {
+        return { ok: false, message: "Description is required.", section: "details" };
+      }
+    }
+
+    if (step === 3) {
+      if (draft.mode === "give") {
+        if (!draft.giveCategory) return { ok: false, message: "Choose a category.", section: "details" };
+        if (!draft.pickupLocation) return { ok: false, message: "Choose a pickup location.", section: "details" };
+      }
+
+      if (draft.mode === "request") {
+        if (!draft.requestGroup) return { ok: false, message: "Choose a request type.", section: "details" };
+        if (!draft.requestTimeframe) return { ok: false, message: "Choose a timeframe.", section: "details" };
+      }
+
+      if (draft.mode === "event") {
+        if (!draft.hostOrg.trim()) return { ok: false, message: "Host is required.", section: "details" };
+        if (!draft.eventCategory) return { ok: false, message: "Choose a category.", section: "details" };
+        if (!draft.eventLocation.trim()) return { ok: false, message: "Location is required.", section: "details" };
+        if (!draft.eventDate) return { ok: false, message: "Choose a date.", section: "details" };
+        if (!draft.eventStartTime) return { ok: false, message: "Choose a start time.", section: "details" };
+        if (!eventStartIso) return { ok: false, message: "Start time is invalid.", section: "details" };
+        if (!isValidHttpUrlMaybeEmpty(draft.eventLink)) {
+          return { ok: false, message: "Link must start with http:// or https://", section: "details" };
+        }
+        if (
+          draft.eventEndTime &&
+          eventEndIso &&
+          new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime()
+        ) {
+          return { ok: false, message: "End time cannot be before start time.", section: "details" };
+        }
+      }
+    }
+
+    return { ok: true };
+  }
 
   function validateBeforeSubmit(): { message: string; section: ErrorSection } | null {
-    if (!draft.mode) return { message: "Choose Give, Request, or Event first.", section: "account" };
+    if (!draft.mode) return { message: "Choose Give, Request, or Event first.", section: "type" };
     if (!isLoggedIn) return { message: "Log in with your @ashland.edu email to post.", section: "account" };
     if (!profileComplete) return { message: "Complete your profile first.", section: "account" };
 
     if (draft.mode === "give") {
       if (!itemFile) return { message: "Add a photo to continue.", section: "media" };
-      if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "title" };
-      if (cleanDesc.length < 3) return { message: "Description is required.", section: "title" };
+      if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "details" };
+      if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
       if (!draft.giveCategory) return { message: "Choose a category.", section: "details" };
       if (!draft.pickupLocation) return { message: "Choose a pickup location.", section: "details" };
       return null;
     }
 
     if (draft.mode === "request") {
-      if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "title" };
-      if (cleanDesc.length < 3) return { message: "Description is required.", section: "title" };
+      if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "details" };
+      if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
       if (!draft.requestGroup) return { message: "Choose a request type.", section: "details" };
       if (!draft.requestTimeframe) return { message: "Choose a timeframe.", section: "details" };
       return null;
     }
 
     if (!eventFile) return { message: "Add a flyer image to continue.", section: "media" };
-    if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "title" };
+    if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "details" };
     if (!draft.hostOrg.trim()) return { message: "Host is required.", section: "details" };
-    if (cleanDesc.length < 3) return { message: "Description is required.", section: "title" };
+    if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
     if (!draft.eventCategory) return { message: "Choose a category.", section: "details" };
     if (!draft.eventLocation.trim()) return { message: "Location is required.", section: "details" };
     if (!draft.eventDate) return { message: "Choose a date.", section: "details" };
@@ -627,13 +633,48 @@ export default function CreatePage() {
     return null;
   }
 
-  function scrollToSection(section: ErrorSection) {
-    if (section === "media") mediaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    if (section === "title") titleRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    if (section === "details") detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    if (section === "options") optionsRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    if (section === "account") topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  function goNext() {
+    setMsg(null);
+    setFieldError(null);
+
+    const check = canAdvanceFromCurrentStep();
+    if (!check.ok) {
+      setMsg(check.message || "Please complete this step.");
+      setFieldError(check.section || "details");
+      return;
+    }
+
+    if (step < 4) {
+      setStep((prev) => (Math.min(4, prev + 1) as Step));
+      requestAnimationFrame(() => {
+        topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
   }
+
+  function goPrev() {
+  setMsg(null);
+  setFieldError(null);
+
+  const mode = draft.mode;
+  if (!mode) {
+    goBackToTypes();
+    return;
+  }
+
+  const firstStep = getInitialStepForMode(mode);
+
+  if (step === firstStep) {
+    goBackToTypes();
+    return;
+  }
+
+  setStep((prev) => Math.max(firstStep, prev - 1) as Step);
+
+  requestAnimationFrame(() => {
+    topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
 
   async function handleSubmit() {
     setMsg(null);
@@ -643,7 +684,6 @@ export default function CreatePage() {
     if (validation) {
       setMsg(validation.message);
       setFieldError(validation.section);
-      scrollToSection(validation.section);
 
       if (validation.section === "account" && (!isLoggedIn || !profileComplete)) {
         setTimeout(() => router.push("/me"), 250);
@@ -721,7 +761,7 @@ export default function CreatePage() {
           throw new Error(`Event created but image save failed: ${updErr.message}`);
         }
 
-        resetComposer(false);
+        resetComposer();
         router.push(SUCCESS_ROUTE);
         router.refresh();
         return;
@@ -769,7 +809,7 @@ export default function CreatePage() {
       const itemId = String(createdItem.id);
 
       if (postType === "request") {
-        resetComposer(false);
+        resetComposer();
         router.push(`/item/${itemId}`);
         router.refresh();
         return;
@@ -818,7 +858,7 @@ export default function CreatePage() {
         throw new Error(`Image metadata save failed: ${photoErr.message}`);
       }
 
-      resetComposer(false);
+      resetComposer();
       router.push(`/item/${itemId}`);
       router.refresh();
     } catch (err: any) {
@@ -828,6 +868,58 @@ export default function CreatePage() {
     }
   }
 
+  const totalSteps = useMemo(() => {
+    if (!draft.mode) return 4;
+    return draft.mode === "request" ? 3 : 4;
+  }, [draft.mode]);
+
+  const displayStep = useMemo(() => {
+    if (!draft.mode) return 1;
+    if (draft.mode === "request") {
+      if (step === 2) return 1;
+      if (step === 3) return 2;
+      if (step === 4) return 3;
+    }
+    return step;
+  }, [draft.mode, step]);
+
+  const eventTimeSummary = eventStartIso
+    ? `${formatLongDateTime(eventStartIso)}${eventEndIso ? ` → ${formatLongDateTime(eventEndIso)}` : ""}`
+    : "—";
+
+  function stepTitle() {
+    if (!draft.mode) return "Create";
+    if (draft.mode === "request") {
+      if (step === 2) return "Write your request";
+      if (step === 3) return "Add details";
+      return "Review before posting";
+    }
+
+    if (step === 1) return draft.mode === "give" ? "Add a photo" : "Add a flyer";
+    if (step === 2) return draft.mode === "give" ? "Describe the item" : "Write the event";
+    if (step === 3) return draft.mode === "give" ? "Add item details" : "Add event details";
+    return "Review before publishing";
+  }
+
+  function stepSubtitle() {
+    if (!draft.mode) return "What do you want to share today?";
+    if (draft.mode === "give") {
+      if (step === 1) return "Photos make posts feel real and trustworthy.";
+      if (step === 2) return "Tell students what it is and why it matters.";
+      if (step === 3) return "Help people understand category and pickup quickly.";
+      return "Check everything once before sharing.";
+    }
+    if (draft.mode === "request") {
+      if (step === 2) return "Be specific so people can actually help.";
+      if (step === 3) return "Set urgency and context clearly.";
+      return "Check the request before posting.";
+    }
+    if (step === 1) return "A strong flyer makes the event feel alive.";
+    if (step === 2) return "Make the event sound worth attending.";
+    if (step === 3) return "Add time, host, location, and category.";
+    return "Check everything once before publishing.";
+  }
+
   function renderModePicker() {
     return (
       <div style={{ display: "grid", gap: 14 }}>
@@ -835,7 +927,7 @@ export default function CreatePage() {
           <div style={modeIconBox}>🎁</div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={modeTitle}>Give</div>
-            <div style={modeDesc}>Share something useful</div>
+            <div style={modeDesc}>Share something useful with campus</div>
           </div>
           <div style={modeArrow}>→</div>
         </button>
@@ -844,7 +936,7 @@ export default function CreatePage() {
           <div style={modeIconBox}>🤝</div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={modeTitle}>Request</div>
-            <div style={modeDesc}>Ask the campus community</div>
+            <div style={modeDesc}>Ask the campus community for help</div>
           </div>
           <div style={modeArrow}>→</div>
         </button>
@@ -853,7 +945,7 @@ export default function CreatePage() {
           <div style={modeIconBox}>📅</div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={modeTitle}>Event</div>
-            <div style={modeDesc}>Promote something happening</div>
+            <div style={modeDesc}>Promote something happening on campus</div>
           </div>
           <div style={modeArrow}>→</div>
         </button>
@@ -861,7 +953,434 @@ export default function CreatePage() {
     );
   }
 
-  function renderPreview() {
+  function renderStepper() {
+    if (!draft.mode) return null;
+
+    const labels =
+      draft.mode === "request"
+        ? ["Write", "Details", "Review"]
+        : ["Media", "Write", "Details", "Review"];
+
+    return (
+      <div style={stepperWrap}>
+        {labels.map((label, index) => {
+          const n = index + 1;
+          const active = n === displayStep;
+          const done = n < displayStep;
+
+          return (
+            <div key={label} style={stepperItem}>
+              <div style={stepperLineWrap}>
+                <div style={stepperDot(active, done)}>{done ? "✓" : n}</div>
+                {index < labels.length - 1 && <div style={stepperLine(done)} />}
+              </div>
+              <div style={stepperLabel(active)}>{label}</div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function renderMediaStep() {
+    if (!draft.mode || draft.mode === "request" || step !== 1) return null;
+
+    const isGive = draft.mode === "give";
+    const file = isGive ? itemFile : eventFile;
+    const preview = isGive ? itemPreviewUrl : eventPreviewUrl;
+    const savedName = isGive ? draft.itemFileName : draft.eventFileName;
+
+    return (
+      <section style={screenCard(fieldError === "media")}>
+        <div style={heroUploadWrap}>
+          <input
+            ref={isGive ? itemFileInputRef : eventFileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            onChange={(e) => (isGive ? pickItemFile(e.target.files?.[0] ?? null) : pickEventFile(e.target.files?.[0] ?? null))}
+            style={{ display: "none" }}
+          />
+
+          <button
+            type="button"
+            onClick={() => (isGive ? itemFileInputRef.current?.click() : eventFileInputRef.current?.click())}
+            style={heroUploadButton}
+          >
+            {preview ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={preview} alt="Preview" style={heroUploadImage} />
+            ) : (
+              <div style={heroUploadPlaceholder}>
+                <div style={{ fontSize: 54 }}>{isGive ? "📷" : "🎫"}</div>
+                <div style={{ marginTop: 14, fontSize: 24, fontWeight: 1000 }}>
+                  {isGive ? "Upload item photo" : "Upload event flyer"}
+                </div>
+                <div style={{ marginTop: 8, color: "#64748b", fontSize: 14, fontWeight: 700 }}>
+                  JPG, PNG, or WEBP
+                </div>
+              </div>
+            )}
+
+            <div style={floatingUploadAction}>
+              {file ? "Change image" : "Tap to upload"}
+            </div>
+          </button>
+
+          <div style={fileMetaRow}>
+            <div style={fileMetaName}>
+              {file ? file.name : savedName ? `Saved draft: ${savedName}` : "No image selected"}
+            </div>
+            {file && (
+              <button
+                type="button"
+                onClick={() => (isGive ? pickItemFile(null) : pickEventFile(null))}
+                style={removeBtn}
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  function renderWriteStep() {
+    if (!draft.mode) return null;
+    if ((draft.mode !== "request" && step !== 2) || (draft.mode === "request" && step !== 2)) return null;
+
+    return (
+      <section style={screenCard(fieldError === "details")}>
+        <div style={contentBlock}>
+          <label style={fieldLabelModern}>Title</label>
+          <input
+            value={draft.title}
+            onChange={(e) => patchDraft("title", e.target.value)}
+            style={titleInputModern}
+            placeholder={
+              draft.mode === "give"
+                ? "What are you sharing?"
+                : draft.mode === "request"
+                ? "What do you need?"
+                : "What’s your event called?"
+            }
+            autoFocus
+          />
+        </div>
+
+        <div style={{ marginTop: 18 }}>
+          <label style={fieldLabelModern}>
+            {draft.mode === "request" ? "Details" : draft.mode === "event" ? "Why should people come?" : "Description"}
+          </label>
+          <textarea
+            value={draft.description}
+            onChange={(e) => patchDraft("description", e.target.value)}
+            style={textareaModern}
+            rows={7}
+            placeholder={
+              draft.mode === "give"
+                ? "Mention condition, quantity, and anything important about pickup."
+                : draft.mode === "request"
+                ? "Explain exactly what you need, and by when."
+                : "Tell students what this is, who it is for, and why they should care."
+            }
+          />
+        </div>
+
+        <div style={tipCard}>
+          {draft.mode === "give" && "The clearest give posts usually get picked up first."}
+          {draft.mode === "request" && "Specific asks get better responses than vague ones."}
+          {draft.mode === "event" && "Lead with the value of the event, not just the logistics."}
+        </div>
+      </section>
+    );
+  }
+
+  function renderDetailsStep() {
+    if (!draft.mode) return null;
+    if ((draft.mode !== "request" && step !== 3) || (draft.mode === "request" && step !== 3)) return null;
+
+    if (draft.mode === "give") {
+      return (
+        <section style={screenCard(fieldError === "details")}>
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Category</div>
+            <div style={choiceGrid}>
+              {(["books", "notes", "electronics", "furniture", "clothing", "others"] as GiveCategory[]).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("giveCategory", v)}
+                  style={choiceTile(draft.giveCategory === v, "warm")}
+                >
+                  {giveCategoryLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Pickup location</div>
+            <div style={choiceGrid}>
+              {(
+                ["College Quad", "Safety Service Office", "Dining Hall", "Library", "Student Center"] as PickupLocation[]
+              ).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("pickupLocation", v)}
+                  style={choiceTile(draft.pickupLocation === v, "neutral")}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={dividerLine} />
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Visibility</div>
+            <div style={segmentedWrap}>
+              <button
+                type="button"
+                onClick={() => patchDraft("hideName", false)}
+                style={segmentBtn(!draft.hideName)}
+              >
+                Show my name
+              </button>
+              <button
+                type="button"
+                onClick={() => patchDraft("hideName", true)}
+                style={segmentBtn(draft.hideName)}
+              >
+                Anonymous
+              </button>
+            </div>
+          </div>
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Auto-close</div>
+            <div style={choiceGrid}>
+              {(["urgent24", "7", "14", "30", "never"] as ExpireChoice[]).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("expireChoice", v)}
+                  style={choiceTile(draft.expireChoice === v, v === "urgent24" ? "danger" : "neutral")}
+                >
+                  {expireChoiceLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+      );
+    }
+
+    if (draft.mode === "request") {
+      return (
+        <section style={screenCard(fieldError === "details")}>
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Request type</div>
+            <div style={choiceGrid}>
+              {(["logistics", "services", "urgent", "collaboration", "lost & found"] as RequestGroup[]).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("requestGroup", v)}
+                  style={choiceTile(draft.requestGroup === v, v === "urgent" ? "danger" : "blue")}
+                >
+                  {requestGroupLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Timeframe</div>
+            <div style={segmentedWrap}>
+              {(["today", "this_week", "flexible"] as RequestTimeframe[]).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("requestTimeframe", v)}
+                  style={segmentBtn(draft.requestTimeframe === v)}
+                >
+                  {requestTimeframeLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Location</div>
+            <input
+              value={draft.requestLocation}
+              onChange={(e) => patchDraft("requestLocation", e.target.value)}
+              style={softInputModern}
+              placeholder="Optional location"
+            />
+          </div>
+
+          <div style={dividerLine} />
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Visibility</div>
+            <div style={segmentedWrap}>
+              <button
+                type="button"
+                onClick={() => patchDraft("hideName", false)}
+                style={segmentBtn(!draft.hideName)}
+              >
+                Show my name
+              </button>
+              <button
+                type="button"
+                onClick={() => patchDraft("hideName", true)}
+                style={segmentBtn(draft.hideName)}
+              >
+                Anonymous
+              </button>
+            </div>
+          </div>
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Auto-close</div>
+            <div style={choiceGrid}>
+              {(["urgent24", "7", "14", "30", "never"] as ExpireChoice[]).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("expireChoice", v)}
+                  style={choiceTile(draft.expireChoice === v, v === "urgent24" ? "danger" : "neutral")}
+                >
+                  {expireChoiceLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+      );
+    }
+
+    return (
+      <section style={screenCard(fieldError === "details")}>
+        <div style={detailGroup}>
+          <div style={fieldLabelModern}>Category</div>
+          <div style={choiceGrid}>
+            {(["career", "club", "sports", "music", "arts", "volunteering", "academic", "social", "other"] as EventCategory[]).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => patchDraft("eventCategory", v)}
+                style={choiceTile(draft.eventCategory === v, "purple")}
+              >
+                {eventCategoryLabel(v)}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={detailGroup}>
+          <div style={fieldLabelModern}>Host</div>
+          <input
+            value={draft.hostOrg}
+            onChange={(e) => patchDraft("hostOrg", e.target.value)}
+            style={softInputModern}
+            placeholder="Host club / organisation"
+          />
+        </div>
+
+        <div style={detailGroup}>
+          <div style={fieldLabelModern}>Location</div>
+          <input
+            value={draft.eventLocation}
+            onChange={(e) => patchDraft("eventLocation", e.target.value)}
+            style={softInputModern}
+            placeholder="Where is it happening?"
+          />
+        </div>
+
+        <div style={grid2}>
+          <div>
+            <div style={fieldLabelModern}>Date</div>
+            <input
+              type="date"
+              value={draft.eventDate}
+              onChange={(e) => patchDraft("eventDate", e.target.value)}
+              style={softInputModern}
+            />
+          </div>
+          <div>
+            <div style={fieldLabelModern}>Start time</div>
+            <input
+              type="time"
+              value={draft.eventStartTime}
+              onChange={(e) => patchDraft("eventStartTime", e.target.value)}
+              style={softInputModern}
+            />
+          </div>
+        </div>
+
+        <div style={grid2}>
+          <div>
+            <div style={fieldLabelModern}>End time</div>
+            <input
+              type="time"
+              value={draft.eventEndTime}
+              onChange={(e) => patchDraft("eventEndTime", e.target.value)}
+              style={softInputModern}
+            />
+          </div>
+          <div>
+            <div style={fieldLabelModern}>Link</div>
+            <input
+              value={draft.eventLink}
+              onChange={(e) => patchDraft("eventLink", e.target.value)}
+              style={softInputModern}
+              placeholder="Optional event link"
+            />
+          </div>
+        </div>
+
+        {!!draft.eventEndTime &&
+          !!eventEndIso &&
+          !!eventStartIso &&
+          new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime() && (
+            <div style={inlineWarning}>End time cannot be before start time.</div>
+          )}
+
+        {!isValidHttpUrlMaybeEmpty(draft.eventLink) && (
+          <div style={inlineWarning}>Link must start with http:// or https://</div>
+        )}
+
+        <div style={dividerLine} />
+
+        <div style={detailGroup}>
+          <div style={fieldLabelModern}>Visibility</div>
+          <div style={segmentedWrap}>
+            <button
+              type="button"
+              onClick={() => patchDraft("hideName", false)}
+              style={segmentBtn(!draft.hideName)}
+            >
+              Show my name
+            </button>
+            <button
+              type="button"
+              onClick={() => patchDraft("hideName", true)}
+              style={segmentBtn(draft.hideName)}
+            >
+              Anonymous
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  function renderReviewCard() {
     if (!draft.mode) return null;
 
     if (draft.mode === "give") {
@@ -872,10 +1391,7 @@ export default function CreatePage() {
               // eslint-disable-next-line @next/next/no-img-element
               <img src={itemPreviewUrl} alt="Item preview" style={previewImage} />
             ) : (
-              <div style={previewPlaceholder}>
-                <div style={{ fontSize: 36 }}>📸</div>
-                <div style={{ marginTop: 8 }}>Add a photo for your item</div>
-              </div>
+              <div style={previewPlaceholder}>No image selected</div>
             )}
             <div style={previewBadge("#fff7ed", "#9a3412", "#fdba74")}>GIVE</div>
           </div>
@@ -884,10 +1400,8 @@ export default function CreatePage() {
             <div style={previewMeta}>
               {giveCategoryLabel(draft.giveCategory)} • {draft.pickupLocation}
             </div>
-            <div style={previewHeadline}>{cleanTitle || "What are you sharing?"}</div>
-            <div style={previewText}>
-              {cleanDesc || "Mention condition, quantity, and pickup info so people understand the item immediately."}
-            </div>
+            <div style={previewHeadline}>{cleanTitle || "Untitled post"}</div>
+            <div style={previewText}>{cleanDesc || "No description yet."}</div>
             <div style={previewFooter}>
               {draft.hideName ? "Anonymous" : "Visible name"} • {expireChoiceLabel(draft.expireChoice)}
             </div>
@@ -899,25 +1413,24 @@ export default function CreatePage() {
     if (draft.mode === "request") {
       return (
         <div style={previewCard}>
-          <div style={{ ...previewMediaWrap, height: 156, background: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)" }}>
+          <div style={{ ...previewMediaWrap, height: 160, background: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)" }}>
             <div style={{ padding: 18, width: "100%" }}>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>{requestGroupLabel(draft.requestGroup)}</span>
                 <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>{requestTimeframeLabel(draft.requestTimeframe)}</span>
               </div>
-              <div style={{ marginTop: 14, fontWeight: 1000, fontSize: 24, lineHeight: 1.15 }}>
-                {cleanTitle || "What do you need?"}
+              <div style={{ marginTop: 16, fontWeight: 1000, fontSize: 24, lineHeight: 1.15 }}>
+                {cleanTitle || "Untitled request"}
               </div>
             </div>
             <div style={previewBadge("#eff6ff", "#1d4ed8", "#93c5fd")}>REQUEST</div>
           </div>
 
           <div style={previewBody}>
-            <div style={previewText}>
-              {cleanDesc || "Tell the campus community exactly what you need and when you need it."}
-            </div>
+            <div style={previewText}>{cleanDesc || "No description yet."}</div>
             <div style={previewFooter}>
-              {draft.requestLocation.trim() || "No location added"} • {draft.hideName ? "Anonymous" : "Visible name"}
+              {draft.requestLocation.trim() || "No location added"} • {draft.hideName ? "Anonymous" : "Visible name"} •{" "}
+              {expireChoiceLabel(draft.expireChoice)}
             </div>
           </div>
         </div>
@@ -931,10 +1444,7 @@ export default function CreatePage() {
             // eslint-disable-next-line @next/next/no-img-element
             <img src={eventPreviewUrl} alt="Event preview" style={previewImage} />
           ) : (
-            <div style={previewPlaceholder}>
-              <div style={{ fontSize: 36 }}>🎫</div>
-              <div style={{ marginTop: 8 }}>Add a flyer for your event</div>
-            </div>
+            <div style={previewPlaceholder}>No flyer selected</div>
           )}
           <div style={previewBadge("#f5f3ff", "#6d28d9", "#c4b5fd")}>EVENT</div>
         </div>
@@ -943,401 +1453,139 @@ export default function CreatePage() {
           <div style={previewMeta}>
             {eventCategoryLabel(draft.eventCategory)} • {draft.hostOrg.trim() || "Host"}
           </div>
-          <div style={previewHeadline}>{cleanTitle || "What’s your event called?"}</div>
+          <div style={previewHeadline}>{cleanTitle || "Untitled event"}</div>
           <div style={{ marginTop: 8, fontSize: 13, fontWeight: 900, color: "#6d28d9" }}>
             📍 {draft.eventLocation.trim() || "Location"} • {eventTimeSummary}
           </div>
-          <div style={previewText}>
-            {cleanDesc || "What should students know before joining? Make the value of the event obvious."}
-          </div>
+          <div style={previewText}>{cleanDesc || "No description yet."}</div>
+          <div style={previewFooter}>{draft.hideName ? "Anonymous" : "Visible name"}</div>
         </div>
       </div>
     );
   }
 
-  function renderMediaSection() {
-    if (!draft.mode || draft.mode === "request") return null;
-
-    const isGive = draft.mode === "give";
-    const file = isGive ? itemFile : eventFile;
-    const preview = isGive ? itemPreviewUrl : eventPreviewUrl;
-    const savedName = isGive ? draft.itemFileName : draft.eventFileName;
+  function renderReviewStep() {
+    if (!draft.mode || step !== 4) return null;
 
     return (
-      <section ref={mediaRef} style={sectionStyle(fieldError === "media")}>
-        <div style={sectionEyebrow}>Media</div>
-        <div style={sectionTitle}>
-          {isGive ? "Start with a photo" : "Start with a flyer"}
-        </div>
-        <div style={sectionSub}>
-          {isGive
-            ? "Show the item first so the post feels real immediately."
-            : "A flyer makes the event feel alive before anyone reads the text."}
-        </div>
+      <section style={screenCard(fieldError === "review")}>
+        {renderReviewCard()}
 
-        <input
-          ref={isGive ? itemFileInputRef : eventFileInputRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp"
-          onChange={(e) => (isGive ? pickItemFile(e.target.files?.[0] ?? null) : pickEventFile(e.target.files?.[0] ?? null))}
-          style={{ display: "none" }}
-        />
+        <div style={{ marginTop: 18, display: "grid", gap: 10 }}>
+          <div style={reviewRow}>
+            <span style={reviewLabel}>Type</span>
+            <span style={reviewValue}>{draft.mode.charAt(0).toUpperCase() + draft.mode.slice(1)}</span>
+          </div>
 
-        <button
-          type="button"
-          onClick={() => (isGive ? itemFileInputRef.current?.click() : eventFileInputRef.current?.click())}
-          style={uploadCard}
-        >
-          {preview ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={preview} alt="Upload preview" style={previewImage} />
-          ) : (
-            <div style={uploadCardInner}>
-              <div style={{ fontSize: 42 }}>{isGive ? "📷" : "🪄"}</div>
-              <div style={{ marginTop: 10, fontWeight: 1000, fontSize: 18 }}>
-                {isGive ? "Upload item photo" : "Upload event flyer"}
+          {draft.mode === "give" && (
+            <>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Category</span>
+                <span style={reviewValue}>{giveCategoryLabel(draft.giveCategory)}</span>
               </div>
-              <div style={{ marginTop: 6, color: "#64748b", fontSize: 14 }}>JPG, PNG, or WEBP</div>
-            </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Pickup</span>
+                <span style={reviewValue}>{draft.pickupLocation}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Auto-close</span>
+                <span style={reviewValue}>{expireChoiceLabel(draft.expireChoice)}</span>
+              </div>
+            </>
           )}
 
-          <div style={uploadOverlay}>{file ? "Change image" : "Tap to upload"}</div>
-        </button>
+          {draft.mode === "request" && (
+            <>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Request type</span>
+                <span style={reviewValue}>{requestGroupLabel(draft.requestGroup)}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Timeframe</span>
+                <span style={reviewValue}>{requestTimeframeLabel(draft.requestTimeframe)}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Location</span>
+                <span style={reviewValue}>{draft.requestLocation.trim() || "None"}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Auto-close</span>
+                <span style={reviewValue}>{expireChoiceLabel(draft.expireChoice)}</span>
+              </div>
+            </>
+          )}
 
-        <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>
-            {file ? file.name : savedName ? `Saved draft file: ${savedName}` : "No image selected"}
+          {draft.mode === "event" && (
+            <>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Category</span>
+                <span style={reviewValue}>{eventCategoryLabel(draft.eventCategory)}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Host</span>
+                <span style={reviewValue}>{draft.hostOrg.trim() || "None"}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Location</span>
+                <span style={reviewValue}>{draft.eventLocation.trim() || "None"}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>When</span>
+                <span style={reviewValue}>{eventTimeSummary}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Link</span>
+                <span style={reviewValue}>{draft.eventLink.trim() || "None"}</span>
+              </div>
+            </>
+          )}
+
+          <div style={reviewRow}>
+            <span style={reviewLabel}>Visibility</span>
+            <span style={reviewValue}>{draft.hideName ? "Anonymous" : "Show my name"}</span>
           </div>
-
-          {file && (
-            <button
-              type="button"
-              onClick={() => (isGive ? pickItemFile(null) : pickEventFile(null))}
-              style={smallDangerBtn}
-            >
-              Remove
-            </button>
-          )}
         </div>
       </section>
     );
   }
 
-  function renderTitleSection() {
+  function renderCurrentStep() {
     if (!draft.mode) return null;
 
     return (
-      <section ref={titleRef} style={sectionStyle(fieldError === "title")}>
-        <div style={sectionEyebrow}>Message</div>
-        <div style={sectionTitle}>
-          {draft.mode === "request" ? "Write the ask" : "Write the post"}
-        </div>
-
-        <input
-          value={draft.title}
-          onChange={(e) => patchDraft("title", e.target.value)}
-          style={headlineInput}
-          placeholder={
-            draft.mode === "give"
-              ? "What are you sharing?"
-              : draft.mode === "request"
-              ? "What do you need?"
-              : "What’s your event called?"
-          }
-          autoFocus
-        />
-
-        <textarea
-          value={draft.description}
-          onChange={(e) => patchDraft("description", e.target.value)}
-          style={editorTextArea}
-          rows={5}
-          placeholder={
-            draft.mode === "give"
-              ? "Mention condition, quantity, and pickup info."
-              : draft.mode === "request"
-              ? "What exactly do you need, and by when?"
-              : "What should students know before joining?"
-          }
-        />
-
-        <div style={helperText}>
-          {draft.mode === "give" && "Tip: the simpler and clearer the item description, the faster it gets picked up."}
-          {draft.mode === "request" && "Tip: specific asks get better responses than vague ones."}
-          {draft.mode === "event" && "Tip: focus on why someone should care enough to attend."}
-        </div>
-      </section>
-    );
-  }
-
-  function renderDetailsSection() {
-    if (!draft.mode) return null;
-
-    if (draft.mode === "give") {
-      return (
-        <section ref={detailsRef} style={sectionStyle(fieldError === "details")}>
-          <div style={sectionEyebrow}>Details</div>
-          <div style={sectionTitle}>Make the item easy to understand</div>
-
-          <div style={{ marginTop: 16 }}>
-            <div style={fieldLabel}>Category</div>
-            <div style={chipWrap}>
-              {(["books", "notes", "electronics", "furniture", "clothing", "others"] as GiveCategory[]).map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => patchDraft("giveCategory", v)}
-                  style={chipButton(draft.giveCategory === v, "warm")}
-                >
-                  {giveCategoryLabel(v)}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ marginTop: 18 }}>
-            <div style={fieldLabel}>Pickup</div>
-            <div style={chipWrap}>
-              {(
-                [
-                  "College Quad",
-                  "Safety Service Office",
-                  "Dining Hall",
-                  "Library",
-                  "Student Center",
-                ] as PickupLocation[]
-              ).map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => patchDraft("pickupLocation", v)}
-                  style={chipButton(draft.pickupLocation === v, "neutral")}
-                >
-                  {v}
-                </button>
-              ))}
-            </div>
-          </div>
-        </section>
-      );
-    }
-
-    if (draft.mode === "request") {
-      return (
-        <section ref={detailsRef} style={sectionStyle(fieldError === "details")}>
-          <div style={sectionEyebrow}>Details</div>
-          <div style={sectionTitle}>Make your request easy to respond to</div>
-
-          <div style={{ marginTop: 16 }}>
-            <div style={fieldLabel}>Request type</div>
-            <div style={chipWrap}>
-              {(["logistics", "services", "urgent", "collaboration", "lost & found"] as RequestGroup[]).map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => patchDraft("requestGroup", v)}
-                  style={chipButton(draft.requestGroup === v, v === "urgent" ? "danger" : "blue")}
-                >
-                  {requestGroupLabel(v)}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ marginTop: 18 }}>
-            <div style={fieldLabel}>Timeframe</div>
-            <div style={chipWrap}>
-              {(["today", "this_week", "flexible"] as RequestTimeframe[]).map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => patchDraft("requestTimeframe", v)}
-                  style={chipButton(draft.requestTimeframe === v, v === "today" ? "danger" : "blue")}
-                >
-                  {requestTimeframeLabel(v)}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ marginTop: 18 }}>
-            <div style={fieldLabel}>Location</div>
-            <input
-              value={draft.requestLocation}
-              onChange={(e) => patchDraft("requestLocation", e.target.value)}
-              style={softInput}
-              placeholder="Optional location"
-            />
-          </div>
-        </section>
-      );
-    }
-
-    return (
-      <section ref={detailsRef} style={sectionStyle(fieldError === "details")}>
-        <div style={sectionEyebrow}>Details</div>
-        <div style={sectionTitle}>Build the event like a real flyer</div>
-
-        <div style={{ marginTop: 16 }}>
-          <div style={fieldLabel}>Category</div>
-          <div style={chipWrap}>
-            {(["career", "club", "sports", "music", "arts", "volunteering", "academic", "social", "other"] as EventCategory[]).map((v) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => patchDraft("eventCategory", v)}
-                style={chipButton(draft.eventCategory === v, "purple")}
-              >
-                {eventCategoryLabel(v)}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
-          <div>
-            <div style={fieldLabel}>Host</div>
-            <input
-              value={draft.hostOrg}
-              onChange={(e) => patchDraft("hostOrg", e.target.value)}
-              style={softInput}
-              placeholder="Host club / organisation"
-            />
-          </div>
-
-          <div>
-            <div style={fieldLabel}>Location</div>
-            <input
-              value={draft.eventLocation}
-              onChange={(e) => patchDraft("eventLocation", e.target.value)}
-              style={softInput}
-              placeholder="Where is it happening?"
-            />
-          </div>
-
-          <div style={twoCol}>
-            <div>
-              <div style={fieldLabel}>Date</div>
-              <input
-                type="date"
-                value={draft.eventDate}
-                onChange={(e) => patchDraft("eventDate", e.target.value)}
-                style={softInput}
-              />
-            </div>
-            <div>
-              <div style={fieldLabel}>Start time</div>
-              <input
-                type="time"
-                value={draft.eventStartTime}
-                onChange={(e) => patchDraft("eventStartTime", e.target.value)}
-                style={softInput}
-              />
-            </div>
-          </div>
-
-          <div style={twoCol}>
-            <div>
-              <div style={fieldLabel}>End time</div>
-              <input
-                type="time"
-                value={draft.eventEndTime}
-                onChange={(e) => patchDraft("eventEndTime", e.target.value)}
-                style={softInput}
-              />
-            </div>
-            <div>
-              <div style={fieldLabel}>Link</div>
-              <input
-                value={draft.eventLink}
-                onChange={(e) => patchDraft("eventLink", e.target.value)}
-                style={softInput}
-                placeholder="Optional event link"
-              />
-            </div>
-          </div>
-
-          {!!draft.eventEndTime &&
-            !!eventEndIso &&
-            !!eventStartIso &&
-            new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime() && (
-              <div style={inlineWarning}>End time cannot be before start time.</div>
-            )}
-
-          {!isValidHttpUrlMaybeEmpty(draft.eventLink) && (
-            <div style={inlineWarning}>Link must start with http:// or https://</div>
-          )}
-        </div>
-      </section>
-    );
-  }
-
-  function renderOptionsSection() {
-    if (!draft.mode) return null;
-
-    return (
-      <section ref={optionsRef} style={sectionStyle(fieldError === "options")}>
-        <div style={sectionEyebrow}>Options</div>
-        <div style={sectionTitle}>Final settings</div>
-
-        <div style={{ marginTop: 16 }}>
-          <div style={fieldLabel}>Visibility</div>
-          <div style={chipWrap}>
-            <button
-              type="button"
-              onClick={() => patchDraft("hideName", false)}
-              style={chipButton(!draft.hideName, "neutral")}
-            >
-              Show my name
-            </button>
-            <button
-              type="button"
-              onClick={() => patchDraft("hideName", true)}
-              style={chipButton(draft.hideName, "neutral")}
-            >
-              Post anonymously
-            </button>
-          </div>
-        </div>
-
-        {draft.mode !== "event" && (
-          <div style={{ marginTop: 18 }}>
-            <div style={fieldLabel}>Auto-close</div>
-            <div style={chipWrap}>
-              {(["urgent24", "7", "14", "30", "never"] as ExpireChoice[]).map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => patchDraft("expireChoice", v)}
-                  style={chipButton(draft.expireChoice === v, v === "urgent24" ? "danger" : "neutral")}
-                >
-                  {expireChoiceLabel(v)}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-      </section>
+      <>
+        {renderMediaStep()}
+        {renderWriteStep()}
+        {renderDetailsStep()}
+        {renderReviewStep()}
+      </>
     );
   }
 
   function stickyHint() {
-    if (!draft.mode) return "Choose a post type to begin.";
+    if (!draft.mode) return "Choose a type to begin.";
     if (!isLoggedIn) return "Log in with your @ashland.edu email.";
     if (!profileComplete) return "Finish your profile first.";
-
-    const validation = validateBeforeSubmit();
-    if (validation) return validation.message;
-
-    return "Ready to publish.";
+    if (step === 4) return "Looks good. Ready to post.";
+    return `Step ${displayStep} of ${totalSteps}`;
   }
 
   function primaryLabel() {
-    if (saving) return "Posting…";
+    if (saving) return "Posting...";
+    if (!draft.mode) return "Continue";
+    if (step < 4) return "Continue";
     if (draft.mode === "give") return "Share item";
     if (draft.mode === "request") return "Post request";
-    if (draft.mode === "event") return "Publish event";
-    return "Continue";
+    return "Publish event";
+  }
+
+  function handlePrimaryAction() {
+    if (!draft.mode) return;
+    if (step < 4) {
+      goNext();
+      return;
+    }
+    handleSubmit();
   }
 
   if (!hydratedDraft || authLoading || profileLoading) {
@@ -1345,7 +1593,7 @@ export default function CreatePage() {
       <div style={pageStyle}>
         <div style={shell}>
           <div style={statusCard}>
-            <div style={{ fontWeight: 1000, fontSize: 18 }}>Loading…</div>
+            <div style={{ fontWeight: 1000, fontSize: 18 }}>Loading...</div>
             <div style={{ marginTop: 6, color: "#64748b" }}>
               Restoring your draft and checking account status.
             </div>
@@ -1364,7 +1612,7 @@ export default function CreatePage() {
             <div style={{ marginTop: 8, color: "#64748b" }}>
               Log in with your <b>@ashland.edu</b> account before posting.
             </div>
-            <button onClick={() => router.push("/me")} style={{ ...primaryBtn(false), marginTop: 16 }}>
+            <button onClick={() => router.push("/me")} style={{ ...primaryButton, marginTop: 16 }}>
               Go to account
             </button>
           </div>
@@ -1382,7 +1630,7 @@ export default function CreatePage() {
             <div style={{ marginTop: 8, color: "#64748b" }}>
               Add your full name and choose Student or Faculty first.
             </div>
-            <button onClick={() => router.push("/me")} style={{ ...primaryBtn(false), marginTop: 16 }}>
+            <button onClick={() => router.push("/me")} style={{ ...primaryButton, marginTop: 16 }}>
               Finish profile
             </button>
           </div>
@@ -1394,82 +1642,62 @@ export default function CreatePage() {
   return (
     <div style={pageStyle}>
       <div ref={topRef} style={shell}>
-        <div style={headerWrap}>
-          <div>
-            <div style={pageTitle}>{draft.mode ? "Create post" : "Create"}</div>
-            <div style={pageSub}>
-              {draft.mode ? "Build one post at a time." : "What do you want to share today?"}
-            </div>
-          </div>
-
-          <button onClick={() => router.push("/feed")} style={headerPillBtn}>
+        <div style={topBar}>
+          <button onClick={() => router.push("/feed")} style={topBarButton}>
             ← Feed
           </button>
-        </div>
 
-        <div style={accountCard}>
-          <div style={{ fontSize: 13, color: "#475569", fontWeight: 800 }}>
-            Posting as <b>{email}</b>
-          </div>
+          {draft.mode ? (
+            <button onClick={goBackToTypes} style={topBarButton}>
+              Change type
+            </button>
+          ) : (
+            <div />
+          )}
         </div>
 
         {!draft.mode ? (
-          <div style={{ marginTop: 10 }}>{renderModePicker()}</div>
+          <>
+            <div style={heroHeader}>
+              <div style={heroTitle}>Create</div>
+              <div style={heroSubtitle}>What do you want to share today?</div>
+            </div>
+
+            <div style={accountCard}>
+              <div style={{ fontSize: 13, color: "#475569", fontWeight: 800 }}>
+                Posting as <b>{email}</b>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 16 }}>{renderModePicker()}</div>
+          </>
         ) : (
-          <div style={isDesktop ? desktopComposerGrid : mobileComposerStack}>
-            <div style={composerShell}>
-              <div style={composerTopBar}>
-                <button type="button" onClick={goBackToModes} style={lightPillBtn} disabled={saving}>
-                  ← Back to types
-                </button>
-
-                <button type="button" onClick={() => resetComposer(true)} style={lightPillBtn} disabled={saving}>
-                  Reset
-                </button>
+          <div style={composerGrid(isDesktop)}>
+            <div style={mainColumn}>
+              <div style={heroHeaderCompact}>
+                <div style={pageEyebrow}>{draft.mode.toUpperCase()}</div>
+                <div style={heroTitleSmall}>{stepTitle()}</div>
+                <div style={heroSubtitleSmall}>{stepSubtitle()}</div>
               </div>
 
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontWeight: 1000, fontSize: 22 }}>
-                  {draft.mode === "give" && "Share with campus"}
-                  {draft.mode === "request" && "Ask the campus community"}
-                  {draft.mode === "event" && "Promote your event"}
-                </div>
-                <div style={{ marginTop: 6, color: "#64748b", fontSize: 14 }}>
-                  One focused composer. No clutter from the other post types.
-                </div>
+              {renderStepper()}
 
-                <div style={{ marginTop: 14 }}>
-                  <div style={progressTrack}>
-                    <div style={{ ...progressFill, width: `${Math.round(progressValue * 100)}%` }} />
-                  </div>
-                  <div style={progressLabels}>
-                    <span>Start</span>
-                    <span>Details</span>
-                    <span>Ready</span>
-                  </div>
+              <div style={accountInlineCard}>
+                <div style={{ fontSize: 13, color: "#475569", fontWeight: 800 }}>
+                  Posting as <b>{email}</b>
                 </div>
               </div>
 
-              {renderMediaSection()}
-              {renderTitleSection()}
-              {renderDetailsSection()}
-              {renderOptionsSection()}
-
-              {!isDesktop && (
-                <div style={{ marginTop: 18 }}>
-                  <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 10 }}>Live preview</div>
-                  {renderPreview()}
-                </div>
-              )}
+              {renderCurrentStep()}
 
               {msg && <div style={errorBanner}>{msg}</div>}
             </div>
 
-            {isDesktop && (
-              <div style={previewColumn}>
-                <div style={previewSticky}>
-                  <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 10 }}>Live preview</div>
-                  {renderPreview()}
+            {isDesktop && step === 4 && (
+              <div style={sideColumn}>
+                <div style={desktopStickyPreview}>
+                  <div style={{ fontWeight: 1000, fontSize: 16, marginBottom: 12 }}>Preview</div>
+                  {renderReviewCard()}
                 </div>
               </div>
             )}
@@ -1480,23 +1708,16 @@ export default function CreatePage() {
       {draft.mode && (
         <div style={stickyBar}>
           <div style={stickyInner}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>Composer status</div>
-              <div style={{ marginTop: 3, fontSize: 14, fontWeight: 900, color: "#0f172a" }}>
-                {stickyHint()}
-              </div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={stickyMiniLabel}>Create flow</div>
+              <div style={stickyMainLabel}>{stickyHint()}</div>
             </div>
 
-            <button type="button" onClick={goBackToModes} style={ghostBtn} disabled={saving}>
-              Back
+            <button type="button" onClick={goPrev} style={secondaryStickyBtn} disabled={saving}>
+              {displayStep === 1 ? "Types" : "Back"}
             </button>
 
-            <button
-              type="button"
-              onClick={handleSubmit}
-              disabled={saving}
-              style={primaryBtn(saving)}
-            >
+            <button type="button" onClick={handlePrimaryAction} style={primaryStickyBtn(saving)} disabled={saving}>
               {primaryLabel()}
             </button>
           </div>
@@ -1510,11 +1731,10 @@ export default function CreatePage() {
 
 const pageStyle: React.CSSProperties = {
   minHeight: "100vh",
-  background: "linear-gradient(180deg, #f8fafc 0%, #f6f7fb 45%, #f8fafc 100%)",
+  background: "linear-gradient(180deg, #f8fafc 0%, #f6f7fb 42%, #f8fafc 100%)",
   color: "#0f172a",
   padding: 16,
-  paddingBottom:
-    "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px) + 120px)",
+  paddingBottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px) + 130px)",
 };
 
 const shell: React.CSSProperties = {
@@ -1522,97 +1742,114 @@ const shell: React.CSSProperties = {
   margin: "0 auto",
 };
 
-const headerWrap: React.CSSProperties = {
+const topBar: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "space-between",
   gap: 12,
-  marginBottom: 14,
+  marginBottom: 16,
 };
 
-const pageTitle: React.CSSProperties = {
-  fontSize: 32,
-  fontWeight: 1000,
-  letterSpacing: "-0.04em",
-};
-
-const pageSub: React.CSSProperties = {
-  marginTop: 4,
-  color: "#64748b",
-  fontSize: 14,
-  fontWeight: 600,
-};
-
-const headerPillBtn: React.CSSProperties = {
+const topBarButton: React.CSSProperties = {
   border: "1px solid #e5e7eb",
-  background: "rgba(255,255,255,0.86)",
+  background: "rgba(255,255,255,0.88)",
   color: "#0f172a",
   padding: "10px 14px",
   borderRadius: 999,
-  cursor: "pointer",
   fontWeight: 900,
+  cursor: "pointer",
+};
+
+const heroHeader: React.CSSProperties = {
+  paddingTop: 6,
+  marginBottom: 14,
+};
+
+const heroHeaderCompact: React.CSSProperties = {
+  marginBottom: 16,
+};
+
+const pageEyebrow: React.CSSProperties = {
+  fontSize: 12,
+  letterSpacing: "0.12em",
+  textTransform: "uppercase",
+  color: "#64748b",
+  fontWeight: 1000,
+};
+
+const heroTitle: React.CSSProperties = {
+  fontSize: 36,
+  lineHeight: 1.02,
+  fontWeight: 1000,
+  letterSpacing: "-0.05em",
+};
+
+const heroSubtitle: React.CSSProperties = {
+  marginTop: 8,
+  fontSize: 15,
+  color: "#64748b",
+  fontWeight: 600,
+};
+
+const heroTitleSmall: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 30,
+  lineHeight: 1.04,
+  fontWeight: 1000,
+  letterSpacing: "-0.045em",
+};
+
+const heroSubtitleSmall: React.CSSProperties = {
+  marginTop: 8,
+  fontSize: 14,
+  color: "#64748b",
+  fontWeight: 600,
 };
 
 const accountCard: React.CSSProperties = {
-  background: "rgba(255,255,255,0.88)",
+  background: "rgba(255,255,255,0.92)",
+  border: "1px solid #e5e7eb",
+  borderRadius: 20,
+  padding: "13px 15px",
+  boxShadow: "0 12px 28px rgba(15,23,42,0.04)",
+};
+
+const accountInlineCard: React.CSSProperties = {
+  marginTop: 16,
+  background: "rgba(255,255,255,0.9)",
   border: "1px solid #e5e7eb",
   borderRadius: 18,
   padding: "12px 14px",
-  boxShadow: "0 10px 25px rgba(15,23,42,0.04)",
 };
 
 const statusCard: React.CSSProperties = {
   background: "rgba(255,255,255,0.95)",
   border: "1px solid #e5e7eb",
-  borderRadius: 24,
+  borderRadius: 26,
   padding: 22,
   boxShadow: "0 24px 60px rgba(15,23,42,0.06)",
 };
 
-const desktopComposerGrid: React.CSSProperties = {
-  marginTop: 16,
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1.35fr) minmax(320px, 0.95fr)",
-  gap: 18,
-  alignItems: "start",
-};
+function composerGrid(isDesktop: boolean): React.CSSProperties {
+  return isDesktop
+    ? {
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1.15fr) minmax(340px, 0.85fr)",
+        gap: 20,
+        alignItems: "start",
+      }
+    : { display: "block" };
+}
 
-const mobileComposerStack: React.CSSProperties = {
-  marginTop: 16,
-  display: "block",
-};
-
-const composerShell: React.CSSProperties = {
-  background: "rgba(255,255,255,0.9)",
-  border: "1px solid #e5e7eb",
-  borderRadius: 28,
-  padding: 18,
-  boxShadow: "0 24px 70px rgba(15,23,42,0.08)",
-};
-
-const composerTopBar: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 10,
-  flexWrap: "wrap",
-};
-
-const lightPillBtn: React.CSSProperties = {
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  color: "#0f172a",
-  padding: "10px 14px",
-  borderRadius: 999,
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-const previewColumn: React.CSSProperties = {
+const mainColumn: React.CSSProperties = {
   minWidth: 0,
 };
 
-const previewSticky: React.CSSProperties = {
+const sideColumn: React.CSSProperties = {
+  minWidth: 0,
+};
+
+const desktopStickyPreview: React.CSSProperties = {
   position: "sticky",
   top: 16,
 };
@@ -1620,19 +1857,10 @@ const previewSticky: React.CSSProperties = {
 function modeCard(tone: "warm" | "blue" | "purple"): React.CSSProperties {
   const palette =
     tone === "warm"
-      ? {
-          bg: "linear-gradient(135deg, #fff7ed 0%, #ffffff 100%)",
-          border: "#fed7aa",
-        }
+      ? { bg: "linear-gradient(135deg, #fff7ed 0%, #ffffff 100%)", border: "#fed7aa" }
       : tone === "blue"
-      ? {
-          bg: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)",
-          border: "#bfdbfe",
-        }
-      : {
-          bg: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%)",
-          border: "#c4b5fd",
-        };
+      ? { bg: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)", border: "#bfdbfe" }
+      : { bg: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%)", border: "#c4b5fd" };
 
   return {
     width: "100%",
@@ -1641,30 +1869,30 @@ function modeCard(tone: "warm" | "blue" | "purple"): React.CSSProperties {
     gap: 16,
     textAlign: "left",
     padding: 18,
-    borderRadius: 24,
+    borderRadius: 28,
     border: `1.5px solid ${palette.border}`,
     background: palette.bg,
-    boxShadow: "0 10px 26px rgba(15,23,42,0.05)",
+    boxShadow: "0 14px 32px rgba(15,23,42,0.06)",
     cursor: "pointer",
   };
 }
 
 const modeIconBox: React.CSSProperties = {
-  width: 64,
-  height: 64,
-  borderRadius: 20,
+  width: 68,
+  height: 68,
+  borderRadius: 22,
   display: "grid",
   placeItems: "center",
-  fontSize: 28,
-  background: "rgba(255,255,255,0.82)",
+  fontSize: 30,
+  background: "rgba(255,255,255,0.92)",
   border: "1px solid rgba(255,255,255,0.95)",
   flexShrink: 0,
 };
 
 const modeTitle: React.CSSProperties = {
-  fontSize: 24,
+  fontSize: 25,
   fontWeight: 1000,
-  lineHeight: 1.1,
+  lineHeight: 1.08,
 };
 
 const modeDesc: React.CSSProperties = {
@@ -1680,157 +1908,219 @@ const modeArrow: React.CSSProperties = {
   flexShrink: 0,
 };
 
-function sectionStyle(highlight: boolean): React.CSSProperties {
+const stepperWrap: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+  gap: 8,
+  marginTop: 6,
+  marginBottom: 16,
+};
+
+const stepperItem: React.CSSProperties = {
+  minWidth: 0,
+};
+
+const stepperLineWrap: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  width: "100%",
+};
+
+function stepperDot(active: boolean, done: boolean): React.CSSProperties {
   return {
-    marginTop: 18,
-    paddingTop: 18,
-    borderTop: "1px solid #eef2f7",
-    scrollMarginTop: 90,
-    outline: highlight ? "2px solid #fecdd3" : "none",
-    outlineOffset: 6,
-    borderRadius: 16,
+    width: 28,
+    height: 28,
+    borderRadius: 999,
+    display: "grid",
+    placeItems: "center",
+    fontSize: 12,
+    fontWeight: 1000,
+    background: done ? "#03133d" : active ? "#e0e7ff" : "#ffffff",
+    color: done ? "#ffffff" : active ? "#312e81" : "#64748b",
+    border: `1px solid ${done ? "#03133d" : active ? "#a5b4fc" : "#e5e7eb"}`,
+    flexShrink: 0,
   };
 }
 
-const sectionEyebrow: React.CSSProperties = {
-  fontSize: 12,
-  fontWeight: 1000,
-  color: "#64748b",
-  textTransform: "uppercase",
-  letterSpacing: "0.08em",
+function stepperLine(done: boolean): React.CSSProperties {
+  return {
+    height: 2,
+    flex: 1,
+    background: done ? "#03133d" : "#e5e7eb",
+    marginLeft: 6,
+    borderRadius: 999,
+  };
+}
+
+function stepperLabel(active: boolean): React.CSSProperties {
+  return {
+    marginTop: 8,
+    fontSize: 12,
+    fontWeight: 900,
+    color: active ? "#0f172a" : "#64748b",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  };
+}
+
+function screenCard(highlight: boolean): React.CSSProperties {
+  return {
+    background: "rgba(255,255,255,0.92)",
+    border: `1px solid ${highlight ? "#fecdd3" : "#e5e7eb"}`,
+    borderRadius: 28,
+    padding: 18,
+    boxShadow: highlight ? "0 0 0 3px rgba(251,113,133,0.08)" : "0 20px 50px rgba(15,23,42,0.05)",
+  };
+}
+
+const heroUploadWrap: React.CSSProperties = {
+  display: "grid",
+  gap: 12,
 };
 
-const sectionTitle: React.CSSProperties = {
-  marginTop: 6,
-  fontSize: 24,
-  fontWeight: 1000,
-  letterSpacing: "-0.03em",
-};
-
-const sectionSub: React.CSSProperties = {
-  marginTop: 6,
-  fontSize: 14,
-  color: "#64748b",
-  lineHeight: 1.5,
-};
-
-const uploadCard: React.CSSProperties = {
+const heroUploadButton: React.CSSProperties = {
   width: "100%",
-  height: 260,
-  marginTop: 16,
-  borderRadius: 24,
-  overflow: "hidden",
-  border: "1px solid #e5e7eb",
-  background: "#f8fafc",
-  cursor: "pointer",
-  position: "relative",
+  minHeight: 370,
   padding: 0,
+  border: "1px solid #e5e7eb",
+  borderRadius: 26,
+  overflow: "hidden",
+  background: "#f8fafc",
+  position: "relative",
+  cursor: "pointer",
 };
 
-const uploadCardInner: React.CSSProperties = {
+const heroUploadImage: React.CSSProperties = {
   width: "100%",
   height: "100%",
+  minHeight: 370,
+  objectFit: "cover",
+  display: "block",
+};
+
+const heroUploadPlaceholder: React.CSSProperties = {
+  minHeight: 370,
   display: "grid",
   placeItems: "center",
   textAlign: "center",
-  padding: 20,
+  padding: 24,
+  color: "#0f172a",
 };
 
-const uploadOverlay: React.CSSProperties = {
+const floatingUploadAction: React.CSSProperties = {
   position: "absolute",
-  right: 14,
   bottom: 14,
-  padding: "9px 12px",
+  right: 14,
   borderRadius: 999,
+  padding: "10px 14px",
   background: "rgba(15,23,42,0.78)",
-  color: "white",
-  fontSize: 12,
+  color: "#ffffff",
   fontWeight: 1000,
+  fontSize: 13,
+  backdropFilter: "blur(10px)",
 };
 
-const headlineInput: React.CSSProperties = {
-  width: "100%",
-  marginTop: 16,
-  padding: "14px 0",
-  fontSize: 30,
-  fontWeight: 1000,
-  letterSpacing: "-0.04em",
-  border: "none",
-  borderBottom: "1px solid #e5e7eb",
-  outline: "none",
-  background: "transparent",
-  color: "#0f172a",
+const fileMetaRow: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  flexWrap: "wrap",
 };
 
-const editorTextArea: React.CSSProperties = {
-  width: "100%",
-  marginTop: 14,
-  padding: "0 0 10px 0",
-  border: "none",
-  borderBottom: "1px solid #e5e7eb",
-  outline: "none",
-  resize: "vertical",
-  fontSize: 16,
-  lineHeight: 1.65,
-  background: "transparent",
-  color: "#0f172a",
-};
-
-const helperText: React.CSSProperties = {
-  marginTop: 10,
+const fileMetaName: React.CSSProperties = {
   fontSize: 13,
   color: "#64748b",
-  fontWeight: 700,
+  fontWeight: 800,
+  minWidth: 0,
 };
 
-const fieldLabel: React.CSSProperties = {
-  marginBottom: 10,
+const removeBtn: React.CSSProperties = {
+  border: "1px solid #fecaca",
+  background: "#fff1f2",
+  color: "#be123c",
+  borderRadius: 999,
+  padding: "8px 12px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const contentBlock: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+};
+
+const fieldLabelModern: React.CSSProperties = {
   fontSize: 13,
   color: "#475569",
   fontWeight: 900,
 };
 
-const chipWrap: React.CSSProperties = {
+const titleInputModern: React.CSSProperties = {
+  width: "100%",
+  border: "none",
+  outline: "none",
+  background: "transparent",
+  padding: "8px 0 12px 0",
+  fontSize: 31,
+  lineHeight: 1.08,
+  fontWeight: 1000,
+  letterSpacing: "-0.045em",
+  borderBottom: "1px solid #e5e7eb",
+};
+
+const textareaModern: React.CSSProperties = {
+  width: "100%",
+  border: "1px solid #e5e7eb",
+  outline: "none",
+  background: "#ffffff",
+  padding: 16,
+  borderRadius: 20,
+  resize: "vertical",
+  fontSize: 15,
+  lineHeight: 1.65,
+  color: "#0f172a",
+};
+
+const tipCard: React.CSSProperties = {
+  marginTop: 14,
+  padding: "14px 15px",
+  borderRadius: 18,
+  background: "#f8fafc",
+  color: "#475569",
+  fontSize: 13,
+  fontWeight: 800,
+  border: "1px solid #e5e7eb",
+};
+
+const detailGroup: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+  marginBottom: 18,
+};
+
+const choiceGrid: React.CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
   gap: 10,
 };
 
-function chipButton(active: boolean, tone: "warm" | "blue" | "purple" | "neutral" | "danger"): React.CSSProperties {
+function choiceTile(active: boolean, tone: "warm" | "blue" | "purple" | "neutral" | "danger"): React.CSSProperties {
   const palette =
     tone === "warm"
-      ? {
-          bg: active ? "#ffedd5" : "#ffffff",
-          border: active ? "#fb923c" : "#e5e7eb",
-          color: active ? "#9a3412" : "#0f172a",
-        }
+      ? { bg: active ? "#ffedd5" : "#ffffff", border: active ? "#fb923c" : "#e5e7eb", color: active ? "#9a3412" : "#0f172a" }
       : tone === "blue"
-      ? {
-          bg: active ? "#dbeafe" : "#ffffff",
-          border: active ? "#60a5fa" : "#e5e7eb",
-          color: active ? "#1d4ed8" : "#0f172a",
-        }
+      ? { bg: active ? "#dbeafe" : "#ffffff", border: active ? "#60a5fa" : "#e5e7eb", color: active ? "#1d4ed8" : "#0f172a" }
       : tone === "purple"
-      ? {
-          bg: active ? "#ede9fe" : "#ffffff",
-          border: active ? "#8b5cf6" : "#e5e7eb",
-          color: active ? "#6d28d9" : "#0f172a",
-        }
+      ? { bg: active ? "#ede9fe" : "#ffffff", border: active ? "#8b5cf6" : "#e5e7eb", color: active ? "#6d28d9" : "#0f172a" }
       : tone === "danger"
-      ? {
-          bg: active ? "#ffe4e6" : "#ffffff",
-          border: active ? "#fb7185" : "#e5e7eb",
-          color: active ? "#be123c" : "#0f172a",
-        }
-      : {
-          bg: active ? "#f1f5f9" : "#ffffff",
-          border: active ? "#94a3b8" : "#e5e7eb",
-          color: "#0f172a",
-        };
+      ? { bg: active ? "#ffe4e6" : "#ffffff", border: active ? "#fb7185" : "#e5e7eb", color: active ? "#be123c" : "#0f172a" }
+      : { bg: active ? "#f1f5f9" : "#ffffff", border: active ? "#94a3b8" : "#e5e7eb", color: "#0f172a" };
 
   return {
-    padding: "10px 14px",
-    borderRadius: 999,
+    padding: "12px 14px",
+    borderRadius: 18,
     border: `1px solid ${palette.border}`,
     background: palette.bg,
     color: palette.color,
@@ -1840,68 +2130,92 @@ function chipButton(active: boolean, tone: "warm" | "blue" | "purple" | "neutral
   };
 }
 
-const softInput: React.CSSProperties = {
+const segmentedWrap: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: 10,
+};
+
+function segmentBtn(active: boolean): React.CSSProperties {
+  return {
+    border: `1px solid ${active ? "#03133d" : "#e5e7eb"}`,
+    background: active ? "#03133d" : "#ffffff",
+    color: active ? "#ffffff" : "#0f172a",
+    borderRadius: 18,
+    padding: "13px 14px",
+    fontWeight: 900,
+    cursor: "pointer",
+  };
+}
+
+const softInputModern: React.CSSProperties = {
   width: "100%",
-  padding: "13px 14px",
-  borderRadius: 16,
+  padding: "14px 15px",
+  borderRadius: 18,
   border: "1px solid #e5e7eb",
   background: "#ffffff",
   outline: "none",
   fontSize: 14,
 };
 
-const twoCol: React.CSSProperties = {
+const grid2: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "1fr 1fr",
   gap: 12,
+  marginBottom: 18,
+};
+
+const dividerLine: React.CSSProperties = {
+  height: 1,
+  background: "#eef2f7",
+  margin: "4px 0 18px 0",
 };
 
 const inlineWarning: React.CSSProperties = {
-  padding: "10px 12px",
-  borderRadius: 14,
+  padding: "11px 13px",
+  borderRadius: 16,
   background: "#fff1f2",
   color: "#9f1239",
   fontSize: 13,
   fontWeight: 800,
   border: "1px solid #fecdd3",
+  marginBottom: 16,
 };
 
-const progressTrack: React.CSSProperties = {
-  width: "100%",
-  height: 6,
-  borderRadius: 999,
-  background: "#e2e8f0",
-  overflow: "hidden",
-};
-
-const progressFill: React.CSSProperties = {
-  height: "100%",
-  borderRadius: 999,
-  background: "linear-gradient(90deg, #0f172a 0%, #6366f1 100%)",
-  transition: "width 220ms ease",
-};
-
-const progressLabels: React.CSSProperties = {
-  marginTop: 8,
+const reviewRow: React.CSSProperties = {
   display: "flex",
+  alignItems: "flex-start",
   justifyContent: "space-between",
-  gap: 8,
-  fontSize: 12,
+  gap: 12,
+  padding: "12px 0",
+  borderBottom: "1px solid #eef2f7",
+};
+
+const reviewLabel: React.CSSProperties = {
+  fontSize: 13,
   color: "#64748b",
-  fontWeight: 800,
+  fontWeight: 900,
+};
+
+const reviewValue: React.CSSProperties = {
+  fontSize: 14,
+  color: "#0f172a",
+  fontWeight: 900,
+  textAlign: "right",
+  lineHeight: 1.45,
 };
 
 const previewCard: React.CSSProperties = {
-  background: "rgba(255,255,255,0.95)",
+  background: "rgba(255,255,255,0.96)",
   border: "1px solid #e5e7eb",
-  borderRadius: 26,
+  borderRadius: 28,
   overflow: "hidden",
   boxShadow: "0 20px 50px rgba(15,23,42,0.08)",
 };
 
 const previewMediaWrap: React.CSSProperties = {
   position: "relative",
-  height: 240,
+  height: 250,
   background: "#f8fafc",
   borderBottom: "1px solid #eef2f7",
   overflow: "hidden",
@@ -1994,16 +2308,6 @@ const errorBanner: React.CSSProperties = {
   fontWeight: 900,
 };
 
-const smallDangerBtn: React.CSSProperties = {
-  border: "1px solid #fecaca",
-  background: "#fff1f2",
-  color: "#be123c",
-  borderRadius: 999,
-  padding: "7px 11px",
-  fontWeight: 900,
-  cursor: "pointer",
-};
-
 const stickyBar: React.CSSProperties = {
   position: "fixed",
   left: 0,
@@ -2022,7 +2326,7 @@ const stickyInner: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 12,
-  background: "rgba(255,255,255,0.9)",
+  background: "rgba(255,255,255,0.92)",
   border: "1px solid rgba(226,232,240,0.95)",
   borderRadius: 24,
   padding: "14px 16px",
@@ -2031,29 +2335,56 @@ const stickyInner: React.CSSProperties = {
   pointerEvents: "auto",
 };
 
-const ghostBtn: React.CSSProperties = {
+const stickyMiniLabel: React.CSSProperties = {
+  fontSize: 12,
+  color: "#64748b",
+  fontWeight: 800,
+};
+
+const stickyMainLabel: React.CSSProperties = {
+  marginTop: 3,
+  fontSize: 14,
+  color: "#0f172a",
+  fontWeight: 1000,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+const secondaryStickyBtn: React.CSSProperties = {
   border: "1px solid #e5e7eb",
   background: "#ffffff",
   color: "#0f172a",
-  padding: "12px 16px",
+  padding: "12px 15px",
   borderRadius: 16,
   cursor: "pointer",
   fontWeight: 900,
   whiteSpace: "nowrap",
 };
 
-function primaryBtn(disabled: boolean): React.CSSProperties {
+function primaryStickyBtn(disabled: boolean): React.CSSProperties {
   return {
     border: "none",
     background: disabled ? "#94a3b8" : "#03133d",
-    color: "white",
+    color: "#ffffff",
     padding: "13px 18px",
     borderRadius: 18,
     cursor: disabled ? "not-allowed" : "pointer",
     fontWeight: 1000,
-    minWidth: 148,
+    minWidth: 142,
     opacity: disabled ? 0.58 : 1,
     boxShadow: disabled ? "none" : "0 18px 35px rgba(3,19,61,0.22)",
     whiteSpace: "nowrap",
   };
 }
+
+const primaryButton: React.CSSProperties = {
+  border: "none",
+  background: "#03133d",
+  color: "#ffffff",
+  padding: "13px 18px",
+  borderRadius: 18,
+  cursor: "pointer",
+  fontWeight: 1000,
+  boxShadow: "0 18px 35px rgba(3,19,61,0.22)",
+};
