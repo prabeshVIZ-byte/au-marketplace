@@ -1,4 +1,5 @@
 "use client";
+
 export const dynamic = "force-dynamic";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -13,17 +14,14 @@ type ItemRow = {
   title: string;
   description: string | null;
 
-  // give
   category: string | null;
   pickup_location: string | null;
 
-  // request
   post_type: PostType;
   request_group: string | null;
   request_timeframe: string | null;
   request_location: string | null;
 
-  // shared
   is_anonymous: boolean | null;
   expires_at: string | null;
   photo_url: string | null;
@@ -31,11 +29,23 @@ type ItemRow = {
   owner_id: string | null;
 };
 
-type OwnerProfile = { full_name: string | null; user_role: string | null };
+type OwnerProfile = {
+  full_name: string | null;
+  user_role: string | null;
+};
 
-type MyInterestRow = { id: string; status: string | null };
+type MyInterestRow = {
+  id: string;
+  status: string | null;
+};
 
-type OfferStatus = "pending" | "hold" | "accepted" | "completed" | "declined" | "withdrawn";
+type OfferStatus =
+  | "pending"
+  | "hold"
+  | "accepted"
+  | "completed"
+  | "declined"
+  | "withdrawn";
 
 type OfferRow = {
   id: string;
@@ -49,60 +59,76 @@ type OfferRow = {
   helper?: { full_name: string | null; user_role: string | null } | null;
 };
 
-const APP_NAV_HEIGHT_PX = 86; // 👈 set this to match your global bottom nav height
-const ACTION_BAR_HEIGHT_PX = 78; // our sticky CTA bar height (approx)
+const APP_NAV_HEIGHT_PX = 86;
+const ACTION_BAR_HEIGHT_PX = 84;
 
 function isAshlandEmail(email: string | null) {
   return !!email && email.toLowerCase().endsWith("@ashland.edu");
 }
 
 function formatExpiry(expiresAt: string | null) {
-  if (!expiresAt) return "Until delisted";
+  if (!expiresAt) return "Until canceled";
   const end = new Date(expiresAt);
-  if (Number.isNaN(end.getTime())) return "Until delisted";
+  if (Number.isNaN(end.getTime())) return "Until canceled";
 
   const now = new Date();
-  const ms = end.getTime() - now.getTime();
-  if (ms <= 0) return "Expired";
+  const diff = end.getTime() - now.getTime();
+  if (diff <= 0) return "Expired";
 
   const oneDay = 24 * 60 * 60 * 1000;
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
-  const dayDiff = Math.round((startOfEnd - startOfToday) / oneDay);
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+  const dayDiff = Math.round((startEnd - startToday) / oneDay);
 
   if (dayDiff === 0) return "Today";
   if (dayDiff === 1) return "Tomorrow";
-  if (dayDiff < 7) return `in ${dayDiff} days`;
+  if (dayDiff < 7) return `In ${dayDiff} days`;
 
-  return end.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  return end.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 
-function requestGroupLabel(g: string | null) {
-  const k = (g ?? "").toLowerCase();
+function requestGroupLabel(v: string | null) {
+  const k = (v ?? "").toLowerCase();
   if (k === "logistics") return "Logistics";
   if (k === "services") return "Services";
   if (k === "urgent") return "Urgent";
   if (k === "collaboration") return "Collaboration";
+  if (k === "lost & found") return "Lost & Found";
   return "Request";
 }
-function requestTimeframeLabel(t: string | null) {
-  const k = (t ?? "").toLowerCase();
+
+function requestTimeframeLabel(v: string | null) {
+  const k = (v ?? "").toLowerCase();
   if (k === "today") return "Today";
   if (k === "this_week") return "This week";
   if (k === "flexible") return "Flexible";
   return "";
 }
-function offerStatusLabel(s: string | null) {
-  const k = (s ?? "pending").toLowerCase();
+
+function offerStatusLabel(v: string | null) {
+  const k = (v ?? "pending").toLowerCase();
   if (k === "pending") return "Pending";
   if (k === "hold") return "On hold";
   if (k === "accepted") return "Accepted";
   if (k === "completed") return "Completed";
   if (k === "declined") return "Declined";
   if (k === "withdrawn") return "Withdrawn";
-  return k;
+  return "Pending";
 }
-function statusTone(status: string | null) {
+
+function itemStatusLabel(v: string | null) {
+  const k = (v ?? "available").toLowerCase();
+  if (k === "available") return "Available";
+  if (k === "reserved") return "Reserved";
+  if (k === "claimed") return "Claimed";
+  return "Available";
+}
+
+function toneClassForOffer(status: string | null) {
   const k = (status ?? "pending").toLowerCase();
   if (k === "accepted") return "toneGreen";
   if (k === "hold") return "toneBlue";
@@ -111,8 +137,23 @@ function statusTone(status: string | null) {
   return "toneGray";
 }
 
-function Chip({ children }: { children: React.ReactNode }) {
-  return <span className="chip">{children}</span>;
+function toneClassForItem(status: string | null) {
+  const k = (status ?? "available").toLowerCase();
+  if (k === "available") return "toneGreen";
+  if (k === "reserved") return "toneBlue";
+  if (k === "claimed") return "toneGray";
+  return "toneGray";
+}
+
+function prettyDate(iso: string | null) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 
 export default function ItemDetailPage() {
@@ -120,31 +161,25 @@ export default function ItemDetailPage() {
   const params = useParams();
   const itemId = (params?.id as string) || "";
 
-  // auth (single source of truth)
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+
   const isLoggedIn = useMemo(() => !!userId && isAshlandEmail(userEmail), [userId, userEmail]);
 
-  // loading/error
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // item
   const [item, setItem] = useState<ItemRow | null>(null);
   const [owner, setOwner] = useState<OwnerProfile | null>(null);
 
-  // give
   const [interestCount, setInterestCount] = useState(0);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
 
-  // request
   const [offers, setOffers] = useState<OfferRow[]>([]);
   const [myOffer, setMyOffer] = useState<OfferRow | null>(null);
 
-  // ui
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
-  const toastTimer = useRef<any>(null);
 
   const [confirm, setConfirm] = useState<null | {
     title: string;
@@ -154,39 +189,42 @@ export default function ItemDetailPage() {
     onYes: () => Promise<void>;
   }>(null);
 
-  // give modal
   const [showInterestModal, setShowInterestModal] = useState(false);
   const [earliestPickup, setEarliestPickup] = useState<"today" | "tomorrow" | "weekend">("today");
   const [timeWindow, setTimeWindow] = useState<"morning" | "afternoon" | "evening">("afternoon");
   const [interestNote, setInterestNote] = useState("");
 
-  // request modal
   const [showOfferModal, setShowOfferModal] = useState(false);
-  const [offerAvailability, setOfferAvailability] = useState<"today" | "tomorrow" | "this_week" | "flexible">("today");
+  const [offerAvailability, setOfferAvailability] = useState<
+    "today" | "tomorrow" | "this_week" | "flexible"
+  >("today");
   const [offerNote, setOfferNote] = useState("");
 
-  // image modal
   const [openImg, setOpenImg] = useState<string | null>(null);
+  const toastTimer = useRef<any>(null);
+  const loadSeq = useRef(0);
 
   const postType: PostType = (item?.post_type ?? "give") as PostType;
-  const isMinePost = useMemo(() => !!userId && !!item?.owner_id && item.owner_id === userId, [userId, item?.owner_id]);
+
+  const isMinePost = useMemo(() => {
+    return !!userId && !!item?.owner_id && userId === item.owner_id;
+  }, [userId, item?.owner_id]);
+
+  const itemStatus = (item?.status ?? "available").toLowerCase();
   const expiryText = formatExpiry(item?.expires_at ?? null);
 
-  // derived
-  const myInterestStatus = (myInterest?.status ?? "").toLowerCase();
   const mineInterested = !!myInterest?.id;
+  const myInterestStatus = (myInterest?.status ?? "").toLowerCase();
   const interestAccepted = myInterestStatus === "accepted";
   const interestReserved = myInterestStatus === "reserved";
 
   const myOfferStatus = (myOffer?.status ?? "").toLowerCase();
   const myOfferAccepted = myOfferStatus === "accepted" || myOfferStatus === "completed";
 
-  const loadSeq = useRef(0);
-
   function showToast(msg: string, kind: "ok" | "err" = "ok") {
     setToast({ msg, kind });
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 2400);
+    toastTimer.current = setTimeout(() => setToast(null), 2500);
   }
 
   async function loadEverything(uid: string | null, email: string | null) {
@@ -197,35 +235,34 @@ export default function ItemDetailPage() {
     setErr(null);
 
     try {
-      const { data: it, error: itErr } = await supabase
+      const { data: it, error: itemErr } = await supabase
         .from("items")
         .select(
-          "id,title,description,category,pickup_location,is_anonymous,expires_at,photo_url,status,owner_id,post_type,request_group,request_timeframe,request_location"
+          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id"
         )
         .eq("id", itemId)
         .single();
 
       if (seq !== loadSeq.current) return;
-      if (itErr) throw new Error(itErr.message);
+      if (itemErr) throw new Error(itemErr.message);
 
       const loaded = it as ItemRow;
       loaded.post_type = (loaded.post_type ?? "give") as PostType;
       setItem(loaded);
 
-      // owner profile only if not anonymous
       if (!loaded.is_anonymous && loaded.owner_id) {
         const { data: prof } = await supabase
           .from("profiles")
           .select("full_name,user_role")
           .eq("id", loaded.owner_id)
           .maybeSingle();
+
         if (seq !== loadSeq.current) return;
         setOwner((prof as OwnerProfile) ?? null);
       } else {
         setOwner(null);
       }
 
-      // branch
       if (loaded.post_type === "give") {
         setOffers([]);
         setMyOffer(null);
@@ -247,7 +284,9 @@ export default function ItemDetailPage() {
             .maybeSingle();
 
           if (seq !== loadSeq.current) return;
-          setMyInterest(mine ? { id: (mine as any).id, status: (mine as any).status ?? null } : null);
+          setMyInterest(
+            mine ? { id: (mine as any).id, status: (mine as any).status ?? null } : null
+          );
         } else {
           setMyInterest(null);
         }
@@ -270,15 +309,12 @@ export default function ItemDetailPage() {
         }
 
         if (uid && loaded.owner_id === uid) {
-          // If this FK name breaks, see note below.
           const { data: all, error } = await supabase
             .from("request_offers")
-            .select(
-              `
+            .select(`
               id,request_id,helper_id,status,availability,note,created_at,updated_at,
               helper:profiles!request_offers_helper_id_fkey(full_name,user_role)
-            `
-            )
+            `)
             .eq("request_id", loaded.id)
             .order("created_at", { ascending: false });
 
@@ -290,7 +326,7 @@ export default function ItemDetailPage() {
       }
     } catch (e: any) {
       if (seq !== loadSeq.current) return;
-      setErr(e?.message || "Failed to load.");
+      setErr(e?.message || "Failed to load item.");
       setItem(null);
       setOwner(null);
       setInterestCount(0);
@@ -303,12 +339,12 @@ export default function ItemDetailPage() {
     }
   }
 
-  // ---------- Actions ----------
   async function submitInterest() {
     if (!item || postType !== "give") return;
     if (!isLoggedIn || !userId) return router.push("/me");
-    if (isMinePost) return showToast("This is your listing.", "err");
+    if (isMinePost) return showToast("This is your own listing.", "err");
     if (mineInterested) return showToast("You already requested this item.", "err");
+    if (itemStatus !== "available") return showToast("This item is not available.", "err");
 
     setBusy(true);
     try {
@@ -328,8 +364,8 @@ export default function ItemDetailPage() {
         .single();
 
       if (error) {
-        const m = error.message.toLowerCase();
-        if (m.includes("duplicate") || m.includes("unique")) {
+        const msg = error.message.toLowerCase();
+        if (msg.includes("duplicate") || msg.includes("unique")) {
           showToast("You already requested this item.", "err");
           await loadEverything(userId, userEmail);
           return;
@@ -356,27 +392,32 @@ export default function ItemDetailPage() {
 
     const st = (myInterest?.status ?? "").toLowerCase();
     if (st === "accepted" || st === "reserved") {
-      showToast("Already accepted/reserved. You can’t withdraw here.", "err");
+      showToast("Already accepted or reserved. You cannot withdraw here.", "err");
       return;
     }
 
     setConfirm({
       title: "Withdraw request?",
-      body: "This removes your request from the lister’s list.",
+      body: "This removes your request from the owner’s list.",
       actionLabel: "Withdraw",
       danger: true,
       onYes: async () => {
         setConfirm(null);
         setBusy(true);
         try {
-          const { error } = await supabase.from("interests").delete().eq("item_id", item.id).eq("user_id", userId);
+          const { error } = await supabase
+            .from("interests")
+            .delete()
+            .eq("item_id", item.id)
+            .eq("user_id", userId);
+
           if (error) throw new Error(error.message);
+
           setMyInterest(null);
           setInterestCount((c) => Math.max(0, c - 1));
-          setShowInterestModal(false);
           showToast("Removed ✅", "ok");
         } catch (e: any) {
-          showToast(e?.message || "Could not remove.", "err");
+          showToast(e?.message || "Could not remove request.", "err");
         } finally {
           setBusy(false);
         }
@@ -390,12 +431,17 @@ export default function ItemDetailPage() {
     if (isMinePost) return;
 
     const st = (myInterest.status ?? "").toLowerCase();
-    if (st !== "accepted") return showToast("Confirm only after the lister accepts.", "err");
-    if (!item.owner_id) return showToast("Missing lister id.", "err");
+    if (st !== "accepted") {
+      showToast("You can confirm only after the owner accepts.", "err");
+      return;
+    }
+    if (!item.owner_id) return showToast("Missing owner id.", "err");
 
     setBusy(true);
     try {
-      const { error: rpcErr } = await supabase.rpc("confirm_pickup", { p_interest_id: myInterest.id });
+      const { error: rpcErr } = await supabase.rpc("confirm_pickup", {
+        p_interest_id: myInterest.id,
+      });
       if (rpcErr) throw new Error(rpcErr.message);
 
       const threadId = await ensureThread({
@@ -407,7 +453,7 @@ export default function ItemDetailPage() {
       await insertSystemMessage({
         threadId,
         senderId: userId,
-        body: "✅ Buyer confirmed pickup. Coordinate a time and place here.",
+        body: "✅ Pickup confirmed. Coordinate details here.",
       });
 
       router.push(`/messages/${threadId}`);
@@ -421,7 +467,7 @@ export default function ItemDetailPage() {
   async function submitOffer() {
     if (!item || postType !== "request") return;
     if (!isLoggedIn || !userId) return router.push("/me");
-    if (isMinePost) return showToast("This is your request.", "err");
+    if (isMinePost) return showToast("This is your own request.", "err");
     if (myOffer?.id) return showToast("You already offered help.", "err");
 
     setBusy(true);
@@ -441,8 +487,8 @@ export default function ItemDetailPage() {
         .single();
 
       if (error) {
-        const m = error.message.toLowerCase();
-        if (m.includes("duplicate") || m.includes("unique")) {
+        const msg = error.message.toLowerCase();
+        if (msg.includes("duplicate") || msg.includes("unique")) {
           showToast("You already offered help.", "err");
           await loadEverything(userId, userEmail);
           return;
@@ -451,8 +497,8 @@ export default function ItemDetailPage() {
       }
 
       setMyOffer(data as any);
-      setShowOfferModal(false);
       setOfferNote("");
+      setShowOfferModal(false);
       showToast("Offer sent ✅", "ok");
       await loadEverything(userId, userEmail);
     } catch (e: any) {
@@ -469,26 +515,32 @@ export default function ItemDetailPage() {
 
     const st = (myOffer.status ?? "").toLowerCase();
     if (st === "accepted" || st === "completed") {
-      showToast("You can’t withdraw after acceptance.", "err");
+      showToast("You cannot withdraw after acceptance.", "err");
       return;
     }
 
     setConfirm({
       title: "Withdraw offer?",
-      body: "This removes your offer from the requester’s list.",
+      body: "This removes your offer from the request.",
       actionLabel: "Withdraw",
       danger: true,
       onYes: async () => {
         setConfirm(null);
         setBusy(true);
         try {
-          const { error } = await supabase.from("request_offers").delete().eq("id", myOffer.id).eq("helper_id", userId);
+          const { error } = await supabase
+            .from("request_offers")
+            .delete()
+            .eq("id", myOffer.id)
+            .eq("helper_id", userId);
+
           if (error) throw new Error(error.message);
+
           setMyOffer(null);
           showToast("Removed ✅", "ok");
           await loadEverything(userId, userEmail);
         } catch (e: any) {
-          showToast(e?.message || "Could not withdraw.", "err");
+          showToast(e?.message || "Could not withdraw offer.", "err");
         } finally {
           setBusy(false);
         }
@@ -503,12 +555,15 @@ export default function ItemDetailPage() {
 
     setBusy(true);
     try {
-      const { error: rpcErr } = await supabase.rpc("accept_request_offer_keep_others", { p_offer_id: offer.id });
+      const { error: rpcErr } = await supabase.rpc("accept_request_offer_keep_others", {
+        p_offer_id: offer.id,
+      });
       if (rpcErr) throw new Error(rpcErr.message);
+
       await loadEverything(userId, userEmail);
-      showToast("Accepted ✅ Chat unlocked.", "ok");
+      showToast("Accepted ✅", "ok");
     } catch (e: any) {
-      showToast(e?.message || "Could not accept.", "err");
+      showToast(e?.message || "Could not accept offer.", "err");
     } finally {
       setBusy(false);
     }
@@ -521,12 +576,17 @@ export default function ItemDetailPage() {
 
     setBusy(true);
     try {
-      const { error } = await supabase.from("request_offers").update({ status }).eq("id", offer.id);
+      const { error } = await supabase
+        .from("request_offers")
+        .update({ status })
+        .eq("id", offer.id);
+
       if (error) throw new Error(error.message);
+
       await loadEverything(userId, userEmail);
       showToast("Updated ✅", "ok");
     } catch (e: any) {
-      showToast(e?.message || "Could not update.", "err");
+      showToast(e?.message || "Could not update offer.", "err");
     } finally {
       setBusy(false);
     }
@@ -539,12 +599,15 @@ export default function ItemDetailPage() {
 
     setBusy(true);
     try {
-      const { error: rpcErr } = await supabase.rpc("complete_request_offer", { p_offer_id: offer.id });
+      const { error: rpcErr } = await supabase.rpc("complete_request_offer", {
+        p_offer_id: offer.id,
+      });
       if (rpcErr) throw new Error(rpcErr.message);
+
       await loadEverything(userId, userEmail);
       showToast("Marked completed ✅", "ok");
     } catch (e: any) {
-      showToast(e?.message || "Could not complete.", "err");
+      showToast(e?.message || "Could not complete offer.", "err");
     } finally {
       setBusy(false);
     }
@@ -556,7 +619,7 @@ export default function ItemDetailPage() {
 
     const st = (offer.status ?? "").toLowerCase();
     if (st !== "accepted" && st !== "completed") {
-      showToast("Chat unlocks only after acceptance.", "err");
+      showToast("Chat opens only after acceptance.", "err");
       return;
     }
     if (!item.owner_id) return showToast("Missing requester id.", "err");
@@ -572,7 +635,7 @@ export default function ItemDetailPage() {
       await insertSystemMessage({
         threadId,
         senderId: userId,
-        body: "✅ Chat opened for an accepted offer. Coordinate details here.",
+        body: "✅ Chat opened for an accepted offer.",
       });
 
       router.push(`/messages/${threadId}`);
@@ -583,15 +646,14 @@ export default function ItemDetailPage() {
     }
   }
 
-  // -------- Boot: single session + auth listener --------
   useEffect(() => {
     if (!itemId) return;
 
     (async () => {
       const { data } = await supabase.auth.getSession();
-      const s = data.session;
-      const uid = s?.user?.id ?? null;
-      const email = s?.user?.email ?? null;
+      const session = data.session;
+      const uid = session?.user?.id ?? null;
+      const email = session?.user?.email ?? null;
       setUserId(uid);
       setUserEmail(email);
       await loadEverything(uid, email);
@@ -606,10 +668,8 @@ export default function ItemDetailPage() {
     });
 
     return () => sub.subscription.unsubscribe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId]);
 
-  // esc closes modals
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
@@ -623,25 +683,37 @@ export default function ItemDetailPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+    };
+  }, []);
+
   const headerSubtitle = useMemo(() => {
     if (!item) return "";
     if (postType === "request") {
-      const parts = [
+      return [
         requestGroupLabel(item.request_group),
         item.request_timeframe ? requestTimeframeLabel(item.request_timeframe) : "",
-        item.request_location ? item.request_location : "",
-      ].filter(Boolean);
-      return parts.join(" • ");
+        item.request_location?.trim() ? item.request_location : "",
+      ]
+        .filter(Boolean)
+        .join(" • ");
     }
-    const parts = [item.category ? `Category: ${item.category}` : "", item.pickup_location ? `Pickup: ${item.pickup_location}` : ""].filter(Boolean);
-    return parts.join(" • ");
+
+    return [
+      item.category?.trim() ? item.category : "",
+      item.pickup_location?.trim() ? item.pickup_location : "",
+    ]
+      .filter(Boolean)
+      .join(" • ");
   }, [item, postType]);
 
   const ownerLabel = useMemo(() => {
     if (!item) return "Ashland user";
     if (item.is_anonymous) return "Anonymous";
-    const nm = (owner?.full_name ?? "").trim();
-    return nm ? nm : "Ashland user";
+    const name = (owner?.full_name ?? "").trim();
+    return name || "Ashland user";
   }, [item, owner]);
 
   const ownerRole = useMemo(() => {
@@ -651,11 +723,11 @@ export default function ItemDetailPage() {
 
   const primaryCTA = useMemo(() => {
     if (!item) return { label: "Loading…", disabled: true, onClick: () => {} };
-    const itemStatus = (item.status ?? "available").toLowerCase();
 
     if (postType === "give") {
       if (isMinePost) return { label: "Your listing", disabled: true, onClick: () => {} };
-      if (!isLoggedIn) return { label: "Request (login)", disabled: false, onClick: () => router.push("/me") };
+      if (!isLoggedIn)
+        return { label: "Request item", disabled: false, onClick: () => router.push("/me") };
       if (mineInterested) {
         if (interestReserved) return { label: "Reserved ✅", disabled: true, onClick: () => {} };
         if (interestAccepted) return { label: "Accepted ✅", disabled: true, onClick: () => {} };
@@ -665,10 +737,16 @@ export default function ItemDetailPage() {
       return { label: "Request item", disabled: false, onClick: () => setShowInterestModal(true) };
     }
 
-    // request
     if (isMinePost) return { label: "View offers below", disabled: true, onClick: () => {} };
-    if (!isLoggedIn) return { label: "Offer help (login)", disabled: false, onClick: () => router.push("/me") };
-    if (myOffer?.id) return { label: `Offer sent • ${offerStatusLabel(myOffer.status ?? "pending")}`, disabled: true, onClick: () => {} };
+    if (!isLoggedIn)
+      return { label: "Offer help", disabled: false, onClick: () => router.push("/me") };
+    if (myOffer?.id)
+      return {
+        label: `Offer sent • ${offerStatusLabel(myOffer.status ?? "pending")}`,
+        disabled: true,
+        onClick: () => {},
+      };
+
     return { label: "Offer help", disabled: false, onClick: () => setShowOfferModal(true) };
   }, [
     item,
@@ -678,36 +756,36 @@ export default function ItemDetailPage() {
     mineInterested,
     interestReserved,
     interestAccepted,
+    itemStatus,
     router,
     myOffer,
   ]);
 
-  // ✅ This is the key: action bar sits ABOVE your global nav
   const bottomOffset = `calc(${APP_NAV_HEIGHT_PX}px + env(safe-area-inset-bottom) + 10px)`;
-
-  // ✅ This is the key: page gets enough bottom padding for BOTH bars
-  const pageBottomPad = `calc(${APP_NAV_HEIGHT_PX}px + ${ACTION_BAR_HEIGHT_PX}px + env(safe-area-inset-bottom) + 20px)`;
+  const pageBottomPad = `calc(${APP_NAV_HEIGHT_PX}px + ${ACTION_BAR_HEIGHT_PX}px + env(safe-area-inset-bottom) + 22px)`;
 
   return (
     <div className="page" style={{ paddingBottom: pageBottomPad as any }}>
       <header className="top">
-        <button className="navBtn" onClick={() => router.back()} aria-label="Back">
+        <button className="iconBtn" onClick={() => router.back()} aria-label="Back">
           ←
         </button>
 
-        <div className="brand">
+        <div className="brandBlock">
+          <div className="brandEyebrow">{postType === "request" ? "REQUEST" : "ITEM"}</div>
           <div className="brandTitle">ScholarSwap</div>
-          <div className="brandSub">Exchange • Help • Reuse</div>
         </div>
 
-        {/* Desktop-only quick buttons (mobile already has bottom nav) */}
-        <div className="navRight">
-          <button className="navChip" onClick={() => router.push("/feed")}>
-            Feed
-          </button>
-          <button className="navChip" onClick={() => router.push("/me")}>
-            Account
-          </button>
+        <div className="topRight">
+          {isMinePost ? (
+            <button className="chipBtn" onClick={() => router.push(`/edit/${itemId}`)}>
+              Edit
+            </button>
+          ) : (
+            <button className="chipBtn" onClick={() => router.push("/feed")}>
+              Feed
+            </button>
+          )}
         </div>
       </header>
 
@@ -716,65 +794,122 @@ export default function ItemDetailPage() {
 
       {!loading && item && (
         <main className="wrap">
-          <div className="titleRow">
-            <div className="titleLeft">
-              <h1 className="h1">{item.title}</h1>
-              {headerSubtitle ? <div className="sub">{headerSubtitle}</div> : null}
-
-              <div className="metaLine">
-                <span className="metaKey">{postType === "give" ? "Lister" : "Poster"}:</span>{" "}
-                <span className="metaVal">
-                  {ownerLabel}
-                  {ownerRole ? <span className="muted"> ({ownerRole})</span> : null}
-                </span>
-
-                {postType === "give" ? (
-                  <>
-                    <span className="dot">•</span>
-                    <span className="metaVal">{interestCount} requests</span>
-                  </>
-                ) : null}
-
-                <span className="dot">•</span>
-                <span className="metaVal">
-                  Auto-archives: {item.expires_at ? new Date(item.expires_at).toLocaleDateString() : "—"}{" "}
-                  <span className="muted">({expiryText})</span>
-                </span>
-              </div>
+          <section className="heroCard">
+            <div className="heroMedia">
+              {postType === "give" ? (
+                item.photo_url ? (
+                  <button className="imgBtn" onClick={() => setOpenImg(item.photo_url!)} type="button">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={item.photo_url} alt={item.title} className="heroImg" />
+                  </button>
+                ) : (
+                  <div className="emptyMedia">No photo uploaded</div>
+                )
+              ) : (
+                <div className="requestHero">
+                  <div className="requestHeroPills">
+                    <span className="miniPill blue">{requestGroupLabel(item.request_group)}</span>
+                    {item.request_timeframe ? (
+                      <span className="miniPill blue">{requestTimeframeLabel(item.request_timeframe)}</span>
+                    ) : null}
+                  </div>
+                  <div className="requestHeroText">
+                    {item.description?.trim() || "No extra details provided."}
+                  </div>
+                </div>
+              )}
             </div>
 
-            <span className={`typePill ${postType === "request" ? "req" : "give"}`}>
-              {postType === "request" ? "REQUEST" : "ITEM"}
-            </span>
-          </div>
+            <div className="heroBody">
+              <div className="titleRow">
+                <div className="titleWrap">
+                  <h1 className="h1">{item.title}</h1>
+                  {headerSubtitle ? <div className="sub">{headerSubtitle}</div> : null}
+                </div>
 
-          <section className="hero">
-            {postType === "give" ? (
-              item.photo_url ? (
-                <button className="heroMediaBtn" onClick={() => setOpenImg(item.photo_url!)} type="button" aria-label="Open photo">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={item.photo_url} alt={item.title} className="heroImg" />
-                </button>
-              ) : (
-                <div className="heroEmpty">No photo</div>
-              )
-            ) : (
-              <div className="heroReq">
-                <div className="heroReqLine">{headerSubtitle || "Request details"}</div>
-                <div className="heroReqBody">{item.description?.trim() ? item.description : "No extra details provided."}</div>
+                <span className={`pill ${toneClassForItem(item.status)}`}>
+                  {itemStatusLabel(item.status)}
+                </span>
               </div>
-            )}
+
+              <div className="metaStack">
+                <div className="metaCard">
+                  <div className="metaLabel">{postType === "give" ? "Posted by" : "Requester"}</div>
+                  <div className="metaValue">
+                    {ownerLabel}
+                    {ownerRole ? <span className="muted"> ({ownerRole})</span> : null}
+                  </div>
+                </div>
+
+                <div className="metaCard">
+                  <div className="metaLabel">Closes</div>
+                  <div className="metaValue">
+                    {item.expires_at ? prettyDate(item.expires_at) : "Until canceled"}
+                    <span className="muted"> • {expiryText}</span>
+                  </div>
+                </div>
+
+                {postType === "give" ? (
+                  <div className="metaCard">
+                    <div className="metaLabel">Interest</div>
+                    <div className="metaValue">{interestCount} request{interestCount === 1 ? "" : "s"}</div>
+                  </div>
+                ) : (
+                  <div className="metaCard">
+                    <div className="metaLabel">Offers</div>
+                    <div className="metaValue">{isMinePost ? offers.length : myOffer?.id ? "1 sent" : "Open"}</div>
+                  </div>
+                )}
+              </div>
+
+              {isMinePost && (
+                <div className="ownerActions">
+                  <button className="softBtn" onClick={() => router.push(`/edit/${item.id}`)}>
+                    Edit post
+                  </button>
+
+                  {postType === "give" ? (
+                    <button className="softBtn" onClick={() => router.push(`/manage/${item.id}`)}>
+                      Manage requests
+                    </button>
+                  ) : (
+                    <button className="softBtn" onClick={() => router.push("/messages")}>
+                      Messages
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           </section>
 
-          {postType === "give" ? (
+          {postType === "give" && (
             <section className="panel">
               <div className="panelTitle">Description</div>
-              <div className="panelBody">{item.description?.trim() ? item.description : "—"}</div>
+              <div className="panelBody">{item.description?.trim() || "No description added."}</div>
             </section>
-          ) : null}
+          )}
 
-          {/* REQUEST: offers list */}
-          {postType === "request" && isMinePost ? (
+          {postType === "request" && !isMinePost && (
+            <section className="panel">
+              <div className="panelTitle">What this person needs</div>
+              <div className="infoGrid">
+                <div className="infoBox">
+                  <div className="infoKey">Request type</div>
+                  <div className="infoVal">{requestGroupLabel(item.request_group)}</div>
+                </div>
+                <div className="infoBox">
+                  <div className="infoKey">Timeframe</div>
+                  <div className="infoVal">{requestTimeframeLabel(item.request_timeframe) || "—"}</div>
+                </div>
+                <div className="infoBox full">
+                  <div className="infoKey">Location</div>
+                  <div className="infoVal">{item.request_location?.trim() || "No location provided"}</div>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {postType === "request" && isMinePost && (
             <section className="panel">
               <div className="panelTop">
                 <div className="panelTitle">Offers</div>
@@ -782,56 +917,67 @@ export default function ItemDetailPage() {
               </div>
 
               {offers.length === 0 ? (
-                <div className="smallMuted">No offers yet.</div>
+                <div className="emptyState">No offers yet.</div>
               ) : (
                 <div className="offerList">
-                  {offers.map((o) => {
-                    const st = (o.status ?? "pending").toLowerCase();
-                    const helperName = o.helper?.full_name?.trim() ? o.helper.full_name : "Ashland user";
-                    const helperRole = o.helper?.user_role ? ` (${o.helper.user_role})` : "";
-                    const tone = statusTone(o.status ?? "pending");
+                  {offers.map((offer) => {
+                    const st = (offer.status ?? "pending").toLowerCase();
+                    const helperName = offer.helper?.full_name?.trim() || "Ashland user";
+                    const helperRole = offer.helper?.user_role ? ` (${offer.helper.user_role})` : "";
 
                     return (
-                      <div key={o.id} className="offerCard">
+                      <div key={offer.id} className="offerCard">
                         <div className="offerTop">
                           <div className="offerName">
                             {helperName}
                             <span className="muted">{helperRole}</span>
                           </div>
-                          <span className={`pill ${tone}`}>{offerStatusLabel(o.status)}</span>
+                          <span className={`pill ${toneClassForOffer(offer.status)}`}>
+                            {offerStatusLabel(offer.status)}
+                          </span>
                         </div>
 
-                        <div className="offerMeta">{o.availability ? `Availability: ${o.availability}` : "Availability: —"}</div>
-                        <div className="offerNote">{o.note ? o.note : <span className="muted">No note.</span>}</div>
+                        <div className="offerMeta">
+                          Availability: {offer.availability || "—"}
+                        </div>
+
+                        <div className="offerNote">
+                          {offer.note?.trim() || <span className="muted">No note added.</span>}
+                        </div>
 
                         <div className="offerActions">
                           {(st === "pending" || st === "hold") && (
-                            <button className="btn primary" onClick={() => acceptOfferAsRequester(o)} disabled={busy}>
+                            <button className="btn green" onClick={() => acceptOfferAsRequester(offer)} disabled={busy}>
                               Accept
                             </button>
                           )}
+
                           {st === "pending" && (
-                            <button className="btn softBlue" onClick={() => setOfferStatusAsRequester(o, "hold")} disabled={busy}>
+                            <button className="btn blue" onClick={() => setOfferStatusAsRequester(offer, "hold")} disabled={busy}>
                               Hold
                             </button>
                           )}
+
                           {st === "hold" && (
-                            <button className="btn ghost" onClick={() => setOfferStatusAsRequester(o, "pending")} disabled={busy}>
-                              Move to pending
+                            <button className="btn ghost" onClick={() => setOfferStatusAsRequester(offer, "pending")} disabled={busy}>
+                              Move back
                             </button>
                           )}
+
                           {(st === "accepted" || st === "completed") && (
-                            <button className="btn softGreen" onClick={() => openChatForOffer(o)} disabled={busy}>
+                            <button className="btn greenSoft" onClick={() => openChatForOffer(offer)} disabled={busy}>
                               Open chat
                             </button>
                           )}
+
                           {st === "accepted" && (
-                            <button className="btn softAmber" onClick={() => completeOfferAsRequester(o)} disabled={busy}>
+                            <button className="btn amber" onClick={() => completeOfferAsRequester(offer)} disabled={busy}>
                               Mark completed
                             </button>
                           )}
+
                           {(st === "pending" || st === "hold") && (
-                            <button className="btn danger" onClick={() => setOfferStatusAsRequester(o, "declined")} disabled={busy}>
+                            <button className="btn danger" onClick={() => setOfferStatusAsRequester(offer, "declined")} disabled={busy}>
                               Decline
                             </button>
                           )}
@@ -842,73 +988,71 @@ export default function ItemDetailPage() {
                 </div>
               )}
             </section>
-          ) : null}
+          )}
         </main>
       )}
 
-      {/* ✅ ACTION BAR ABOVE GLOBAL NAV */}
       {!loading && item && (
         <div className="actionBar" style={{ bottom: bottomOffset as any }}>
           <div className="barInner">
-            <button className={`cta ${primaryCTA.disabled ? "disabled" : ""}`} onClick={primaryCTA.onClick} disabled={primaryCTA.disabled || busy}>
+            <button
+              className={`cta primary ${primaryCTA.disabled ? "disabled" : ""}`}
+              onClick={primaryCTA.onClick}
+              disabled={primaryCTA.disabled || busy}
+            >
               {busy ? "Working…" : primaryCTA.label}
             </button>
 
             {postType === "give" ? (
-              <>
-                {interestAccepted && !isMinePost ? (
-                  <button className="cta ghost" onClick={confirmPickupAndChat} disabled={busy}>
-                    Confirm pickup & chat
-                  </button>
-                ) : (
-                  <button
-                    className={`cta ghost ${(!mineInterested || interestAccepted || interestReserved || isMinePost) ? "disabled" : ""}`}
-                    onClick={withdrawInterest}
-                    disabled={busy || !mineInterested || interestAccepted || interestReserved || isMinePost}
-                  >
-                    Withdraw
-                  </button>
-                )}
-              </>
+              interestAccepted && !isMinePost ? (
+                <button className="cta secondary" onClick={confirmPickupAndChat} disabled={busy}>
+                  Confirm & chat
+                </button>
+              ) : (
+                <button
+                  className={`cta secondary ${(!mineInterested || interestAccepted || interestReserved || isMinePost) ? "disabled" : ""}`}
+                  onClick={withdrawInterest}
+                  disabled={busy || !mineInterested || interestAccepted || interestReserved || isMinePost}
+                >
+                  Withdraw
+                </button>
+              )
+            ) : isMinePost ? (
+              <button className="cta secondary" onClick={() => router.push(`/edit/${item.id}`)} disabled={busy}>
+                Edit request
+              </button>
+            ) : myOffer?.id ? (
+              myOfferAccepted ? (
+                <button className="cta secondary" onClick={() => openChatForOffer(myOffer)} disabled={busy}>
+                  Start chat
+                </button>
+              ) : (
+                <button className="cta secondary" onClick={withdrawOffer} disabled={busy}>
+                  Withdraw
+                </button>
+              )
             ) : (
-              <>
-                {isMinePost ? (
-                  <button className="cta ghost" onClick={() => router.push("/messages")} disabled={busy}>
-                    Messages
-                  </button>
-                ) : myOffer?.id ? (
-                  myOfferAccepted ? (
-                    <button className="cta ghost" onClick={() => openChatForOffer(myOffer)} disabled={busy}>
-                      Start chat
-                    </button>
-                  ) : (
-                    <button className="cta ghost" onClick={withdrawOffer} disabled={busy}>
-                      Withdraw
-                    </button>
-                  )
-                ) : (
-                  <button className="cta ghost" onClick={() => router.push("/me")} disabled={busy}>
-                    Account
-                  </button>
-                )}
-              </>
+              <button className="cta secondary" onClick={() => router.push("/me")} disabled={busy}>
+                Account
+              </button>
             )}
           </div>
         </div>
       )}
 
-      {/* GIVE modal */}
       {postType === "give" && showInterestModal && (
         <div className="modal" onClick={() => setShowInterestModal(false)}>
           <div className="modalInner" onClick={(e) => e.stopPropagation()}>
             <div className="modalTop">
               <div className="modalTitle">Request this item</div>
-              <button className="x" onClick={() => setShowInterestModal(false)}>
+              <button className="xBtn" onClick={() => setShowInterestModal(false)}>
                 ✕
               </button>
             </div>
 
-            <div className="modalHint">Tell the lister when you can pick up.</div>
+            <div className="modalHint">
+              Let the owner know when you can meet.
+            </div>
 
             <div className="field">
               <label>Earliest pickup</label>
@@ -930,14 +1074,18 @@ export default function ItemDetailPage() {
 
             <div className="field">
               <label>Optional note</label>
-              <textarea value={interestNote} onChange={(e) => setInterestNote(e.target.value)} placeholder="Example: I can meet at the library after 3pm." />
+              <textarea
+                value={interestNote}
+                onChange={(e) => setInterestNote(e.target.value)}
+                placeholder="Example: I can meet after class near the library."
+              />
             </div>
 
             <div className="modalActions">
               <button className="btn ghost" onClick={() => setShowInterestModal(false)}>
                 Cancel
               </button>
-              <button className="btn softGreen" onClick={submitInterest} disabled={busy}>
+              <button className="btn green" onClick={submitInterest} disabled={busy}>
                 {busy ? "Sending…" : "Send request"}
               </button>
             </div>
@@ -945,18 +1093,19 @@ export default function ItemDetailPage() {
         </div>
       )}
 
-      {/* REQUEST modal */}
       {postType === "request" && showOfferModal && (
         <div className="modal" onClick={() => setShowOfferModal(false)}>
           <div className="modalInner" onClick={(e) => e.stopPropagation()}>
             <div className="modalTop">
               <div className="modalTitle">Offer help</div>
-              <button className="x" onClick={() => setShowOfferModal(false)}>
+              <button className="xBtn" onClick={() => setShowOfferModal(false)}>
                 ✕
               </button>
             </div>
 
-            <div className="modalHint">Chat unlocks only if the requester accepts your offer.</div>
+            <div className="modalHint">
+              Chat unlocks only if the requester accepts your offer.
+            </div>
 
             <div className="field">
               <label>Availability</label>
@@ -970,14 +1119,18 @@ export default function ItemDetailPage() {
 
             <div className="field">
               <label>Optional note</label>
-              <textarea value={offerNote} onChange={(e) => setOfferNote(e.target.value)} placeholder="Example: I can drive after 5pm. I have room for 2 bags." />
+              <textarea
+                value={offerNote}
+                onChange={(e) => setOfferNote(e.target.value)}
+                placeholder="Example: I can help after 5pm."
+              />
             </div>
 
             <div className="modalActions">
               <button className="btn ghost" onClick={() => setShowOfferModal(false)}>
                 Cancel
               </button>
-              <button className="btn softGreen" onClick={submitOffer} disabled={busy}>
+              <button className="btn green" onClick={submitOffer} disabled={busy}>
                 {busy ? "Sending…" : "Send offer"}
               </button>
             </div>
@@ -985,22 +1138,23 @@ export default function ItemDetailPage() {
         </div>
       )}
 
-      {/* Confirm modal */}
       {confirm && (
         <div className="modal" onClick={() => setConfirm(null)}>
           <div className="modalInner" onClick={(e) => e.stopPropagation()}>
             <div className="modalTop">
               <div className="modalTitle">{confirm.title}</div>
-              <button className="x" onClick={() => setConfirm(null)}>
+              <button className="xBtn" onClick={() => setConfirm(null)}>
                 ✕
               </button>
             </div>
+
             <div className="modalHint">{confirm.body}</div>
+
             <div className="modalActions">
               <button className="btn ghost" onClick={() => setConfirm(null)}>
                 Cancel
               </button>
-              <button className={`btn ${confirm.danger ? "danger" : "softGreen"}`} onClick={confirm.onYes}>
+              <button className={`btn ${confirm.danger ? "danger" : "green"}`} onClick={confirm.onYes}>
                 {confirm.actionLabel}
               </button>
             </div>
@@ -1008,13 +1162,12 @@ export default function ItemDetailPage() {
         </div>
       )}
 
-      {/* Image modal */}
       {openImg && item && (
         <div className="imgModal" onClick={() => setOpenImg(null)}>
           <div className="imgInner" onClick={(e) => e.stopPropagation()}>
             <div className="imgTop">
               <div className="imgTitle">{item.title}</div>
-              <button className="x" onClick={() => setOpenImg(null)}>
+              <button className="xBtn" onClick={() => setOpenImg(null)}>
                 ✕
               </button>
             </div>
@@ -1024,7 +1177,6 @@ export default function ItemDetailPage() {
         </div>
       )}
 
-      {/* Toast */}
       {toast && (
         <div className={`toast ${toast.kind === "err" ? "toastErr" : "toastOk"}`}>
           {toast.kind === "err" ? "⚠ " : "✓ "}
@@ -1035,8 +1187,8 @@ export default function ItemDetailPage() {
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background: #f7f7f8;
-          color: #111827;
+          background: linear-gradient(180deg, #f8fafc 0%, #f6f7fb 42%, #f8fafc 100%);
+          color: #0f172a;
           padding: 14px 14px 0;
         }
 
@@ -1047,150 +1199,98 @@ export default function ItemDetailPage() {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 10px;
+          gap: 12px;
           padding: 10px 0;
-          background: rgba(247, 247, 248, 0.86);
-          backdrop-filter: blur(12px);
-          border-bottom: 1px solid rgba(17, 24, 39, 0.08);
+          background: rgba(248, 250, 252, 0.9);
+          backdrop-filter: blur(14px);
+          border-bottom: 1px solid rgba(15, 23, 42, 0.06);
         }
 
-        .navBtn {
-          width: 42px;
-          height: 42px;
-          border-radius: 14px;
+        .iconBtn,
+        .chipBtn {
           border: 1px solid #e5e7eb;
-          background: #fff;
+          background: rgba(255, 255, 255, 0.92);
+          color: #0f172a;
+          border-radius: 16px;
+          font-weight: 900;
           cursor: pointer;
-          font-weight: 950;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
         }
 
-        .brand {
+        .iconBtn {
+          width: 44px;
+          height: 44px;
+        }
+
+        .chipBtn {
+          padding: 10px 14px;
+          white-space: nowrap;
+        }
+
+        .brandBlock {
+          min-width: 0;
+          flex: 1;
           display: grid;
           justify-items: center;
-          line-height: 1.1;
-          user-select: none;
-        }
-        .brandTitle {
-          font-weight: 950;
-          letter-spacing: -0.2px;
-        }
-        .brandSub {
-          font-size: 11px;
-          opacity: 0.7;
-          font-weight: 900;
+          line-height: 1.05;
         }
 
-        .navRight {
+        .brandEyebrow {
+          font-size: 11px;
+          font-weight: 1000;
+          color: #64748b;
+          letter-spacing: 0.12em;
+        }
+
+        .brandTitle {
+          font-size: 16px;
+          font-weight: 1000;
+          letter-spacing: -0.03em;
+        }
+
+        .topRight {
           display: flex;
           align-items: center;
-          gap: 8px;
-        }
-        .navChip {
-          border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          padding: 9px 10px;
-          font-weight: 900;
-          cursor: pointer;
-          box-shadow: 0 6px 16px rgba(0, 0, 0, 0.05);
+          justify-content: flex-end;
+          min-width: 64px;
         }
 
         .wrap {
-          max-width: 920px;
+          max-width: 980px;
           margin: 0 auto;
         }
 
         .alert {
-          margin: 10px 0;
+          margin: 12px 0;
           border: 1px solid #e5e7eb;
           background: #fff;
-          padding: 10px 12px;
-          border-radius: 14px;
+          padding: 12px 14px;
+          border-radius: 18px;
           font-weight: 900;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
+          box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
         }
+
         .alert.err {
-          border-color: rgba(185, 28, 28, 0.25);
-          background: rgba(185, 28, 28, 0.06);
-          color: #991b1b;
+          border-color: #fecdd3;
+          background: #fff1f2;
+          color: #9f1239;
         }
 
-        .titleRow {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 12px;
-          margin-top: 8px;
-        }
-
-        .h1 {
-          margin: 0;
-          font-size: 32px;
-          font-weight: 950;
-          letter-spacing: -0.5px;
-          line-height: 1.05;
-        }
-
-        .sub {
-          margin-top: 8px;
-          opacity: 0.75;
-          font-weight: 900;
-          color: #374151;
-          overflow-wrap: anywhere;
-        }
-
-        .metaLine {
-          margin-top: 10px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          align-items: center;
-          color: #374151;
-          font-weight: 800;
-        }
-        .metaKey {
-          opacity: 0.7;
-          font-weight: 900;
-        }
-        .metaVal {
-          font-weight: 900;
-        }
-        .dot {
-          opacity: 0.35;
-        }
-
-        .typePill {
-          flex: 0 0 auto;
-          border-radius: 999px;
-          padding: 7px 10px;
-          font-size: 12px;
-          font-weight: 950;
+        .heroCard {
+          margin-top: 12px;
+          background: rgba(255, 255, 255, 0.94);
           border: 1px solid #e5e7eb;
-          background: #fff;
-        }
-        .typePill.give {
-          border-color: rgba(16, 185, 129, 0.3);
-          background: rgba(16, 185, 129, 0.10);
-          color: #065f46;
-        }
-        .typePill.req {
-          border-color: rgba(34, 197, 94, 0.3);
-          background: rgba(34, 197, 94, 0.10);
-          color: #166534;
+          border-radius: 28px;
+          overflow: hidden;
+          box-shadow: 0 20px 50px rgba(15, 23, 42, 0.06);
         }
 
-        .muted {
-          opacity: 0.75;
-          font-weight: 900;
-          color: #374151;
+        .heroMedia {
+          border-bottom: 1px solid #eef2f7;
+          background: #f8fafc;
         }
 
-        .hero {
-          margin-top: 14px;
-        }
-
-        .heroMediaBtn {
+        .imgBtn {
           width: 100%;
           border: none;
           background: transparent;
@@ -1199,229 +1299,356 @@ export default function ItemDetailPage() {
         }
 
         .heroImg {
-          width: 100%;
-          height: 420px;
-          object-fit: cover;
-          border-radius: 18px;
-          border: 1px solid #e5e7eb;
           display: block;
-          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.10);
+          width: 100%;
+          height: 360px;
+          object-fit: cover;
         }
 
-        .heroEmpty {
-          width: 100%;
-          height: 260px;
-          border-radius: 18px;
-          border: 1px dashed rgba(107, 114, 128, 0.35);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          color: #6b7280;
-          font-weight: 950;
-          background: #ffffff;
+        .emptyMedia {
+          height: 220px;
+          display: grid;
+          place-items: center;
+          color: #64748b;
+          font-weight: 900;
+          background: linear-gradient(135deg, #f8fafc 0%, #ffffff 100%);
         }
 
-        .heroReq {
-          width: 100%;
-          min-height: 230px;
-          border-radius: 18px;
-          border: 1px solid rgba(16, 185, 129, 0.25);
-          background: linear-gradient(180deg, rgba(16, 185, 129, 0.10), rgba(255, 255, 255, 0.92));
-          padding: 16px;
-          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.08);
+        .requestHero {
+          padding: 18px;
+          min-height: 190px;
+          background: linear-gradient(135deg, #eff6ff 0%, #ffffff 100%);
           display: flex;
           flex-direction: column;
-          justify-content: flex-end;
+          justify-content: space-between;
         }
 
-        .heroReqLine {
-          font-weight: 950;
-          font-size: 13px;
-          opacity: 0.9;
-          color: #065f46;
+        .requestHeroPills {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
         }
 
-        .heroReqBody {
-          margin-top: 10px;
-          opacity: 0.9;
-          line-height: 1.55;
+        .requestHeroText {
+          margin-top: 18px;
+          font-size: 15px;
+          line-height: 1.6;
+          color: #0f172a;
           white-space: pre-wrap;
-          color: #111827;
+        }
+
+        .heroBody {
+          padding: 18px;
+        }
+
+        .titleRow {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        .titleWrap {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .h1 {
+          margin: 0;
+          font-size: 30px;
+          line-height: 1.05;
+          font-weight: 1000;
+          letter-spacing: -0.05em;
+          overflow-wrap: anywhere;
+        }
+
+        .sub {
+          margin-top: 8px;
+          color: #64748b;
+          font-weight: 800;
+          line-height: 1.45;
+        }
+
+        .metaStack {
+          margin-top: 16px;
+          display: grid;
+          gap: 10px;
+        }
+
+        .metaCard {
+          border: 1px solid #eef2f7;
+          background: #fff;
+          border-radius: 18px;
+          padding: 12px 14px;
+        }
+
+        .metaLabel {
+          font-size: 12px;
+          color: #64748b;
+          font-weight: 900;
+        }
+
+        .metaValue {
+          margin-top: 6px;
+          font-size: 14px;
+          color: #0f172a;
+          font-weight: 900;
+          line-height: 1.4;
+        }
+
+        .muted {
+          color: #64748b;
+          font-weight: 800;
+        }
+
+        .ownerActions {
+          margin-top: 16px;
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        .softBtn {
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          color: #0f172a;
+          padding: 11px 14px;
+          border-radius: 16px;
+          font-weight: 900;
+          cursor: pointer;
         }
 
         .panel {
           margin-top: 14px;
-          background: #fff;
+          background: rgba(255, 255, 255, 0.94);
           border: 1px solid #e5e7eb;
-          border-radius: 18px;
-          padding: 14px;
-          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.06);
+          border-radius: 24px;
+          padding: 16px;
+          box-shadow: 0 18px 44px rgba(15, 23, 42, 0.05);
         }
 
         .panelTop {
           display: flex;
           justify-content: space-between;
-          align-items: baseline;
           gap: 12px;
-          margin-bottom: 10px;
+          align-items: baseline;
+          margin-bottom: 12px;
         }
 
         .panelTitle {
-          font-weight: 950;
           font-size: 16px;
+          font-weight: 1000;
         }
 
         .panelBody {
-          opacity: 0.92;
-          line-height: 1.6;
+          color: #334155;
+          line-height: 1.65;
           white-space: pre-wrap;
-          color: #111827;
+        }
+
+        .infoGrid {
+          display: grid;
+          gap: 10px;
+          grid-template-columns: 1fr;
+        }
+
+        .infoBox {
+          border: 1px solid #eef2f7;
+          border-radius: 18px;
+          background: #fff;
+          padding: 12px 14px;
+        }
+
+        .infoBox.full {
+          grid-column: 1 / -1;
+        }
+
+        .infoKey {
+          font-size: 12px;
+          color: #64748b;
+          font-weight: 900;
+        }
+
+        .infoVal {
+          margin-top: 6px;
+          font-size: 14px;
+          color: #0f172a;
+          font-weight: 900;
         }
 
         .smallMuted {
+          color: #64748b;
           font-size: 13px;
-          opacity: 0.7;
           font-weight: 900;
-          color: #374151;
+        }
+
+        .emptyState {
+          border: 1px dashed #cbd5e1;
+          border-radius: 18px;
+          background: #f8fafc;
+          padding: 18px;
+          color: #64748b;
+          font-weight: 900;
+          text-align: center;
         }
 
         .offerList {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
 
         .offerCard {
-          border: 1px solid #e5e7eb;
-          border-radius: 16px;
-          padding: 12px;
+          border: 1px solid #eef2f7;
           background: #fff;
+          border-radius: 20px;
+          padding: 14px;
         }
 
         .offerTop {
           display: flex;
           justify-content: space-between;
           gap: 12px;
-          align-items: center;
           flex-wrap: wrap;
+          align-items: center;
         }
 
         .offerName {
-          font-weight: 950;
-          color: #111827;
+          font-weight: 1000;
+          color: #0f172a;
         }
 
         .offerMeta {
-          margin-top: 8px;
-          opacity: 0.85;
+          margin-top: 10px;
+          color: #64748b;
           font-size: 13px;
           font-weight: 900;
-          color: #374151;
         }
 
         .offerNote {
-          margin-top: 8px;
-          opacity: 0.92;
+          margin-top: 10px;
+          color: #334155;
           white-space: pre-wrap;
-          color: #111827;
+          line-height: 1.5;
         }
 
         .offerActions {
-          margin-top: 10px;
+          margin-top: 12px;
           display: flex;
           gap: 10px;
           flex-wrap: wrap;
         }
 
-        .pill {
-          padding: 6px 10px;
+        .pill,
+        .miniPill {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
           border-radius: 999px;
+          font-weight: 1000;
+        }
+
+        .pill {
+          padding: 7px 11px;
           font-size: 12px;
-          font-weight: 950;
           border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #111827;
         }
-        .toneGray {
-          border-color: rgba(107, 114, 128, 0.25);
-          background: rgba(107, 114, 128, 0.08);
-          color: #374151;
-        }
-        .toneGreen {
-          border-color: rgba(16, 185, 129, 0.30);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
-        }
-        .toneBlue {
-          border-color: rgba(59, 130, 246, 0.30);
-          background: rgba(59, 130, 246, 0.10);
+
+        .miniPill {
+          padding: 6px 10px;
+          font-size: 12px;
+          border: 1px solid #bfdbfe;
+          background: #dbeafe;
           color: #1d4ed8;
         }
+
+        .toneGray {
+          border-color: #d1d5db;
+          background: #f8fafc;
+          color: #475569;
+        }
+
+        .toneGreen {
+          border-color: #bbf7d0;
+          background: #ecfdf5;
+          color: #166534;
+        }
+
+        .toneBlue {
+          border-color: #bfdbfe;
+          background: #eff6ff;
+          color: #1d4ed8;
+        }
+
         .toneAmber {
-          border-color: rgba(234, 179, 8, 0.35);
-          background: rgba(234, 179, 8, 0.10);
+          border-color: #fde68a;
+          background: #fffbeb;
           color: #92400e;
         }
+
         .toneRed {
-          border-color: rgba(248, 113, 113, 0.35);
-          background: rgba(239, 68, 68, 0.08);
-          color: #991b1b;
+          border-color: #fecdd3;
+          background: #fff1f2;
+          color: #9f1239;
         }
 
         .btn {
-          border-radius: 14px;
-          padding: 10px 12px;
+          border-radius: 16px;
+          padding: 10px 13px;
+          font-weight: 900;
           cursor: pointer;
-          font-weight: 950;
           border: 1px solid #e5e7eb;
           background: #fff;
-          color: #111827;
+          color: #0f172a;
         }
-        .btn.primary {
-          border-color: rgba(16, 185, 129, 0.35);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
+
+        .btn.green {
+          border-color: #bbf7d0;
+          background: #ecfdf5;
+          color: #166534;
         }
-        .btn.softGreen {
-          border-color: rgba(16, 185, 129, 0.35);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
+
+        .btn.greenSoft {
+          border-color: #bbf7d0;
+          background: #ecfdf5;
+          color: #166534;
         }
-        .btn.softBlue {
-          border-color: rgba(59, 130, 246, 0.35);
-          background: rgba(59, 130, 246, 0.10);
+
+        .btn.blue {
+          border-color: #bfdbfe;
+          background: #eff6ff;
           color: #1d4ed8;
         }
-        .btn.softAmber {
-          border-color: rgba(234, 179, 8, 0.35);
-          background: rgba(234, 179, 8, 0.10);
+
+        .btn.amber {
+          border-color: #fde68a;
+          background: #fffbeb;
           color: #92400e;
         }
+
         .btn.danger {
-          border-color: rgba(185, 28, 28, 0.35);
-          background: rgba(185, 28, 28, 0.08);
-          color: #991b1b;
+          border-color: #fecdd3;
+          background: #fff1f2;
+          color: #9f1239;
         }
+
         .btn.ghost {
           background: #fff;
         }
 
-        /* ✅ Action bar ABOVE global nav */
         .actionBar {
           position: fixed;
           left: 0;
           right: 0;
           z-index: 70;
-          padding: 10px 14px;
-          background: rgba(247, 247, 248, 0.92);
+          padding: 10px 12px;
+          background: rgba(248, 250, 252, 0.92);
           backdrop-filter: blur(14px);
-          border: 1px solid rgba(17, 24, 39, 0.08);
-          border-left: none;
-          border-right: none;
-          box-shadow: 0 -18px 50px rgba(0, 0, 0, 0.10);
+          border-top: 1px solid rgba(15, 23, 42, 0.06);
+          box-shadow: 0 -18px 44px rgba(15, 23, 42, 0.08);
         }
 
         .barInner {
-          max-width: 920px;
+          max-width: 980px;
           margin: 0 auto;
           display: grid;
           grid-template-columns: 1.4fr 1fr;
@@ -1429,47 +1656,51 @@ export default function ItemDetailPage() {
         }
 
         .cta {
-          height: 48px;
-          border-radius: 16px;
-          border: 1px solid rgba(16, 185, 129, 0.35);
-          background: rgba(16, 185, 129, 0.14);
-          color: #065f46;
-          font-weight: 950;
+          height: 50px;
+          border-radius: 18px;
+          font-weight: 1000;
           cursor: pointer;
-          box-shadow: 0 18px 44px rgba(16, 185, 129, 0.12);
+          border: none;
+          white-space: nowrap;
         }
-        .cta.ghost {
-          border: 1px solid #e5e7eb;
+
+        .cta.primary {
+          background: #03133d;
+          color: #fff;
+          box-shadow: 0 18px 35px rgba(3, 19, 61, 0.2);
+        }
+
+        .cta.secondary {
           background: #fff;
-          color: #111827;
-          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.06);
+          color: #0f172a;
+          border: 1px solid #e5e7eb;
         }
+
         .cta.disabled {
-          opacity: 0.65;
+          opacity: 0.55;
           cursor: not-allowed;
           box-shadow: none;
         }
 
-        /* Modals */
         .modal {
           position: fixed;
           inset: 0;
-          background: rgba(17, 24, 39, 0.45);
+          z-index: 90;
+          background: rgba(15, 23, 42, 0.44);
           display: flex;
           align-items: center;
           justify-content: center;
           padding: 16px;
-          z-index: 90;
         }
 
         .modalInner {
           width: 100%;
           max-width: 520px;
-          border-radius: 18px;
-          border: 1px solid #e5e7eb;
           background: #fff;
-          padding: 14px;
-          box-shadow: 0 30px 80px rgba(0, 0, 0, 0.18);
+          border: 1px solid #e5e7eb;
+          border-radius: 24px;
+          padding: 16px;
+          box-shadow: 0 30px 80px rgba(15, 23, 42, 0.18);
         }
 
         .modalTop {
@@ -1481,26 +1712,25 @@ export default function ItemDetailPage() {
 
         .modalTitle {
           font-size: 16px;
-          font-weight: 950;
-          color: #111827;
+          font-weight: 1000;
+          color: #0f172a;
         }
 
-        .x {
-          background: #fff;
+        .xBtn {
           border: 1px solid #e5e7eb;
-          color: #111827;
-          padding: 6px 10px;
-          border-radius: 12px;
+          background: #fff;
+          color: #0f172a;
+          padding: 7px 11px;
+          border-radius: 14px;
           cursor: pointer;
-          font-weight: 950;
+          font-weight: 1000;
         }
 
         .modalHint {
           margin-top: 10px;
-          opacity: 0.85;
-          line-height: 1.45;
-          color: #374151;
+          color: #475569;
           font-weight: 700;
+          line-height: 1.45;
         }
 
         .field {
@@ -1509,72 +1739,72 @@ export default function ItemDetailPage() {
 
         .field label {
           display: block;
-          font-weight: 900;
           margin-bottom: 6px;
-          color: #111827;
+          color: #0f172a;
+          font-size: 13px;
+          font-weight: 900;
         }
 
         .field select,
         .field textarea {
           width: 100%;
           background: #fff;
-          color: #111827;
+          color: #0f172a;
           border: 1px solid #e5e7eb;
-          padding: 10px 12px;
-          border-radius: 14px;
+          border-radius: 16px;
+          padding: 12px 13px;
           outline: none;
           font-weight: 800;
         }
 
         .field textarea {
-          min-height: 90px;
+          min-height: 100px;
           resize: vertical;
         }
 
         .modalActions {
           margin-top: 14px;
           display: flex;
-          gap: 10px;
           justify-content: flex-end;
+          gap: 10px;
           flex-wrap: wrap;
         }
 
-        /* Image modal */
         .imgModal {
           position: fixed;
           inset: 0;
-          background: rgba(17, 24, 39, 0.70);
+          z-index: 9999;
+          background: rgba(15, 23, 42, 0.72);
           display: flex;
           align-items: center;
           justify-content: center;
-          padding: 20px;
-          z-index: 9999;
+          padding: 18px;
         }
 
         .imgInner {
-          width: min(1000px, 95vw);
+          width: min(1000px, 96vw);
           max-height: 90vh;
+          border-radius: 22px;
+          overflow: hidden;
           background: #fff;
           border: 1px solid #e5e7eb;
-          border-radius: 18px;
-          overflow: hidden;
           box-shadow: 0 30px 90px rgba(0, 0, 0, 0.22);
         }
 
         .imgTop {
           display: flex;
-          align-items: center;
           justify-content: space-between;
-          padding: 10px 12px;
+          gap: 10px;
+          align-items: center;
+          padding: 12px 14px;
           border-bottom: 1px solid #e5e7eb;
         }
 
         .imgTitle {
-          font-weight: 950;
+          font-weight: 1000;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
-          color: #111827;
         }
 
         .imgFull {
@@ -1586,33 +1816,40 @@ export default function ItemDetailPage() {
           background: #111827;
         }
 
-        /* Toast */
         .toast {
           position: fixed;
           left: 50%;
           transform: translateX(-50%);
+          top: 16px;
           z-index: 10000;
-          border-radius: 14px;
-          padding: 10px 12px;
-          border: 1px solid #e5e7eb;
+          border-radius: 16px;
+          padding: 10px 13px;
           background: #fff;
-          box-shadow: 0 18px 50px rgba(0, 0, 0, 0.14);
-          font-weight: 950;
+          border: 1px solid #e5e7eb;
+          box-shadow: 0 18px 50px rgba(15, 23, 42, 0.14);
+          font-weight: 1000;
           max-width: min(720px, calc(100vw - 24px));
-          width: fit-content;
-          color: #111827;
-        }
-        .toastOk {
-          border-color: rgba(16, 185, 129, 0.28);
-        }
-        .toastErr {
-          border-color: rgba(185, 28, 28, 0.28);
         }
 
-        @media (max-width: 820px) {
-          /* hide top-right quick buttons on smaller screens; bottom nav already exists */
-          .navRight {
-            display: none;
+        .toastOk {
+          border-color: #bbf7d0;
+        }
+
+        .toastErr {
+          border-color: #fecdd3;
+        }
+
+        @media (min-width: 760px) {
+          .heroImg {
+            height: 420px;
+          }
+
+          .metaStack {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+          }
+
+          .infoGrid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
           }
         }
 
@@ -1620,9 +1857,11 @@ export default function ItemDetailPage() {
           .h1 {
             font-size: 26px;
           }
+
           .heroImg {
-            height: 320px;
+            height: 300px;
           }
+
           .barInner {
             grid-template-columns: 1fr;
           }
