@@ -84,6 +84,8 @@ type DraftState = {
   eventFileName: string | null;
 };
 
+type ErrorSection = "media" | "title" | "details" | "options" | "account" | null;
+
 const ITEMS_TABLE = "items";
 const ITEM_PHOTOS_TABLE = "item_photos";
 const EVENTS_TABLE = "events";
@@ -94,11 +96,10 @@ const EVENT_FLYERS_BUCKET = "event-flyers";
 const MAX_ITEM_PHOTO_MB = 6;
 const MAX_EVENT_FLYER_MB = 8;
 
-const DRAFT_KEY = "scholarswap_create_draft_modern_v1";
+const DRAFT_KEY = "scholarswap_create_responsive_v2";
 const SUCCESS_ROUTE = "/feed";
-const STICKY_HEIGHT = 92;
 
-/* ------------------------------ utils ------------------------------ */
+/* ---------------- utilities ---------------- */
 
 function isAllowedImage(file: File) {
   return ["image/jpeg", "image/png", "image/webp"].includes(file.type);
@@ -238,7 +239,7 @@ function getDefaultDraft(): DraftState {
   };
 }
 
-/* ------------------------------ main ------------------------------ */
+/* ---------------- component ---------------- */
 
 export default function CreatePage() {
   const router = useRouter();
@@ -246,11 +247,11 @@ export default function CreatePage() {
   const itemFileInputRef = useRef<HTMLInputElement | null>(null);
   const eventFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const topComposerRef = useRef<HTMLDivElement | null>(null);
-  const mediaSectionRef = useRef<HTMLDivElement | null>(null);
-  const titleSectionRef = useRef<HTMLDivElement | null>(null);
-  const detailsSectionRef = useRef<HTMLDivElement | null>(null);
-  const optionsSectionRef = useRef<HTMLDivElement | null>(null);
+  const topRef = useRef<HTMLDivElement | null>(null);
+  const mediaRef = useRef<HTMLDivElement | null>(null);
+  const titleRef = useRef<HTMLDivElement | null>(null);
+  const detailsRef = useRef<HTMLDivElement | null>(null);
+  const optionsRef = useRef<HTMLDivElement | null>(null);
 
   const [authLoading, setAuthLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(true);
@@ -270,7 +271,8 @@ export default function CreatePage() {
 
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
-  const [fieldError, setFieldError] = useState<string | null>(null);
+  const [fieldError, setFieldError] = useState<ErrorSection>(null);
+  const [isDesktop, setIsDesktop] = useState(false);
 
   const cleanTitle = useMemo(() => draft.title.trim(), [draft.title]);
   const cleanDesc = useMemo(() => draft.description.trim(), [draft.description]);
@@ -287,6 +289,15 @@ export default function CreatePage() {
 
   const isAshland = useMemo(() => !!email && email.toLowerCase().endsWith("@ashland.edu"), [email]);
   const isLoggedIn = !!userId && !!email && isAshland;
+
+  useEffect(() => {
+    const updateDevice = () => {
+      setIsDesktop(window.innerWidth >= 980);
+    };
+    updateDevice();
+    window.addEventListener("resize", updateDevice);
+    return () => window.removeEventListener("resize", updateDevice);
+  }, []);
 
   useEffect(() => {
     if (!itemFile) {
@@ -315,12 +326,10 @@ export default function CreatePage() {
         setHydratedDraft(true);
         return;
       }
-
       const parsed = JSON.parse(raw) as Partial<DraftState>;
-      const merged = { ...getDefaultDraft(), ...parsed };
-      setDraft(merged as DraftState);
+      setDraft({ ...getDefaultDraft(), ...parsed });
     } catch {
-      // ignore broken draft
+      // ignore broken storage
     } finally {
       setHydratedDraft(true);
     }
@@ -331,7 +340,7 @@ export default function CreatePage() {
     try {
       localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
     } catch {
-      // ignore
+      // ignore storage failure
     }
   }, [draft, hydratedDraft]);
 
@@ -403,7 +412,6 @@ export default function CreatePage() {
           .maybeSingle();
 
         if (!mounted) return;
-
         if (error) {
           setProfileComplete(false);
           return;
@@ -429,17 +437,28 @@ export default function CreatePage() {
     setFieldError(null);
   }
 
-  function resetComposer() {
-    setDraft(getDefaultDraft());
+  function resetComposer(keepMode = false) {
+    const nextMode = keepMode ? draft.mode : null;
+    setDraft({ ...getDefaultDraft(), mode: nextMode });
     setItemFile(null);
     setEventFile(null);
     setMsg(null);
     setFieldError(null);
-    try {
-      localStorage.removeItem(DRAFT_KEY);
-    } catch {
-      // ignore
+
+    if (!keepMode) {
+      try {
+        localStorage.removeItem(DRAFT_KEY);
+      } catch {
+        // ignore
+      }
     }
+  }
+
+  function goBackToModes() {
+    resetComposer(false);
+    requestAnimationFrame(() => {
+      topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   }
 
   function selectMode(mode: Mode) {
@@ -447,13 +466,10 @@ export default function CreatePage() {
     setFieldError(null);
     setItemFile(null);
     setEventFile(null);
-    setDraft({
-      ...getDefaultDraft(),
-      mode,
-    });
+    setDraft({ ...getDefaultDraft(), mode });
 
     requestAnimationFrame(() => {
-      topComposerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   }
 
@@ -470,14 +486,14 @@ export default function CreatePage() {
     if (!isAllowedImage(file)) {
       setMsg("Upload JPG, PNG, or WEBP.");
       setFieldError("media");
-      mediaSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      mediaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
     if (file.size > MAX_ITEM_PHOTO_MB * 1024 * 1024) {
       setMsg(`Image is too large. Max ${MAX_ITEM_PHOTO_MB}MB.`);
       setFieldError("media");
-      mediaSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      mediaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
@@ -498,14 +514,14 @@ export default function CreatePage() {
     if (!isAllowedImage(file)) {
       setMsg("Upload JPG, PNG, or WEBP.");
       setFieldError("media");
-      mediaSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      mediaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
     if (file.size > MAX_EVENT_FLYER_MB * 1024 * 1024) {
       setMsg(`Image is too large. Max ${MAX_EVENT_FLYER_MB}MB.`);
       setFieldError("media");
-      mediaSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      mediaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
 
@@ -516,47 +532,57 @@ export default function CreatePage() {
   const hasRequiredMedia =
     draft.mode === "request" ? true : draft.mode === "give" ? !!itemFile : draft.mode === "event" ? !!eventFile : false;
 
-  const hasBasicTitle = cleanTitle.length >= 3;
-  const hasBasicDescription = cleanDesc.length >= 3;
+  const hasTitle = cleanTitle.length >= 3;
+  const hasDesc = cleanDesc.length >= 3;
 
-  const detailsReady =
-    draft.mode === "give"
-      ? hasBasicTitle && hasBasicDescription
-      : draft.mode === "request"
-      ? hasBasicTitle && hasBasicDescription
-      : draft.mode === "event"
-      ? hasBasicTitle && hasBasicDescription && draft.hostOrg.trim().length > 0
-      : false;
-
-  const secondaryReady =
-    draft.mode === "give"
-      ? !!draft.giveCategory && !!draft.pickupLocation
-      : draft.mode === "request"
-      ? !!draft.requestGroup && !!draft.requestTimeframe
-      : draft.mode === "event"
-      ? !!draft.eventCategory &&
-        !!draft.eventLocation.trim() &&
-        !!draft.eventDate &&
-        !!draft.eventStartTime &&
-        !!eventStartIso &&
-        isValidHttpUrlMaybeEmpty(draft.eventLink) &&
-        !(draft.eventEndTime && eventEndIso && new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime())
-      : false;
-
-  const composerProgress = useMemo(() => {
+  const progressValue = useMemo(() => {
     if (!draft.mode) return 0;
-    let done = 0;
-    if (hasRequiredMedia) done += 1;
-    if (detailsReady) done += 1;
-    if (secondaryReady) done += 1;
-    return done / 3;
-  }, [draft.mode, hasRequiredMedia, detailsReady, secondaryReady]);
+    let score = 0;
+    if (hasRequiredMedia) score += 1;
+    if (hasTitle && hasDesc) score += 1;
+
+    if (draft.mode === "give" && draft.giveCategory && draft.pickupLocation) score += 1;
+    if (draft.mode === "request" && draft.requestGroup && draft.requestTimeframe) score += 1;
+    if (
+      draft.mode === "event" &&
+      draft.hostOrg.trim() &&
+      draft.eventCategory &&
+      draft.eventLocation.trim() &&
+      draft.eventDate &&
+      draft.eventStartTime &&
+      eventStartIso &&
+      isValidHttpUrlMaybeEmpty(draft.eventLink) &&
+      !(draft.eventEndTime && eventEndIso && new Date(eventEndIso).getTime() < new Date(eventStartIso).getTime())
+    ) {
+      score += 1;
+    }
+
+    return score / 3;
+  }, [
+    draft.mode,
+    hasRequiredMedia,
+    hasTitle,
+    hasDesc,
+    draft.giveCategory,
+    draft.pickupLocation,
+    draft.requestGroup,
+    draft.requestTimeframe,
+    draft.hostOrg,
+    draft.eventCategory,
+    draft.eventLocation,
+    draft.eventDate,
+    draft.eventStartTime,
+    draft.eventLink,
+    draft.eventEndTime,
+    eventStartIso,
+    eventEndIso,
+  ]);
 
   const eventTimeSummary = eventStartIso
     ? `${formatLongDateTime(eventStartIso)}${eventEndIso ? ` → ${formatLongDateTime(eventEndIso)}` : ""}`
     : "—";
 
-  function validateBeforeSubmit(): { message: string; section: "media" | "title" | "details" | "options" | "account" } | null {
+  function validateBeforeSubmit(): { message: string; section: ErrorSection } | null {
     if (!draft.mode) return { message: "Choose Give, Request, or Event first.", section: "account" };
     if (!isLoggedIn) return { message: "Log in with your @ashland.edu email to post.", section: "account" };
     if (!profileComplete) return { message: "Complete your profile first.", section: "account" };
@@ -564,7 +590,7 @@ export default function CreatePage() {
     if (draft.mode === "give") {
       if (!itemFile) return { message: "Add a photo to continue.", section: "media" };
       if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "title" };
-      if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
+      if (cleanDesc.length < 3) return { message: "Description is required.", section: "title" };
       if (!draft.giveCategory) return { message: "Choose a category.", section: "details" };
       if (!draft.pickupLocation) return { message: "Choose a pickup location.", section: "details" };
       return null;
@@ -572,7 +598,7 @@ export default function CreatePage() {
 
     if (draft.mode === "request") {
       if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "title" };
-      if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
+      if (cleanDesc.length < 3) return { message: "Description is required.", section: "title" };
       if (!draft.requestGroup) return { message: "Choose a request type.", section: "details" };
       if (!draft.requestTimeframe) return { message: "Choose a timeframe.", section: "details" };
       return null;
@@ -581,7 +607,7 @@ export default function CreatePage() {
     if (!eventFile) return { message: "Add a flyer image to continue.", section: "media" };
     if (cleanTitle.length < 3) return { message: "Title must be at least 3 characters.", section: "title" };
     if (!draft.hostOrg.trim()) return { message: "Host is required.", section: "details" };
-    if (cleanDesc.length < 3) return { message: "Description is required.", section: "details" };
+    if (cleanDesc.length < 3) return { message: "Description is required.", section: "title" };
     if (!draft.eventCategory) return { message: "Choose a category.", section: "details" };
     if (!draft.eventLocation.trim()) return { message: "Location is required.", section: "details" };
     if (!draft.eventDate) return { message: "Choose a date.", section: "details" };
@@ -601,12 +627,12 @@ export default function CreatePage() {
     return null;
   }
 
-  function scrollToSection(section: "media" | "title" | "details" | "options" | "account") {
-    if (section === "media") mediaSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    if (section === "title") titleSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    if (section === "details") detailsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    if (section === "options") optionsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    if (section === "account") topComposerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  function scrollToSection(section: ErrorSection) {
+    if (section === "media") mediaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (section === "title") titleRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (section === "details") detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (section === "options") optionsRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (section === "account") topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   async function handleSubmit() {
@@ -695,7 +721,7 @@ export default function CreatePage() {
           throw new Error(`Event created but image save failed: ${updErr.message}`);
         }
 
-        resetComposer();
+        resetComposer(false);
         router.push(SUCCESS_ROUTE);
         router.refresh();
         return;
@@ -743,7 +769,7 @@ export default function CreatePage() {
       const itemId = String(createdItem.id);
 
       if (postType === "request") {
-        resetComposer();
+        resetComposer(false);
         router.push(`/item/${itemId}`);
         router.refresh();
         return;
@@ -792,7 +818,7 @@ export default function CreatePage() {
         throw new Error(`Image metadata save failed: ${photoErr.message}`);
       }
 
-      resetComposer();
+      resetComposer(false);
       router.push(`/item/${itemId}`);
       router.refresh();
     } catch (err: any) {
@@ -802,52 +828,68 @@ export default function CreatePage() {
     }
   }
 
-  function renderPreviewCard() {
-    if (!draft.mode) {
-      return (
-        <div style={previewCard}>
-          <div style={{ fontSize: 18, fontWeight: 900 }}>Live preview</div>
-          <div style={{ marginTop: 8, color: "#64748b", lineHeight: 1.5 }}>
-            Choose a post type to start building your post. Your preview will update as you type.
+  function renderModePicker() {
+    return (
+      <div style={{ display: "grid", gap: 14 }}>
+        <button type="button" onClick={() => selectMode("give")} style={modeCard("warm")}>
+          <div style={modeIconBox}>🎁</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={modeTitle}>Give</div>
+            <div style={modeDesc}>Share something useful</div>
           </div>
-        </div>
-      );
-    }
+          <div style={modeArrow}>→</div>
+        </button>
+
+        <button type="button" onClick={() => selectMode("request")} style={modeCard("blue")}>
+          <div style={modeIconBox}>🤝</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={modeTitle}>Request</div>
+            <div style={modeDesc}>Ask the campus community</div>
+          </div>
+          <div style={modeArrow}>→</div>
+        </button>
+
+        <button type="button" onClick={() => selectMode("event")} style={modeCard("purple")}>
+          <div style={modeIconBox}>📅</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={modeTitle}>Event</div>
+            <div style={modeDesc}>Promote something happening</div>
+          </div>
+          <div style={modeArrow}>→</div>
+        </button>
+      </div>
+    );
+  }
+
+  function renderPreview() {
+    if (!draft.mode) return null;
 
     if (draft.mode === "give") {
       return (
         <div style={previewCard}>
-          <div style={previewMedia}>
+          <div style={previewMediaWrap}>
             {itemPreviewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={itemPreviewUrl} alt="Give preview" style={previewImage} />
+              <img src={itemPreviewUrl} alt="Item preview" style={previewImage} />
             ) : (
               <div style={previewPlaceholder}>
-                <div style={{ fontSize: 40 }}>📸</div>
+                <div style={{ fontSize: 36 }}>📸</div>
                 <div style={{ marginTop: 8 }}>Add a photo for your item</div>
               </div>
             )}
-
-            <div style={previewBadgeWarm}>GIVE</div>
+            <div style={previewBadge("#fff7ed", "#9a3412", "#fdba74")}>GIVE</div>
           </div>
 
           <div style={previewBody}>
-            <div style={previewMetaRow}>
-              <span>{giveCategoryLabel(draft.giveCategory)}</span>
-              <span>•</span>
-              <span>{draft.pickupLocation}</span>
+            <div style={previewMeta}>
+              {giveCategoryLabel(draft.giveCategory)} • {draft.pickupLocation}
             </div>
-
-            <div style={previewTitle}>{cleanTitle || "What are you sharing?"}</div>
-
+            <div style={previewHeadline}>{cleanTitle || "What are you sharing?"}</div>
             <div style={previewText}>
-              {cleanDesc || "Mention condition, quantity, and pickup info so others know exactly what you’re offering."}
+              {cleanDesc || "Mention condition, quantity, and pickup info so people understand the item immediately."}
             </div>
-
-            <div style={previewFooterRow}>
-              <span>{draft.hideName ? "Anonymous" : "Visible name"}</span>
-              <span>•</span>
-              <span>{expireChoiceLabel(draft.expireChoice)}</span>
+            <div style={previewFooter}>
+              {draft.hideName ? "Anonymous" : "Visible name"} • {expireChoiceLabel(draft.expireChoice)}
             </div>
           </div>
         </div>
@@ -857,36 +899,25 @@ export default function CreatePage() {
     if (draft.mode === "request") {
       return (
         <div style={previewCard}>
-          <div
-            style={{
-              ...previewMedia,
-              height: 148,
-              background: "linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%)",
-            }}
-          >
-            <div style={{ padding: 18, width: "100%", display: "flex", flexDirection: "column", justifyContent: "end" }}>
+          <div style={{ ...previewMediaWrap, height: 156, background: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)" }}>
+            <div style={{ padding: 18, width: "100%" }}>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <span style={miniTagBlue}>{requestGroupLabel(draft.requestGroup)}</span>
-                <span style={miniTagBlue}>{requestTimeframeLabel(draft.requestTimeframe)}</span>
+                <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>{requestGroupLabel(draft.requestGroup)}</span>
+                <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>{requestTimeframeLabel(draft.requestTimeframe)}</span>
               </div>
-
-              <div style={{ marginTop: 12, fontWeight: 950, fontSize: 23, lineHeight: 1.15 }}>
+              <div style={{ marginTop: 14, fontWeight: 1000, fontSize: 24, lineHeight: 1.15 }}>
                 {cleanTitle || "What do you need?"}
               </div>
             </div>
-
-            <div style={previewBadgeBlue}>REQUEST</div>
+            <div style={previewBadge("#eff6ff", "#1d4ed8", "#93c5fd")}>REQUEST</div>
           </div>
 
           <div style={previewBody}>
             <div style={previewText}>
-              {cleanDesc || "Tell the campus community what you need, why you need it, and when you need it."}
+              {cleanDesc || "Tell the campus community exactly what you need and when you need it."}
             </div>
-
-            <div style={previewFooterRow}>
-              <span>{draft.requestLocation.trim() || "No location added"}</span>
-              <span>•</span>
-              <span>{draft.hideName ? "Anonymous" : "Visible name"}</span>
+            <div style={previewFooter}>
+              {draft.requestLocation.trim() || "No location added"} • {draft.hideName ? "Anonymous" : "Visible name"}
             </div>
           </div>
         </div>
@@ -895,70 +926,31 @@ export default function CreatePage() {
 
     return (
       <div style={previewCard}>
-        <div style={previewMedia}>
+        <div style={previewMediaWrap}>
           {eventPreviewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={eventPreviewUrl} alt="Event preview" style={previewImage} />
           ) : (
             <div style={previewPlaceholder}>
-              <div style={{ fontSize: 40 }}>🎫</div>
+              <div style={{ fontSize: 36 }}>🎫</div>
               <div style={{ marginTop: 8 }}>Add a flyer for your event</div>
             </div>
           )}
-
-          <div style={previewBadgePurple}>EVENT</div>
+          <div style={previewBadge("#f5f3ff", "#6d28d9", "#c4b5fd")}>EVENT</div>
         </div>
 
         <div style={previewBody}>
-          <div style={previewMetaRow}>
-            <span>{eventCategoryLabel(draft.eventCategory)}</span>
-            <span>•</span>
-            <span>{draft.hostOrg.trim() || "Host"}</span>
+          <div style={previewMeta}>
+            {eventCategoryLabel(draft.eventCategory)} • {draft.hostOrg.trim() || "Host"}
           </div>
-
-          <div style={previewTitle}>{cleanTitle || "What’s your event called?"}</div>
-
-          <div style={{ marginTop: 8, fontSize: 13, color: "#7c3aed", fontWeight: 900 }}>
+          <div style={previewHeadline}>{cleanTitle || "What’s your event called?"}</div>
+          <div style={{ marginTop: 8, fontSize: 13, fontWeight: 900, color: "#6d28d9" }}>
             📍 {draft.eventLocation.trim() || "Location"} • {eventTimeSummary}
           </div>
-
           <div style={previewText}>
-            {cleanDesc || "What should students know before joining? Share the details that make the event worth attending."}
+            {cleanDesc || "What should students know before joining? Make the value of the event obvious."}
           </div>
         </div>
-      </div>
-    );
-  }
-
-  function renderModePicker() {
-    return (
-      <div style={{ display: "grid", gap: 14 }}>
-        <button type="button" onClick={() => selectMode("give")} style={heroCard(draft.mode === "give", "warm")}>
-          <div style={heroIcon}>🎁</div>
-          <div style={{ flex: 1 }}>
-            <div style={heroTitle}>Give</div>
-            <div style={heroDesc}>Share something useful</div>
-          </div>
-          <div style={heroArrow}>→</div>
-        </button>
-
-        <button type="button" onClick={() => selectMode("request")} style={heroCard(draft.mode === "request", "blue")}>
-          <div style={heroIcon}>🤝</div>
-          <div style={{ flex: 1 }}>
-            <div style={heroTitle}>Request</div>
-            <div style={heroDesc}>Ask the campus community</div>
-          </div>
-          <div style={heroArrow}>→</div>
-        </button>
-
-        <button type="button" onClick={() => selectMode("event")} style={heroCard(draft.mode === "event", "purple")}>
-          <div style={heroIcon}>📅</div>
-          <div style={{ flex: 1 }}>
-            <div style={heroTitle}>Event</div>
-            <div style={heroDesc}>Promote something happening</div>
-          </div>
-          <div style={heroArrow}>→</div>
-        </button>
       </div>
     );
   }
@@ -968,17 +960,19 @@ export default function CreatePage() {
 
     const isGive = draft.mode === "give";
     const file = isGive ? itemFile : eventFile;
-    const previewUrl = isGive ? itemPreviewUrl : eventPreviewUrl;
+    const preview = isGive ? itemPreviewUrl : eventPreviewUrl;
     const savedName = isGive ? draft.itemFileName : draft.eventFileName;
 
     return (
-      <section ref={mediaSectionRef} style={sectionWrap(fieldError === "media")}>
-        <div style={sectionLabel}>Media</div>
-        <div style={sectionTitle}>{isGive ? "Start with a photo" : "Start with a flyer"}</div>
+      <section ref={mediaRef} style={sectionStyle(fieldError === "media")}>
+        <div style={sectionEyebrow}>Media</div>
+        <div style={sectionTitle}>
+          {isGive ? "Start with a photo" : "Start with a flyer"}
+        </div>
         <div style={sectionSub}>
           {isGive
-            ? "Posts feel more real when people see the item first."
-            : "A good flyer makes your event look worth opening."}
+            ? "Show the item first so the post feels real immediately."
+            : "A flyer makes the event feel alive before anyone reads the text."}
         </div>
 
         <input
@@ -992,18 +986,18 @@ export default function CreatePage() {
         <button
           type="button"
           onClick={() => (isGive ? itemFileInputRef.current?.click() : eventFileInputRef.current?.click())}
-          style={uploadHeroButton}
+          style={uploadCard}
         >
-          {previewUrl ? (
+          {preview ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={previewUrl} alt="Preview" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            <img src={preview} alt="Upload preview" style={previewImage} />
           ) : (
-            <div style={uploadHeroInner}>
-              <div style={{ fontSize: 44 }}>{isGive ? "📷" : "🪄"}</div>
-              <div style={{ marginTop: 10, fontWeight: 900, fontSize: 18 }}>
+            <div style={uploadCardInner}>
+              <div style={{ fontSize: 42 }}>{isGive ? "📷" : "🪄"}</div>
+              <div style={{ marginTop: 10, fontWeight: 1000, fontSize: 18 }}>
                 {isGive ? "Upload item photo" : "Upload event flyer"}
               </div>
-              <div style={{ marginTop: 6, fontSize: 14, color: "#64748b" }}>JPG, PNG, or WEBP</div>
+              <div style={{ marginTop: 6, color: "#64748b", fontSize: 14 }}>JPG, PNG, or WEBP</div>
             </div>
           )}
 
@@ -1018,8 +1012,8 @@ export default function CreatePage() {
           {file && (
             <button
               type="button"
-              style={smallDangerBtn}
               onClick={() => (isGive ? pickItemFile(null) : pickEventFile(null))}
+              style={smallDangerBtn}
             >
               Remove
             </button>
@@ -1032,23 +1026,9 @@ export default function CreatePage() {
   function renderTitleSection() {
     if (!draft.mode) return null;
 
-    const titlePlaceholder =
-      draft.mode === "give"
-        ? "What are you sharing?"
-        : draft.mode === "request"
-        ? "What do you need?"
-        : "What’s your event called?";
-
-    const descPlaceholder =
-      draft.mode === "give"
-        ? "Mention condition, quantity, and pickup info."
-        : draft.mode === "request"
-        ? "What exactly do you need, and by when?"
-        : "What should students know before joining?";
-
     return (
-      <section ref={titleSectionRef} style={sectionWrap(fieldError === "title")}>
-        <div style={sectionLabel}>Message</div>
+      <section ref={titleRef} style={sectionStyle(fieldError === "title")}>
+        <div style={sectionEyebrow}>Message</div>
         <div style={sectionTitle}>
           {draft.mode === "request" ? "Write the ask" : "Write the post"}
         </div>
@@ -1057,22 +1037,34 @@ export default function CreatePage() {
           value={draft.title}
           onChange={(e) => patchDraft("title", e.target.value)}
           style={headlineInput}
-          placeholder={titlePlaceholder}
-          autoFocus={draft.mode === "request"}
+          placeholder={
+            draft.mode === "give"
+              ? "What are you sharing?"
+              : draft.mode === "request"
+              ? "What do you need?"
+              : "What’s your event called?"
+          }
+          autoFocus
         />
 
         <textarea
           value={draft.description}
           onChange={(e) => patchDraft("description", e.target.value)}
-          style={editorTextarea}
+          style={editorTextArea}
           rows={5}
-          placeholder={descPlaceholder}
+          placeholder={
+            draft.mode === "give"
+              ? "Mention condition, quantity, and pickup info."
+              : draft.mode === "request"
+              ? "What exactly do you need, and by when?"
+              : "What should students know before joining?"
+          }
         />
 
         <div style={helperText}>
-          {draft.mode === "give" && "Tip: clear condition + pickup info gets more responses."}
-          {draft.mode === "request" && "Tip: be specific so people know whether they can help."}
-          {draft.mode === "event" && "Tip: focus on why someone should show up."}
+          {draft.mode === "give" && "Tip: the simpler and clearer the item description, the faster it gets picked up."}
+          {draft.mode === "request" && "Tip: specific asks get better responses than vague ones."}
+          {draft.mode === "event" && "Tip: focus on why someone should care enough to attend."}
         </div>
       </section>
     );
@@ -1083,12 +1075,12 @@ export default function CreatePage() {
 
     if (draft.mode === "give") {
       return (
-        <section ref={detailsSectionRef} style={sectionWrap(fieldError === "details")}>
-          <div style={sectionLabel}>Details</div>
-          <div style={sectionTitle}>Help people understand the item</div>
+        <section ref={detailsRef} style={sectionStyle(fieldError === "details")}>
+          <div style={sectionEyebrow}>Details</div>
+          <div style={sectionTitle}>Make the item easy to understand</div>
 
           <div style={{ marginTop: 16 }}>
-            <div style={chipLabel}>Category</div>
+            <div style={fieldLabel}>Category</div>
             <div style={chipWrap}>
               {(["books", "notes", "electronics", "furniture", "clothing", "others"] as GiveCategory[]).map((v) => (
                 <button
@@ -1104,7 +1096,7 @@ export default function CreatePage() {
           </div>
 
           <div style={{ marginTop: 18 }}>
-            <div style={chipLabel}>Pickup</div>
+            <div style={fieldLabel}>Pickup</div>
             <div style={chipWrap}>
               {(
                 [
@@ -1132,12 +1124,12 @@ export default function CreatePage() {
 
     if (draft.mode === "request") {
       return (
-        <section ref={detailsSectionRef} style={sectionWrap(fieldError === "details")}>
-          <div style={sectionLabel}>Details</div>
+        <section ref={detailsRef} style={sectionStyle(fieldError === "details")}>
+          <div style={sectionEyebrow}>Details</div>
           <div style={sectionTitle}>Make your request easy to respond to</div>
 
           <div style={{ marginTop: 16 }}>
-            <div style={chipLabel}>Request type</div>
+            <div style={fieldLabel}>Request type</div>
             <div style={chipWrap}>
               {(["logistics", "services", "urgent", "collaboration", "lost & found"] as RequestGroup[]).map((v) => (
                 <button
@@ -1153,7 +1145,7 @@ export default function CreatePage() {
           </div>
 
           <div style={{ marginTop: 18 }}>
-            <div style={chipLabel}>Timeframe</div>
+            <div style={fieldLabel}>Timeframe</div>
             <div style={chipWrap}>
               {(["today", "this_week", "flexible"] as RequestTimeframe[]).map((v) => (
                 <button
@@ -1169,7 +1161,7 @@ export default function CreatePage() {
           </div>
 
           <div style={{ marginTop: 18 }}>
-            <div style={chipLabel}>Location</div>
+            <div style={fieldLabel}>Location</div>
             <input
               value={draft.requestLocation}
               onChange={(e) => patchDraft("requestLocation", e.target.value)}
@@ -1182,14 +1174,14 @@ export default function CreatePage() {
     }
 
     return (
-      <section ref={detailsSectionRef} style={sectionWrap(fieldError === "details")}>
-        <div style={sectionLabel}>Details</div>
+      <section ref={detailsRef} style={sectionStyle(fieldError === "details")}>
+        <div style={sectionEyebrow}>Details</div>
         <div style={sectionTitle}>Build the event like a real flyer</div>
 
         <div style={{ marginTop: 16 }}>
-          <div style={chipLabel}>Category</div>
+          <div style={fieldLabel}>Category</div>
           <div style={chipWrap}>
-            {(["career", "club", "sports", "music", "arts", "academic", "social", "volunteering", "other"] as EventCategory[]).map((v) => (
+            {(["career", "club", "sports", "music", "arts", "volunteering", "academic", "social", "other"] as EventCategory[]).map((v) => (
               <button
                 key={v}
                 type="button"
@@ -1204,7 +1196,7 @@ export default function CreatePage() {
 
         <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
           <div>
-            <div style={chipLabel}>Host</div>
+            <div style={fieldLabel}>Host</div>
             <input
               value={draft.hostOrg}
               onChange={(e) => patchDraft("hostOrg", e.target.value)}
@@ -1214,7 +1206,7 @@ export default function CreatePage() {
           </div>
 
           <div>
-            <div style={chipLabel}>Location</div>
+            <div style={fieldLabel}>Location</div>
             <input
               value={draft.eventLocation}
               onChange={(e) => patchDraft("eventLocation", e.target.value)}
@@ -1223,9 +1215,9 @@ export default function CreatePage() {
             />
           </div>
 
-          <div style={grid2}>
+          <div style={twoCol}>
             <div>
-              <div style={chipLabel}>Date</div>
+              <div style={fieldLabel}>Date</div>
               <input
                 type="date"
                 value={draft.eventDate}
@@ -1234,7 +1226,7 @@ export default function CreatePage() {
               />
             </div>
             <div>
-              <div style={chipLabel}>Start time</div>
+              <div style={fieldLabel}>Start time</div>
               <input
                 type="time"
                 value={draft.eventStartTime}
@@ -1244,9 +1236,9 @@ export default function CreatePage() {
             </div>
           </div>
 
-          <div style={grid2}>
+          <div style={twoCol}>
             <div>
-              <div style={chipLabel}>End time</div>
+              <div style={fieldLabel}>End time</div>
               <input
                 type="time"
                 value={draft.eventEndTime}
@@ -1255,7 +1247,7 @@ export default function CreatePage() {
               />
             </div>
             <div>
-              <div style={chipLabel}>Link</div>
+              <div style={fieldLabel}>Link</div>
               <input
                 value={draft.eventLink}
                 onChange={(e) => patchDraft("eventLink", e.target.value)}
@@ -1284,12 +1276,12 @@ export default function CreatePage() {
     if (!draft.mode) return null;
 
     return (
-      <section ref={optionsSectionRef} style={sectionWrap(fieldError === "options")}>
-        <div style={sectionLabel}>Options</div>
-        <div style={sectionTitle}>A few final settings</div>
+      <section ref={optionsRef} style={sectionStyle(fieldError === "options")}>
+        <div style={sectionEyebrow}>Options</div>
+        <div style={sectionTitle}>Final settings</div>
 
         <div style={{ marginTop: 16 }}>
-          <div style={chipLabel}>Visibility</div>
+          <div style={fieldLabel}>Visibility</div>
           <div style={chipWrap}>
             <button
               type="button"
@@ -1310,7 +1302,7 @@ export default function CreatePage() {
 
         {draft.mode !== "event" && (
           <div style={{ marginTop: 18 }}>
-            <div style={chipLabel}>Auto-close</div>
+            <div style={fieldLabel}>Auto-close</div>
             <div style={chipWrap}>
               {(["urgent24", "7", "14", "30", "never"] as ExpireChoice[]).map((v) => (
                 <button
@@ -1329,21 +1321,23 @@ export default function CreatePage() {
     );
   }
 
-  function getStickyHint() {
+  function stickyHint() {
     if (!draft.mode) return "Choose a post type to begin.";
     if (!isLoggedIn) return "Log in with your @ashland.edu email.";
     if (!profileComplete) return "Finish your profile first.";
+
     const validation = validateBeforeSubmit();
     if (validation) return validation.message;
+
     return "Ready to publish.";
   }
 
-  function getPrimaryLabel() {
+  function primaryLabel() {
     if (saving) return "Posting…";
-    if (!draft.mode) return "Choose a type";
     if (draft.mode === "give") return "Share item";
     if (draft.mode === "request") return "Post request";
-    return "Publish event";
+    if (draft.mode === "event") return "Publish event";
+    return "Continue";
   }
 
   if (!hydratedDraft || authLoading || profileLoading) {
@@ -1397,57 +1391,59 @@ export default function CreatePage() {
     );
   }
 
-  const primaryDisabled = saving || !draft.mode;
-
   return (
     <div style={pageStyle}>
-      <div style={shell}>
-        <div style={topBar}>
+      <div ref={topRef} style={shell}>
+        <div style={headerWrap}>
           <div>
-            <div style={appTitle}>Create</div>
-            <div style={appSub}>What do you want to share today?</div>
+            <div style={pageTitle}>{draft.mode ? "Create post" : "Create"}</div>
+            <div style={pageSub}>
+              {draft.mode ? "Build one post at a time." : "What do you want to share today?"}
+            </div>
           </div>
 
-          <button onClick={() => router.push("/feed")} style={topPillBtn}>
+          <button onClick={() => router.push("/feed")} style={headerPillBtn}>
             ← Feed
           </button>
         </div>
 
-        <div style={postingAsCard}>
+        <div style={accountCard}>
           <div style={{ fontSize: 13, color: "#475569", fontWeight: 800 }}>
             Posting as <b>{email}</b>
           </div>
         </div>
 
-        {renderModePicker()}
-
-        {draft.mode && (
-          <div ref={topComposerRef} style={contentGrid}>
+        {!draft.mode ? (
+          <div style={{ marginTop: 10 }}>{renderModePicker()}</div>
+        ) : (
+          <div style={isDesktop ? desktopComposerGrid : mobileComposerStack}>
             <div style={composerShell}>
-              <div style={composerProgressWrap}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                  <div>
-                    <div style={{ fontWeight: 950, fontSize: 18 }}>
-                      {draft.mode === "give" && "Share with campus"}
-                      {draft.mode === "request" && "Ask the campus community"}
-                      {draft.mode === "event" && "Promote your event"}
-                    </div>
-                    <div style={{ marginTop: 4, color: "#64748b", fontSize: 14 }}>
-                      Build your post in one clean composer.
-                    </div>
-                  </div>
+              <div style={composerTopBar}>
+                <button type="button" onClick={goBackToModes} style={lightPillBtn} disabled={saving}>
+                  ← Back to types
+                </button>
 
-                  <button type="button" onClick={resetComposer} style={subtleResetBtn} disabled={saving}>
-                    Reset
-                  </button>
+                <button type="button" onClick={() => resetComposer(true)} style={lightPillBtn} disabled={saving}>
+                  Reset
+                </button>
+              </div>
+
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 1000, fontSize: 22 }}>
+                  {draft.mode === "give" && "Share with campus"}
+                  {draft.mode === "request" && "Ask the campus community"}
+                  {draft.mode === "event" && "Promote your event"}
+                </div>
+                <div style={{ marginTop: 6, color: "#64748b", fontSize: 14 }}>
+                  One focused composer. No clutter from the other post types.
                 </div>
 
                 <div style={{ marginTop: 14 }}>
                   <div style={progressTrack}>
-                    <div style={{ ...progressFill, width: `${Math.round(composerProgress * 100)}%` }} />
+                    <div style={{ ...progressFill, width: `${Math.round(progressValue * 100)}%` }} />
                   </div>
-                  <div style={progressLegend}>
-                    <span>Media</span>
+                  <div style={progressLabels}>
+                    <span>Start</span>
                     <span>Details</span>
                     <span>Ready</span>
                   </div>
@@ -1456,15 +1452,27 @@ export default function CreatePage() {
 
               {renderMediaSection()}
               {renderTitleSection()}
-              {detailsReady || draft.mode === "request" ? renderDetailsSection() : renderDetailsSection()}
+              {renderDetailsSection()}
               {renderOptionsSection()}
+
+              {!isDesktop && (
+                <div style={{ marginTop: 18 }}>
+                  <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 10 }}>Live preview</div>
+                  {renderPreview()}
+                </div>
+              )}
 
               {msg && <div style={errorBanner}>{msg}</div>}
             </div>
 
-            <div style={previewColumn}>
-              <div style={previewSticky}>{renderPreviewCard()}</div>
-            </div>
+            {isDesktop && (
+              <div style={previewColumn}>
+                <div style={previewSticky}>
+                  <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 10 }}>Live preview</div>
+                  {renderPreview()}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1474,20 +1482,22 @@ export default function CreatePage() {
           <div style={stickyInner}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>Composer status</div>
-              <div style={{ marginTop: 3, fontSize: 14, fontWeight: 900, color: "#0f172a" }}>{getStickyHint()}</div>
+              <div style={{ marginTop: 3, fontSize: 14, fontWeight: 900, color: "#0f172a" }}>
+                {stickyHint()}
+              </div>
             </div>
 
-            <button type="button" onClick={() => router.push("/feed")} style={ghostBtn} disabled={saving}>
-              Cancel
+            <button type="button" onClick={goBackToModes} style={ghostBtn} disabled={saving}>
+              Back
             </button>
 
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={primaryDisabled}
-              style={primaryBtn(primaryDisabled)}
+              disabled={saving}
+              style={primaryBtn(saving)}
             >
-              {getPrimaryLabel()}
+              {primaryLabel()}
             </button>
           </div>
         </div>
@@ -1496,14 +1506,15 @@ export default function CreatePage() {
   );
 }
 
-/* ------------------------------ styles ------------------------------ */
+/* ---------------- styles ---------------- */
 
 const pageStyle: React.CSSProperties = {
   minHeight: "100vh",
   background: "linear-gradient(180deg, #f8fafc 0%, #f6f7fb 45%, #f8fafc 100%)",
   color: "#0f172a",
-  padding: 18,
-  paddingBottom: `calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px) + ${STICKY_HEIGHT}px + 30px)`,
+  padding: 16,
+  paddingBottom:
+    "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px) + 120px)",
 };
 
 const shell: React.CSSProperties = {
@@ -1511,45 +1522,43 @@ const shell: React.CSSProperties = {
   margin: "0 auto",
 };
 
-const topBar: React.CSSProperties = {
+const headerWrap: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "space-between",
   gap: 12,
-  marginBottom: 16,
+  marginBottom: 14,
 };
 
-const appTitle: React.CSSProperties = {
-  fontSize: 34,
+const pageTitle: React.CSSProperties = {
+  fontSize: 32,
   fontWeight: 1000,
   letterSpacing: "-0.04em",
 };
 
-const appSub: React.CSSProperties = {
-  marginTop: 5,
-  fontSize: 15,
+const pageSub: React.CSSProperties = {
+  marginTop: 4,
   color: "#64748b",
+  fontSize: 14,
   fontWeight: 600,
 };
 
-const topPillBtn: React.CSSProperties = {
-  border: "1px solid #e2e8f0",
-  background: "rgba(255,255,255,0.88)",
+const headerPillBtn: React.CSSProperties = {
+  border: "1px solid #e5e7eb",
+  background: "rgba(255,255,255,0.86)",
   color: "#0f172a",
-  padding: "11px 16px",
+  padding: "10px 14px",
   borderRadius: 999,
   cursor: "pointer",
   fontWeight: 900,
-  backdropFilter: "blur(10px)",
 };
 
-const postingAsCard: React.CSSProperties = {
-  marginBottom: 14,
-  background: "rgba(255,255,255,0.82)",
+const accountCard: React.CSSProperties = {
+  background: "rgba(255,255,255,0.88)",
   border: "1px solid #e5e7eb",
   borderRadius: 18,
   padding: "12px 14px",
-  boxShadow: "0 10px 30px rgba(15,23,42,0.04)",
+  boxShadow: "0 10px 25px rgba(15,23,42,0.04)",
 };
 
 const statusCard: React.CSSProperties = {
@@ -1560,52 +1569,43 @@ const statusCard: React.CSSProperties = {
   boxShadow: "0 24px 60px rgba(15,23,42,0.06)",
 };
 
-const contentGrid: React.CSSProperties = {
-  marginTop: 18,
+const desktopComposerGrid: React.CSSProperties = {
+  marginTop: 16,
   display: "grid",
   gridTemplateColumns: "minmax(0, 1.35fr) minmax(320px, 0.95fr)",
   gap: 18,
   alignItems: "start",
 };
 
+const mobileComposerStack: React.CSSProperties = {
+  marginTop: 16,
+  display: "block",
+};
+
 const composerShell: React.CSSProperties = {
-  background: "rgba(255,255,255,0.86)",
-  border: "1px solid rgba(226,232,240,0.95)",
-  borderRadius: 30,
-  padding: 20,
-  boxShadow: "0 30px 80px rgba(15,23,42,0.08)",
-  backdropFilter: "blur(14px)",
+  background: "rgba(255,255,255,0.9)",
+  border: "1px solid #e5e7eb",
+  borderRadius: 28,
+  padding: 18,
+  boxShadow: "0 24px 70px rgba(15,23,42,0.08)",
 };
 
-const composerProgressWrap: React.CSSProperties = {
-  paddingBottom: 20,
-  marginBottom: 18,
-  borderBottom: "1px solid #edf2f7",
-};
-
-const progressTrack: React.CSSProperties = {
-  width: "100%",
-  height: 6,
-  background: "#e2e8f0",
-  borderRadius: 999,
-  overflow: "hidden",
-};
-
-const progressFill: React.CSSProperties = {
-  height: "100%",
-  borderRadius: 999,
-  background: "linear-gradient(90deg, #0f172a 0%, #6366f1 100%)",
-  transition: "width 220ms ease",
-};
-
-const progressLegend: React.CSSProperties = {
-  marginTop: 8,
+const composerTopBar: React.CSSProperties = {
   display: "flex",
+  alignItems: "center",
   justifyContent: "space-between",
-  gap: 8,
-  fontSize: 12,
-  color: "#64748b",
-  fontWeight: 800,
+  gap: 10,
+  flexWrap: "wrap",
+};
+
+const lightPillBtn: React.CSSProperties = {
+  border: "1px solid #e5e7eb",
+  background: "#ffffff",
+  color: "#0f172a",
+  padding: "10px 14px",
+  borderRadius: 999,
+  cursor: "pointer",
+  fontWeight: 900,
 };
 
 const previewColumn: React.CSSProperties = {
@@ -1617,177 +1617,21 @@ const previewSticky: React.CSSProperties = {
   top: 16,
 };
 
-const previewCard: React.CSSProperties = {
-  background: "rgba(255,255,255,0.92)",
-  border: "1px solid #e5e7eb",
-  borderRadius: 28,
-  overflow: "hidden",
-  boxShadow: "0 24px 60px rgba(15,23,42,0.08)",
-};
-
-const previewMedia: React.CSSProperties = {
-  position: "relative",
-  height: 250,
-  background: "#f8fafc",
-  borderBottom: "1px solid #eef2f7",
-  overflow: "hidden",
-};
-
-const previewImage: React.CSSProperties = {
-  width: "100%",
-  height: "100%",
-  objectFit: "cover",
-  display: "block",
-};
-
-const previewPlaceholder: React.CSSProperties = {
-  width: "100%",
-  height: "100%",
-  display: "grid",
-  placeItems: "center",
-  textAlign: "center",
-  color: "#64748b",
-  fontWeight: 800,
-  padding: 20,
-};
-
-const previewBody: React.CSSProperties = {
-  padding: 18,
-};
-
-const previewBadgeWarm: React.CSSProperties = {
-  position: "absolute",
-  top: 14,
-  left: 14,
-  padding: "7px 11px",
-  borderRadius: 999,
-  fontSize: 12,
-  fontWeight: 1000,
-  color: "#9a3412",
-  background: "rgba(255,247,237,0.94)",
-  border: "1px solid #fdba74",
-};
-
-const previewBadgeBlue: React.CSSProperties = {
-  position: "absolute",
-  top: 14,
-  left: 14,
-  padding: "7px 11px",
-  borderRadius: 999,
-  fontSize: 12,
-  fontWeight: 1000,
-  color: "#1d4ed8",
-  background: "rgba(239,246,255,0.95)",
-  border: "1px solid #93c5fd",
-};
-
-const previewBadgePurple: React.CSSProperties = {
-  position: "absolute",
-  top: 14,
-  left: 14,
-  padding: "7px 11px",
-  borderRadius: 999,
-  fontSize: 12,
-  fontWeight: 1000,
-  color: "#6d28d9",
-  background: "rgba(245,243,255,0.95)",
-  border: "1px solid #c4b5fd",
-};
-
-const previewMetaRow: React.CSSProperties = {
-  display: "flex",
-  gap: 8,
-  flexWrap: "wrap",
-  fontSize: 12,
-  color: "#64748b",
-  fontWeight: 900,
-};
-
-const previewTitle: React.CSSProperties = {
-  marginTop: 9,
-  fontSize: 25,
-  lineHeight: 1.12,
-  fontWeight: 1000,
-  letterSpacing: "-0.03em",
-};
-
-const previewText: React.CSSProperties = {
-  marginTop: 12,
-  color: "#334155",
-  fontSize: 14,
-  lineHeight: 1.55,
-};
-
-const previewFooterRow: React.CSSProperties = {
-  marginTop: 14,
-  display: "flex",
-  gap: 8,
-  flexWrap: "wrap",
-  fontSize: 12,
-  color: "#64748b",
-  fontWeight: 800,
-};
-
-const miniTagBlue: React.CSSProperties = {
-  padding: "6px 10px",
-  borderRadius: 999,
-  background: "rgba(255,255,255,0.78)",
-  border: "1px solid #bfdbfe",
-  color: "#1d4ed8",
-  fontSize: 12,
-  fontWeight: 1000,
-};
-
-const heroIcon: React.CSSProperties = {
-  width: 54,
-  height: 54,
-  borderRadius: 18,
-  display: "grid",
-  placeItems: "center",
-  fontSize: 26,
-  background: "rgba(255,255,255,0.72)",
-  border: "1px solid rgba(255,255,255,0.85)",
-  flexShrink: 0,
-};
-
-const heroTitle: React.CSSProperties = {
-  fontSize: 21,
-  fontWeight: 1000,
-  letterSpacing: "-0.02em",
-};
-
-const heroDesc: React.CSSProperties = {
-  marginTop: 6,
-  fontSize: 14,
-  color: "#475569",
-  fontWeight: 700,
-};
-
-const heroArrow: React.CSSProperties = {
-  fontSize: 20,
-  fontWeight: 1000,
-  color: "#0f172a",
-  opacity: 0.7,
-};
-
-function heroCard(active: boolean, tone: "warm" | "blue" | "purple"): React.CSSProperties {
+function modeCard(tone: "warm" | "blue" | "purple"): React.CSSProperties {
   const palette =
     tone === "warm"
       ? {
           bg: "linear-gradient(135deg, #fff7ed 0%, #ffffff 100%)",
-          border: active ? "#fb923c" : "#fed7aa",
-          glow: "rgba(251,146,60,0.14)",
+          border: "#fed7aa",
         }
       : tone === "blue"
       ? {
           bg: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)",
-          border: active ? "#60a5fa" : "#bfdbfe",
-          glow: "rgba(96,165,250,0.14)",
+          border: "#bfdbfe",
         }
       : {
           bg: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%)",
-          border: active ? "#8b5cf6" : "#ddd6fe",
-          glow: "rgba(139,92,246,0.14)",
+          border: "#c4b5fd",
         };
 
   return {
@@ -1798,26 +1642,57 @@ function heroCard(active: boolean, tone: "warm" | "blue" | "purple"): React.CSSP
     textAlign: "left",
     padding: 18,
     borderRadius: 24,
-    border: `1px solid ${palette.border}`,
+    border: `1.5px solid ${palette.border}`,
     background: palette.bg,
-    boxShadow: active ? `0 16px 40px ${palette.glow}` : "0 8px 20px rgba(15,23,42,0.04)",
+    boxShadow: "0 10px 26px rgba(15,23,42,0.05)",
     cursor: "pointer",
-    transition: "all 180ms ease",
   };
 }
 
-function sectionWrap(highlight: boolean): React.CSSProperties {
+const modeIconBox: React.CSSProperties = {
+  width: 64,
+  height: 64,
+  borderRadius: 20,
+  display: "grid",
+  placeItems: "center",
+  fontSize: 28,
+  background: "rgba(255,255,255,0.82)",
+  border: "1px solid rgba(255,255,255,0.95)",
+  flexShrink: 0,
+};
+
+const modeTitle: React.CSSProperties = {
+  fontSize: 24,
+  fontWeight: 1000,
+  lineHeight: 1.1,
+};
+
+const modeDesc: React.CSSProperties = {
+  marginTop: 8,
+  fontSize: 14,
+  color: "#475569",
+  fontWeight: 700,
+};
+
+const modeArrow: React.CSSProperties = {
+  fontSize: 26,
+  color: "#64748b",
+  flexShrink: 0,
+};
+
+function sectionStyle(highlight: boolean): React.CSSProperties {
   return {
-    padding: "18px 4px 20px 4px",
-    borderBottom: "1px solid #eef2f7",
+    marginTop: 18,
+    paddingTop: 18,
+    borderTop: "1px solid #eef2f7",
+    scrollMarginTop: 90,
     outline: highlight ? "2px solid #fecdd3" : "none",
-    outlineOffset: 8,
-    borderRadius: 18,
-    scrollMarginTop: 80,
+    outlineOffset: 6,
+    borderRadius: 16,
   };
 }
 
-const sectionLabel: React.CSSProperties = {
+const sectionEyebrow: React.CSSProperties = {
   fontSize: 12,
   fontWeight: 1000,
   color: "#64748b",
@@ -1839,9 +1714,9 @@ const sectionSub: React.CSSProperties = {
   lineHeight: 1.5,
 };
 
-const uploadHeroButton: React.CSSProperties = {
+const uploadCard: React.CSSProperties = {
   width: "100%",
-  height: 280,
+  height: 260,
   marginTop: 16,
   borderRadius: 24,
   overflow: "hidden",
@@ -1852,7 +1727,7 @@ const uploadHeroButton: React.CSSProperties = {
   padding: 0,
 };
 
-const uploadHeroInner: React.CSSProperties = {
+const uploadCardInner: React.CSSProperties = {
   width: "100%",
   height: "100%",
   display: "grid",
@@ -1871,24 +1746,13 @@ const uploadOverlay: React.CSSProperties = {
   color: "white",
   fontSize: 12,
   fontWeight: 1000,
-  backdropFilter: "blur(8px)",
-};
-
-const smallDangerBtn: React.CSSProperties = {
-  border: "1px solid #fecaca",
-  background: "#fff1f2",
-  color: "#be123c",
-  borderRadius: 999,
-  padding: "7px 11px",
-  fontWeight: 900,
-  cursor: "pointer",
 };
 
 const headlineInput: React.CSSProperties = {
   width: "100%",
   marginTop: 16,
   padding: "14px 0",
-  fontSize: 32,
+  fontSize: 30,
   fontWeight: 1000,
   letterSpacing: "-0.04em",
   border: "none",
@@ -1898,7 +1762,7 @@ const headlineInput: React.CSSProperties = {
   color: "#0f172a",
 };
 
-const editorTextarea: React.CSSProperties = {
+const editorTextArea: React.CSSProperties = {
   width: "100%",
   marginTop: 14,
   padding: "0 0 10px 0",
@@ -1919,7 +1783,7 @@ const helperText: React.CSSProperties = {
   fontWeight: 700,
 };
 
-const chipLabel: React.CSSProperties = {
+const fieldLabel: React.CSSProperties = {
   marginBottom: 10,
   fontSize: 13,
   color: "#475569",
@@ -1986,7 +1850,7 @@ const softInput: React.CSSProperties = {
   fontSize: 14,
 };
 
-const grid2: React.CSSProperties = {
+const twoCol: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "1fr 1fr",
   gap: 12,
@@ -2002,6 +1866,124 @@ const inlineWarning: React.CSSProperties = {
   border: "1px solid #fecdd3",
 };
 
+const progressTrack: React.CSSProperties = {
+  width: "100%",
+  height: 6,
+  borderRadius: 999,
+  background: "#e2e8f0",
+  overflow: "hidden",
+};
+
+const progressFill: React.CSSProperties = {
+  height: "100%",
+  borderRadius: 999,
+  background: "linear-gradient(90deg, #0f172a 0%, #6366f1 100%)",
+  transition: "width 220ms ease",
+};
+
+const progressLabels: React.CSSProperties = {
+  marginTop: 8,
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 8,
+  fontSize: 12,
+  color: "#64748b",
+  fontWeight: 800,
+};
+
+const previewCard: React.CSSProperties = {
+  background: "rgba(255,255,255,0.95)",
+  border: "1px solid #e5e7eb",
+  borderRadius: 26,
+  overflow: "hidden",
+  boxShadow: "0 20px 50px rgba(15,23,42,0.08)",
+};
+
+const previewMediaWrap: React.CSSProperties = {
+  position: "relative",
+  height: 240,
+  background: "#f8fafc",
+  borderBottom: "1px solid #eef2f7",
+  overflow: "hidden",
+};
+
+const previewImage: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  objectFit: "cover",
+  display: "block",
+};
+
+const previewPlaceholder: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  display: "grid",
+  placeItems: "center",
+  textAlign: "center",
+  color: "#64748b",
+  fontWeight: 800,
+  padding: 20,
+};
+
+function previewBadge(bg: string, color: string, border: string): React.CSSProperties {
+  return {
+    position: "absolute",
+    top: 14,
+    left: 14,
+    padding: "7px 11px",
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: 1000,
+    color,
+    background: bg,
+    border: `1px solid ${border}`,
+  };
+}
+
+const previewBody: React.CSSProperties = {
+  padding: 18,
+};
+
+const previewMeta: React.CSSProperties = {
+  fontSize: 12,
+  color: "#64748b",
+  fontWeight: 900,
+};
+
+const previewHeadline: React.CSSProperties = {
+  marginTop: 8,
+  fontSize: 24,
+  lineHeight: 1.14,
+  fontWeight: 1000,
+  letterSpacing: "-0.03em",
+};
+
+const previewText: React.CSSProperties = {
+  marginTop: 12,
+  fontSize: 14,
+  color: "#334155",
+  lineHeight: 1.55,
+};
+
+const previewFooter: React.CSSProperties = {
+  marginTop: 14,
+  fontSize: 12,
+  color: "#64748b",
+  fontWeight: 800,
+};
+
+function miniPill(bg: string, color: string, border: string): React.CSSProperties {
+  return {
+    padding: "6px 10px",
+    borderRadius: 999,
+    background: bg,
+    color,
+    border: `1px solid ${border}`,
+    fontSize: 12,
+    fontWeight: 1000,
+  };
+}
+
 const errorBanner: React.CSSProperties = {
   marginTop: 18,
   padding: "14px 16px",
@@ -2012,12 +1994,22 @@ const errorBanner: React.CSSProperties = {
   fontWeight: 900,
 };
 
+const smallDangerBtn: React.CSSProperties = {
+  border: "1px solid #fecaca",
+  background: "#fff1f2",
+  color: "#be123c",
+  borderRadius: 999,
+  padding: "7px 11px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
 const stickyBar: React.CSSProperties = {
   position: "fixed",
   left: 0,
   right: 0,
   bottom: "calc(env(safe-area-inset-bottom) + var(--bottom-nav-height, 86px))",
-  padding: "12px 16px",
+  padding: "10px 12px",
   zIndex: 9999,
   display: "flex",
   justifyContent: "center",
@@ -2030,11 +2022,11 @@ const stickyInner: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 12,
-  background: "rgba(255,255,255,0.82)",
-  border: "1px solid rgba(226,232,240,0.9)",
+  background: "rgba(255,255,255,0.9)",
+  border: "1px solid rgba(226,232,240,0.95)",
   borderRadius: 24,
   padding: "14px 16px",
-  boxShadow: "0 22px 60px rgba(15,23,42,0.14)",
+  boxShadow: "0 18px 50px rgba(15,23,42,0.14)",
   backdropFilter: "blur(16px)",
   pointerEvents: "auto",
 };
@@ -2047,29 +2039,21 @@ const ghostBtn: React.CSSProperties = {
   borderRadius: 16,
   cursor: "pointer",
   fontWeight: 900,
+  whiteSpace: "nowrap",
 };
 
 function primaryBtn(disabled: boolean): React.CSSProperties {
   return {
     border: "none",
-    background: disabled ? "#94a3b8" : "#0f172a",
+    background: disabled ? "#94a3b8" : "#03133d",
     color: "white",
     padding: "13px 18px",
-    borderRadius: 16,
+    borderRadius: 18,
     cursor: disabled ? "not-allowed" : "pointer",
     fontWeight: 1000,
-    minWidth: 142,
+    minWidth: 148,
     opacity: disabled ? 0.58 : 1,
-    boxShadow: disabled ? "none" : "0 18px 35px rgba(15,23,42,0.2)",
+    boxShadow: disabled ? "none" : "0 18px 35px rgba(3,19,61,0.22)",
+    whiteSpace: "nowrap",
   };
 }
-
-const subtleResetBtn: React.CSSProperties = {
-  border: "1px solid #e5e7eb",
-  background: "#ffffff",
-  color: "#334155",
-  padding: "10px 14px",
-  borderRadius: 14,
-  cursor: "pointer",
-  fontWeight: 900,
-};
