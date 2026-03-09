@@ -412,8 +412,19 @@ export default function AccountPage() {
   const itemsRequest = useMemo(() => myItems.filter((x) => matchesTab(x, "request")), [myItems]);
   const itemsEvent = useMemo(() => myItems.filter((x) => matchesTab(x, "event")), [myItems]);
 
-  const activeListingsCount = useMemo(() => myItems.filter((x) => !isArchivedStatus(x.status)).length, [myItems]);
-  const archivedListingsCount = useMemo(() => myItems.filter((x) => isArchivedStatus(x.status)).length, [myItems]);
+  const currentTabItems = useMemo(() => {
+  if (mediaTab === "give") return itemsGive;
+  if (mediaTab === "request") return itemsRequest;
+  return itemsEvent;
+}, [mediaTab, itemsGive, itemsRequest, itemsEvent]);
+
+const activeListingsCount = useMemo(() => {
+  return currentTabItems.filter((x) => !isArchivedStatus(x.status)).length;
+}, [currentTabItems]);
+
+const archivedListingsCount = useMemo(() => {
+  return currentTabItems.filter((x) => isArchivedStatus(x.status)).length;
+}, [currentTabItems]);
 
   const unseenNotificationCount = useMemo(() => notifications.filter((n) => !n.seen_at).length, [notifications]);
 
