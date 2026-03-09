@@ -1243,12 +1243,14 @@ export default function AccountPage() {
 
               <div className="listing-grid">
                 {gridSource.map((item) => (
-                  <ProfileMediaCard
-                    key={item.id}
-                    item={item}
-                    onClick={() => router.push(`/manage/${item.id}`)}
-                  />
-                ))}
+  <ProfileMediaCard
+    key={item.id}
+    item={item}
+    onClick={() =>
+      router.push(item.post_type === "event" ? `/event/${item.id}` : `/manage/${item.id}`)
+    }
+  />
+))}
               </div>
             </>
           )}
