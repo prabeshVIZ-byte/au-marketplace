@@ -6,7 +6,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-const LOVES_TABLE = "item_loves";
+const LOVES_TABLE = "post_likes";
 
 type PostType = "give" | "request";
 
