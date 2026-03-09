@@ -3,7 +3,7 @@
 export const dynamic = "force-dynamic";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { ensureThread } from "@/lib/ensureThread";
 
@@ -11,7 +11,9 @@ import { ensureThread } from "@/lib/ensureThread";
    TYPES
 ============================== */
 
-type TabKey = "overview" | "listings" | "requests" | "activity" | "history";
+type MediaTab = "give" | "request" | "event";
+type GridMode = "active" | "done";
+type DrawerSection = "menu" | "notifications" | "requests" | "activity";
 type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
 type ToastState = { msg: string; kind?: "ok" | "err" } | null;
 
@@ -114,17 +116,6 @@ type NotificationRow = {
     email: string | null;
   } | null;
 };
-
-type StatsState = {
-  listed: number;
-  interests: number;
-  offers: number;
-  chats: number;
-};
-
-/* ==============================
-   QUERY SHAPES
-============================== */
 
 type MyRequestQueryRow = {
   item_id: string;
@@ -285,6 +276,14 @@ function isAshlandEmail(email: string) {
   return email.trim().toLowerCase().endsWith("@ashland.edu");
 }
 
+function normStatus(s: string | null | undefined) {
+  return (s ?? "").trim().toLowerCase();
+}
+
+function isDoneStatus(s: string | null | undefined) {
+  return ["claimed", "completed"].includes(normStatus(s));
+}
+
 function fmtWhen(ts: string | null | undefined) {
   if (!ts) return "";
   const d = new Date(ts);
@@ -301,10 +300,6 @@ function fmtShort(ts: string | null | undefined) {
     day: "numeric",
     year: "numeric",
   });
-}
-
-function normStatus(s: string | null | undefined) {
-  return (s ?? "").trim().toLowerCase();
 }
 
 function readableRole(role: string | null | undefined) {
@@ -326,18 +321,18 @@ function readableName(
   return fallback;
 }
 
-function itemTypeLabel(type: "give" | "request" | "event" | null | undefined) {
-  if (type === "request") return "Request";
-  if (type === "event") return "Event";
-  return "Give";
-}
-
 function toneForStatus(status: string | null | undefined): "green" | "amber" | "red" | "gray" {
   const s = normStatus(status);
   if (["accepted", "reserved", "claimed", "completed"].includes(s)) return "green";
   if (["pending", "hold"].includes(s)) return "amber";
   if (["declined", "expired"].includes(s)) return "red";
   return "gray";
+}
+
+function itemTypeLabel(type: "give" | "request" | "event" | null | undefined) {
+  if (type === "request") return "Request";
+  if (type === "event") return "Event";
+  return "Item";
 }
 
 function getFriendlyError(e: unknown) {
@@ -347,22 +342,16 @@ function getFriendlyError(e: unknown) {
   return "Something went wrong.";
 }
 
-function readTabFromUrl(): TabKey | null {
-  if (typeof window === "undefined") return null;
+function matchesMediaTab(item: MyItemRow, tab: MediaTab) {
+  const type = item.post_type ?? "give";
+  if (tab === "give") return type === "give" || type === null;
+  return type === tab;
+}
 
-  const raw = new URLSearchParams(window.location.search).get("tab");
-
-  if (
-    raw === "overview" ||
-    raw === "listings" ||
-    raw === "requests" ||
-    raw === "activity" ||
-    raw === "history"
-  ) {
-    return raw;
-  }
-
-  return null;
+function mediaTabLabel(tab: MediaTab) {
+  if (tab === "give") return "Items";
+  if (tab === "request") return "Requests";
+  return "Events";
 }
 
 /* ==============================
@@ -371,7 +360,6 @@ function readTabFromUrl(): TabKey | null {
 
 export default function AccountPage() {
   const router = useRouter();
-  const pathname = usePathname();
 
   const mountedRef = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -381,8 +369,6 @@ export default function AccountPage() {
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-
-  const [tab, setTab] = useState<TabKey>("overview");
 
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = useState("");
@@ -397,17 +383,15 @@ export default function AccountPage() {
   const [incomingOffers, setIncomingOffers] = useState<IncomingOfferRow[]>([]);
   const [notifications, setNotifications] = useState<NotificationRow[]>([]);
 
-  const [stats, setStats] = useState<StatsState>({
-    listed: 0,
-    interests: 0,
-    offers: 0,
-    chats: 0,
-  });
+  const [mediaTab, setMediaTab] = useState<MediaTab>("give");
+  const [gridMode, setGridMode] = useState<GridMode>("active");
+
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerSection, setDrawerSection] = useState<DrawerSection>("menu");
 
   const [toast, setToast] = useState<ToastState>(null);
   const [confirm, setConfirm] = useState<ConfirmState>(null);
 
-  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [incomingOfferBusyId, setIncomingOfferBusyId] = useState<string | null>(null);
   const [myOfferBusyId, setMyOfferBusyId] = useState<string | null>(null);
   const [markingNotifs, setMarkingNotifs] = useState(false);
@@ -424,27 +408,35 @@ export default function AccountPage() {
   const displayRole = readableRole(profile?.user_role);
   const memberSince = fmtShort(profile?.created_at);
 
-  const activeListings = useMemo(
-    () => myItems.filter((x) => !["claimed", "completed"].includes(normStatus(x.status))),
-    [myItems]
-  );
+  const giveItems = useMemo(() => myItems.filter((x) => matchesMediaTab(x, "give")), [myItems]);
+  const requestPosts = useMemo(() => myItems.filter((x) => matchesMediaTab(x, "request")), [myItems]);
+  const eventPosts = useMemo(() => myItems.filter((x) => matchesMediaTab(x, "event")), [myItems]);
 
-  const completedListings = useMemo(
-    () => myItems.filter((x) => ["claimed", "completed"].includes(normStatus(x.status))),
-    [myItems]
-  );
+  const activeItems = useMemo(() => myItems.filter((x) => !isDoneStatus(x.status)), [myItems]);
+  const doneItems = useMemo(() => myItems.filter((x) => isDoneStatus(x.status)), [myItems]);
 
   const unseenNotificationCount = useMemo(() => {
     return notifications.filter((n) => !n.seen_at).length;
   }, [notifications]);
 
-  const incomingPendingOfferCount = useMemo(() => {
-    return incomingOffers.filter((x) => (x.status ?? "pending") === "pending").length;
-  }, [incomingOffers]);
+  const incomingCount = useMemo(() => {
+    return incomingInterests.length + incomingOffers.length;
+  }, [incomingInterests.length, incomingOffers.length]);
 
-  const acceptedMyOffers = useMemo(() => {
-    return myOffers.filter((x) => (x.status ?? "pending") === "accepted").length;
-  }, [myOffers]);
+  const activityCount = useMemo(() => {
+    return myRequests.length + myOffers.length;
+  }, [myOffers.length, myRequests.length]);
+
+  const selectedTabItems = useMemo(() => {
+    const source = mediaTab === "give" ? giveItems : mediaTab === "request" ? requestPosts : eventPosts;
+    return source.filter((x) => (gridMode === "active" ? !isDoneStatus(x.status) : isDoneStatus(x.status)));
+  }, [eventPosts, giveItems, gridMode, mediaTab, requestPosts]);
+
+  const selectedTabTotalCount = useMemo(() => {
+    if (mediaTab === "give") return giveItems.length;
+    if (mediaTab === "request") return requestPosts.length;
+    return eventPosts.length;
+  }, [eventPosts.length, giveItems.length, mediaTab, requestPosts.length]);
 
   const showToast = useCallback((msg: string, kind: "ok" | "err" = "ok") => {
     setToast({ msg, kind });
@@ -454,13 +446,10 @@ export default function AccountPage() {
     }, 2200);
   }, []);
 
-  const setTabAndUrl = useCallback(
-    (nextTab: TabKey) => {
-      setTab(nextTab);
-      router.replace(`${pathname}?tab=${nextTab}`, { scroll: false });
-    },
-    [pathname, router]
-  );
+  const openDrawer = useCallback((section: DrawerSection) => {
+    setDrawerSection(section);
+    setDrawerOpen(true);
+  }, []);
 
   const clearAll = useCallback(() => {
     setProfile(null);
@@ -470,9 +459,9 @@ export default function AccountPage() {
     setIncomingInterests([]);
     setIncomingOffers([]);
     setNotifications([]);
-    setStats({ listed: 0, interests: 0, offers: 0, chats: 0 });
-    setConfirm(null);
     setErr(null);
+    setDrawerOpen(false);
+    setDrawerSection("menu");
   }, []);
 
   async function loadProfile(uid: string) {
@@ -698,42 +687,15 @@ export default function AccountPage() {
     setErr(null);
 
     try {
-      const [profileRow, itemsRows, requestRows, offerRows, incomingReqRows, incomingOfferRows, notifRows] =
-        await Promise.all([
-          loadProfile(uid),
-          loadMyListings(uid),
-          loadMyRequests(uid),
-          loadMyOffers(uid),
-          loadIncomingInterests(uid),
-          loadIncomingOffers(uid),
-          loadNotifications(uid),
-        ]);
-
-      let chats = 0;
-      try {
-        const { count, error } = await supabase
-          .from("threads")
-          .select("id", { count: "exact", head: true })
-          .or(`owner_id.eq.${uid},requester_id.eq.${uid}`);
-
-        if (!error) chats = count ?? 0;
-      } catch {
-        chats = 0;
-      }
-
-      if (!mountedRef.current) return;
-
-      setProfile(profileRow);
-      setStats({
-        listed: itemsRows.length,
-        interests: requestRows.length + incomingReqRows.length,
-        offers: offerRows.length + incomingOfferRows.length,
-        chats,
-      });
-
-      if (notifRows.length === 0 && incomingReqRows.length === 0 && incomingOfferRows.length === 0) {
-        // intentionally quiet
-      }
+      await Promise.all([
+        loadProfile(uid),
+        loadMyListings(uid),
+        loadMyRequests(uid),
+        loadMyOffers(uid),
+        loadIncomingInterests(uid),
+        loadIncomingOffers(uid),
+        loadNotifications(uid),
+      ]);
     } catch (e) {
       if (!mountedRef.current) return;
       setErr(getFriendlyError(e));
@@ -764,6 +726,7 @@ export default function AccountPage() {
       if (!mountedRef.current) return;
 
       setNotifications((prev) => prev.map((n) => (n.seen_at ? n : { ...n, seen_at: nowIso })));
+      showToast("Notifications marked seen.");
     } catch (e) {
       showToast(getFriendlyError(e), "err");
     } finally {
@@ -774,36 +737,9 @@ export default function AccountPage() {
   function openNotification(notification: NotificationRow) {
     if (notification.item_id) {
       router.push(`/manage/${notification.item_id}`);
+      setDrawerOpen(false);
       return;
     }
-
-    setTabAndUrl("requests");
-  }
-
-  async function deleteListing(id: string) {
-    setConfirm({
-      title: "Delete post?",
-      body: "This cannot be undone.",
-      actionLabel: "Delete",
-      onYes: async () => {
-        setConfirm(null);
-        setDeletingId(id);
-
-        const { error } = await supabase.from("items").delete().eq("id", id);
-
-        if (!mountedRef.current) return;
-        setDeletingId(null);
-
-        if (error) {
-          showToast(error.message, "err");
-          return;
-        }
-
-        setMyItems((prev) => prev.filter((x) => x.id !== id));
-        setStats((prev) => ({ ...prev, listed: Math.max(0, prev.listed - 1) }));
-        showToast("Deleted.");
-      },
-    });
   }
 
   async function updateIncomingOfferStatus(offer: IncomingOfferRow, next: OfferStatus) {
@@ -869,6 +805,7 @@ export default function AccountPage() {
         requesterId: offer.helper_id,
       });
 
+      setDrawerOpen(false);
       router.push(`/messages/${threadId}`);
     } catch (e) {
       showToast(getFriendlyError(e), "err");
@@ -934,6 +871,7 @@ export default function AccountPage() {
         requesterId: userId,
       });
 
+      setDrawerOpen(false);
       router.push(`/messages/${threadId}`);
     } catch (e) {
       showToast(getFriendlyError(e), "err");
@@ -983,17 +921,10 @@ export default function AccountPage() {
     }
   }
 
-  /* ==============================
-     EFFECTS
-  ============================== */
-
   useEffect(() => {
     mountedRef.current = true;
 
     async function boot() {
-      const initialTab = readTabFromUrl();
-      if (initialTab) setTab(initialTab);
-
       const { data } = await supabase.auth.getSession();
       if (!mountedRef.current) return;
 
@@ -1039,77 +970,16 @@ export default function AccountPage() {
     };
   }, [clearAll, loadAllFor]);
 
-  useEffect(() => {
-    function syncTabFromUrl() {
-      const nextTab = readTabFromUrl();
-      if (nextTab) setTab(nextTab);
-    }
-
-    syncTabFromUrl();
-
-    window.addEventListener("popstate", syncTabFromUrl);
-    return () => window.removeEventListener("popstate", syncTabFromUrl);
-  }, []);
-
-  const overviewHighlights = useMemo(() => {
-    const rows: Array<{ key: string; title: string; body: string; cta: string; onClick: () => void }> = [];
-
-    if (unseenNotificationCount > 0) {
-      rows.push({
-        key: "notifs",
-        title: `${unseenNotificationCount} new notification${unseenNotificationCount > 1 ? "s" : ""}`,
-        body: "New requests and help offers are waiting.",
-        cta: "Open requests",
-        onClick: () => setTabAndUrl("requests"),
-      });
-    }
-
-    if (incomingPendingOfferCount > 0) {
-      rows.push({
-        key: "offers",
-        title: `${incomingPendingOfferCount} helper offer${incomingPendingOfferCount > 1 ? "s" : ""} waiting`,
-        body: "Accept one or put others on hold.",
-        cta: "Review offers",
-        onClick: () => setTabAndUrl("requests"),
-      });
-    }
-
-    if (acceptedMyOffers > 0) {
-      rows.push({
-        key: "accepted",
-        title: `${acceptedMyOffers} of your offers got accepted`,
-        body: "Open chat and finalize details.",
-        cta: "Go to activity",
-        onClick: () => setTabAndUrl("activity"),
-      });
-    }
-
-    if (rows.length === 0) {
-      rows.push({
-        key: "empty",
-        title: "You’re caught up",
-        body: "Nothing urgent is waiting right now.",
-        cta: "Create post",
-        onClick: () => router.push("/create"),
-      });
-    }
-
-    return rows.slice(0, 3);
-  }, [acceptedMyOffers, incomingPendingOfferCount, router, setTabAndUrl, unseenNotificationCount]);
-
-  /* ==============================
-     LOADING / AUTH
-  ============================== */
-
   if (loading) {
     return (
       <div className="account-page">
         <div className="page-shell">
-          <div className="hero-card skeleton-shell">
+          <div className="profile-card skeleton-shell">
             <div className="skel skel-avatar" />
             <div className="skel skel-line lg" />
             <div className="skel skel-line md" />
-            <div className="skel skel-btn" />
+            <div className="skel skel-pills" />
+            <div className="skel skel-grid" />
           </div>
         </div>
         <PageStyles />
@@ -1120,13 +990,11 @@ export default function AccountPage() {
   if (!isLoggedIn) {
     return (
       <div className="account-page">
-        <div className="page-shell narrow">
-          <section className="hero-card auth-card">
-            <div className="eyebrow">My account</div>
-            <h1 className="hero-title">Sign in to manage your campus activity</h1>
-            <p className="hero-sub">
-              Use your <b>@ashland.edu</b> email to manage listings, requests, offers, and messages.
-            </p>
+        <div className="page-shell auth-shell">
+          <section className="auth-card">
+            <div className="auth-eyebrow">My account</div>
+            <h1 className="auth-title">Sign in to see your profile listings</h1>
+            <p className="auth-sub">Use your Ashland email to manage your posts and profile.</p>
 
             <div className="seg-row">
               <button
@@ -1144,11 +1012,6 @@ export default function AccountPage() {
                 Sign up
               </button>
             </div>
-          </section>
-
-          <section className="panel auth-form-panel">
-            <h2 className="section-title">{authMode === "signin" ? "Welcome back" : "Create your account"}</h2>
-            <p className="section-hint">One place for your posts, requests, offers, and messages.</p>
 
             <input
               value={authEmail}
@@ -1171,14 +1034,9 @@ export default function AccountPage() {
               }}
             />
 
-            <div className="auth-button-stack">
-              <button onClick={() => void handleAuth()} disabled={authBusy} className="btn btn-primary full" type="button">
-                {authBusy ? "Working…" : authMode === "signin" ? "Sign in" : "Sign up"}
-              </button>
-              <button onClick={() => router.push("/feed")} className="btn btn-secondary full" type="button">
-                Browse feed
-              </button>
-            </div>
+            <button onClick={() => void handleAuth()} disabled={authBusy} className="btn btn-primary full" type="button">
+              {authBusy ? "Working…" : authMode === "signin" ? "Sign in" : "Sign up"}
+            </button>
 
             {err ? <div className="error-text">{err}</div> : null}
           </section>
@@ -1188,315 +1046,204 @@ export default function AccountPage() {
     );
   }
 
-  /* ==============================
-     MAIN
-  ============================== */
-
   return (
     <div className="account-page">
       <div className="page-shell">
-        <section className="hero-card hero-mobile-first">
-          <div className="hero-head">
-            <div className="avatar-large">{displayName.slice(0, 1).toUpperCase()}</div>
+        <section className="profile-card">
+          <div className="profile-top">
+            <div className="profile-left">
+              <div className="profile-avatar">{displayName.slice(0, 1).toUpperCase()}</div>
 
-            <div className="hero-copy">
-              <div className="eyebrow">My space</div>
-              <h1 className="hero-title clamp-title">{displayName}</h1>
-              <p className="hero-sub hero-copy-sub">
-                {displayRole}
-                <span className="dot">•</span>
-                <span className="email-chip">{userEmail}</span>
-                {memberSince ? (
-                  <>
-                    <span className="dot">•</span>
-                    Joined {memberSince}
-                  </>
-                ) : null}
-              </p>
+              <div className="profile-copy">
+                <h1 className="profile-name">{displayName}</h1>
+                <div className="profile-meta">
+                  <span>{displayRole}</span>
+                  <span className="dot">•</span>
+                  <span className="break-any">{userEmail}</span>
+                  {memberSince ? (
+                    <>
+                      <span className="dot">•</span>
+                      <span>Joined {memberSince}</span>
+                    </>
+                  ) : null}
+                </div>
+              </div>
             </div>
-          </div>
 
-          <div className="hero-chip-row">
-            <Chip label={`${activeListings.length} active`} tone="green" />
-            <Chip label={`${unseenNotificationCount} new`} tone={unseenNotificationCount ? "red" : "gray"} />
-            <Chip label={`${stats.chats} chats`} tone="gray" />
-          </div>
-
-          <div className="hero-action-grid">
-            <button onClick={() => router.push("/create")} className="btn btn-primary" type="button">
-              + Create post
-            </button>
-            <button onClick={() => router.push("/messages")} className="btn btn-secondary" type="button">
-              Messages
-            </button>
-            <button onClick={() => void signOut()} className="btn btn-secondary" type="button">
-              Sign out
+            <button
+              className="menu-btn"
+              onClick={() => openDrawer("menu")}
+              type="button"
+              aria-label="Open profile menu"
+            >
+              <span />
+              <span />
+              <span />
             </button>
           </div>
 
-          <div className="stats-grid mobile-stats-grid">
-            <MetricCard label="Active" value={activeListings.length} hint="Live posts" onClick={() => setTabAndUrl("listings")} />
-            <MetricCard
-              label="Requests"
-              value={incomingInterests.length + incomingOffers.length}
-              hint="Waiting on you"
-              onClick={() => setTabAndUrl("requests")}
-              highlight={incomingInterests.length + incomingOffers.length > 0}
-            />
-            <MetricCard
-              label="Activity"
-              value={myRequests.length + myOffers.length}
-              hint="Your actions"
-              onClick={() => setTabAndUrl("activity")}
-            />
-            <MetricCard label="Done" value={completedListings.length} hint="Finished" onClick={() => setTabAndUrl("history")} />
+          <div className="mini-stats">
+            <button
+              type="button"
+              className={`mini-pill ${gridMode === "active" ? "active" : ""}`}
+              onClick={() => setGridMode("active")}
+            >
+              <span className="mini-pill-label">Active</span>
+              <span className="mini-pill-value">{activeItems.length}</span>
+            </button>
+
+            <button type="button" className="mini-pill" onClick={() => openDrawer("requests")}>
+              <span className="mini-pill-label">Requests</span>
+              <span className="mini-pill-value">{incomingCount}</span>
+            </button>
+
+            <button type="button" className="mini-pill" onClick={() => openDrawer("activity")}>
+              <span className="mini-pill-label">Activity</span>
+              <span className="mini-pill-value">{activityCount}</span>
+            </button>
+
+            <button
+              type="button"
+              className={`mini-pill ${gridMode === "done" ? "active" : ""}`}
+              onClick={() => setGridMode("done")}
+            >
+              <span className="mini-pill-label">Done</span>
+              <span className="mini-pill-value">{doneItems.length}</span>
+            </button>
           </div>
         </section>
 
-        <section className="attention-section">
-          <div className="section-head">
-            <div>
-              <h2 className="section-title">Needs attention</h2>
-              <p className="section-hint">Only the next important things show here.</p>
-            </div>
-          </div>
-
-          <div className="attention-grid">
-            {overviewHighlights.map((row) => (
-              <AttentionCard key={row.key} title={row.title} body={row.body} cta={row.cta} onClick={row.onClick} />
-            ))}
-          </div>
-        </section>
-
-        <section className="tab-sticky-wrap">
-          <div className="tabs-shell">
-            <button onClick={() => setTabAndUrl("overview")} className={`tab-btn ${tab === "overview" ? "active" : ""}`} type="button">
-              Overview
+        <section className="content-head">
+          <div className="media-tabs" role="tablist" aria-label="Listing types">
+            <button
+              type="button"
+              className={`media-tab ${mediaTab === "give" ? "active" : ""}`}
+              onClick={() => setMediaTab("give")}
+            >
+              Items
+              <span className="media-tab-count">{giveItems.length}</span>
             </button>
-            <button onClick={() => setTabAndUrl("listings")} className={`tab-btn ${tab === "listings" ? "active" : ""}`} type="button">
-              Listings
-            </button>
-            <button onClick={() => setTabAndUrl("requests")} className={`tab-btn ${tab === "requests" ? "active" : ""}`} type="button">
+            <button
+              type="button"
+              className={`media-tab ${mediaTab === "request" ? "active" : ""}`}
+              onClick={() => setMediaTab("request")}
+            >
               Requests
-              {unseenNotificationCount ? <span className="badge-red">{unseenNotificationCount}</span> : null}
+              <span className="media-tab-count">{requestPosts.length}</span>
             </button>
-            <button onClick={() => setTabAndUrl("activity")} className={`tab-btn ${tab === "activity" ? "active" : ""}`} type="button">
-              Activity
+            <button
+              type="button"
+              className={`media-tab ${mediaTab === "event" ? "active" : ""}`}
+              onClick={() => setMediaTab("event")}
+            >
+              Events
+              <span className="media-tab-count">{eventPosts.length}</span>
             </button>
-            <button onClick={() => setTabAndUrl("history")} className={`tab-btn ${tab === "history" ? "active" : ""}`} type="button">
-              History
-            </button>
+          </div>
+
+          <div className="mode-chips">
+            <span className={`mode-chip ${gridMode === "active" ? "selected" : ""}`}>Live</span>
+            <span className={`mode-chip ${gridMode === "done" ? "selected" : ""}`}>Archived</span>
           </div>
         </section>
 
-        {tab === "overview" ? (
-          <div className="content-stack">
-            <section className="panel">
-              <div className="section-head">
-                <div>
-                  <h2 className="section-title sm">Latest notifications</h2>
-                  <p className="section-hint">Keep the homepage light. Handle details in Requests or Manage.</p>
+        <section className="grid-wrap">
+          {selectedTabItems.length === 0 ? (
+            <EmptyGridState
+              title={
+                gridMode === "active"
+                  ? `No live ${mediaTabLabel(mediaTab).toLowerCase()} yet`
+                  : `No archived ${mediaTabLabel(mediaTab).toLowerCase()} yet`
+              }
+              body={
+                gridMode === "active"
+                  ? `Your ${mediaTabLabel(mediaTab).toLowerCase()} will appear here in a clean profile grid.`
+                  : `Finished ${mediaTabLabel(mediaTab).toLowerCase()} will appear here once completed.`
+              }
+            />
+          ) : (
+            <>
+              <div className="grid-topline">
+                <div className="grid-title">
+                  {mediaTabLabel(mediaTab)} · {gridMode === "active" ? "Live" : "Archived"}
                 </div>
-
-                <button
-                  onClick={() => void markNotificationsSeen()}
-                  disabled={markingNotifs || unseenNotificationCount === 0}
-                  className="btn btn-secondary compact-btn"
-                  type="button"
-                >
-                  {markingNotifs ? "Working…" : "Mark seen"}
-                </button>
+                <div className="grid-sub">{selectedTabItems.length} shown · {selectedTabTotalCount} total</div>
               </div>
 
-              {notifications.length === 0 ? (
-                <EmptyState title="No notifications" body="New requests and help offers will appear here." compact />
-              ) : (
-                <div className="stack-list">
-                  {notifications.slice(0, 3).map((n) => (
-                    <NotificationCard
-                      key={n.id}
-                      title={n.title}
-                      body={n.body || `${readableName(n.actor)} did something on one of your posts.`}
-                      meta={fmtWhen(n.created_at)}
-                      isNew={!n.seen_at}
-                      onClick={() => openNotification(n)}
-                    />
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="panel">
-              <div className="section-head">
-                <div>
-                  <h2 className="section-title sm">Quick actions</h2>
-                  <p className="section-hint">Common things you likely want next.</p>
-                </div>
-              </div>
-
-              <div className="quick-grid">
-                <QuickActionCard
-                  emoji="📝"
-                  title="Create a new post"
-                  body="Share a give item, request help, or publish an event."
-                  actionLabel="Create"
-                  onClick={() => router.push("/create")}
-                  primary
-                />
-                <QuickActionCard
-                  emoji="💬"
-                  title="Open messages"
-                  body="Continue accepted requests and helper conversations."
-                  actionLabel="Messages"
-                  onClick={() => router.push("/messages")}
-                />
-                <QuickActionCard
-                  emoji="📦"
-                  title="Manage live posts"
-                  body="Open your listings and take action."
-                  actionLabel="Listings"
-                  onClick={() => setTabAndUrl("listings")}
-                />
-                <QuickActionCard
-                  emoji="🔎"
-                  title="Browse the feed"
-                  body="See what the campus community is posting now."
-                  actionLabel="Browse"
-                  onClick={() => router.push("/feed")}
-                />
-              </div>
-            </section>
-
-            <section className="two-col-grid">
-              <div className="panel">
-                <div className="section-head">
-                  <div>
-                    <h2 className="section-title sm">Recent listings</h2>
-                    <p className="section-hint">Your latest live posts.</p>
-                  </div>
-                  <button onClick={() => setTabAndUrl("listings")} className="link-btn" type="button">
-                    See all
-                  </button>
-                </div>
-
-                {activeListings.slice(0, 3).length === 0 ? (
-                  <EmptyState title="No active listings yet" body="Your live give, request, and event posts show here." compact />
-                ) : (
-                  <div className="stack-list">
-                    {activeListings.slice(0, 3).map((item) => (
-                      <CompactItemRow
-                        key={item.id}
-                        title={item.title}
-                        subtitle={item.description || "No description"}
-                        photoUrl={item.photo_url}
-                        chip1={itemTypeLabel(item.post_type)}
-                        chip2={item.status ?? "—"}
-                        onClick={() => router.push(`/manage/${item.id}`)}
-                        ctaLabel="Manage"
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="panel">
-                <div className="section-head">
-                  <div>
-                    <h2 className="section-title sm">Latest activity</h2>
-                    <p className="section-hint">Things you requested or offered recently.</p>
-                  </div>
-                  <button onClick={() => setTabAndUrl("activity")} className="link-btn" type="button">
-                    See all
-                  </button>
-                </div>
-
-                {myRequests.length === 0 && myOffers.length === 0 ? (
-                  <EmptyState title="No activity yet" body="When you request an item or offer help, it will show here." compact />
-                ) : (
-                  <div className="stack-list">
-                    {myRequests.slice(0, 2).map((r, i) => (
-                      <CompactTextRow
-                        key={`req-${r.item_id}-${r.created_at ?? i}`}
-                        icon="🙋"
-                        title={r.item?.title ?? "Unknown post"}
-                        subtitle={`Interest sent${r.created_at ? ` • ${fmtWhen(r.created_at)}` : ""}`}
-                        onClick={() => router.push(`/item/${r.item_id}`)}
-                        ctaLabel="View"
-                      />
-                    ))}
-
-                    {myOffers.slice(0, 2).map((o) => (
-                      <CompactTextRow
-                        key={`offer-${o.id}`}
-                        icon="🤝"
-                        title={o.request_item?.title ?? "Unknown request"}
-                        subtitle={`Offer status: ${o.status ?? "pending"}`}
-                        onClick={() => router.push(`/item/${o.request_id}`)}
-                        ctaLabel="Open"
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            </section>
-          </div>
-        ) : null}
-
-        {tab === "listings" ? (
-          <div className="content-stack">
-            <section className="panel-soft">
-              <h2 className="section-title sm">Your listings</h2>
-              <p className="section-hint">Live posts stay here. Claimed or completed ones move to history.</p>
-            </section>
-
-            {activeListings.length === 0 ? (
-              <EmptyState
-                title="No active listings"
-                body="Create your first give, request, or event post to get started."
-                actionLabel="Create post"
-                onAction={() => router.push("/create")}
-              />
-            ) : (
-              <div className="card-grid">
-                {activeListings.map((item) => (
-                  <ListingCard
+              <div className="listing-grid">
+                {selectedTabItems.map((item) => (
+                  <ProfileGridTile
                     key={item.id}
                     item={item}
-                    deleting={deletingId === item.id}
-                    onManage={() => router.push(`/manage/${item.id}`)}
-                    onEdit={() => router.push(`/item/${item.id}/edit`)}
-                    onDelete={() => void deleteListing(item.id)}
+                    onClick={() => router.push(`/manage/${item.id}`)}
                   />
                 ))}
               </div>
-            )}
-          </div>
-        ) : null}
+            </>
+          )}
+        </section>
 
-        {tab === "requests" ? (
-          <div className="content-stack">
-            <section className="panel">
-              <div className="section-head">
-                <div>
-                  <h2 className="section-title sm">Incoming notifications</h2>
-                  <p className="section-hint">Use this section as the decision center, not the homepage.</p>
-                </div>
-
-                <button
-                  onClick={() => void markNotificationsSeen()}
-                  disabled={markingNotifs || unseenNotificationCount === 0}
-                  className="btn btn-secondary compact-btn"
-                  type="button"
-                >
-                  {markingNotifs ? "Working…" : "Mark all seen"}
+        {drawerOpen ? (
+          <SideDrawer
+            open={drawerOpen}
+            section={drawerSection}
+            onClose={() => setDrawerOpen(false)}
+            onBack={() => setDrawerSection("menu")}
+          >
+            {drawerSection === "menu" ? (
+              <div className="drawer-stack">
+                <DrawerMenuRow
+                  label="Notifications"
+                  meta={unseenNotificationCount ? `${unseenNotificationCount} new` : "Nothing new"}
+                  onClick={() => setDrawerSection("notifications")}
+                  highlight={unseenNotificationCount > 0}
+                />
+                <DrawerMenuRow
+                  label="Requests on my posts"
+                  meta={incomingCount ? `${incomingCount} waiting` : "All clear"}
+                  onClick={() => setDrawerSection("requests")}
+                  highlight={incomingCount > 0}
+                />
+                <DrawerMenuRow
+                  label="My activity"
+                  meta={activityCount ? `${activityCount} records` : "No recent activity"}
+                  onClick={() => setDrawerSection("activity")}
+                />
+                <DrawerMenuRow
+                  label="Refresh"
+                  meta="Reload latest profile data"
+                  onClick={() => {
+                    if (userId) void loadAllFor(userId);
+                    setDrawerOpen(false);
+                  }}
+                />
+                <button className="drawer-danger-btn" onClick={() => void signOut()} type="button">
+                  Sign out
                 </button>
               </div>
+            ) : null}
 
-              {notifications.length === 0 ? (
-                <EmptyState title="No notifications" body="New requests and offers will appear here." compact />
-              ) : (
-                <div className="stack-list">
-                  {notifications.map((n) => (
+            {drawerSection === "notifications" ? (
+              <div className="drawer-stack">
+                <div className="drawer-headline-row">
+                  <div>
+                    <div className="drawer-title">Notifications</div>
+                    <div className="drawer-sub">Secondary activity stays here, not on the main profile.</div>
+                  </div>
+                  <button
+                    onClick={() => void markNotificationsSeen()}
+                    disabled={markingNotifs || unseenNotificationCount === 0}
+                    className="btn btn-secondary inline"
+                    type="button"
+                  >
+                    {markingNotifs ? "Working…" : "Mark seen"}
+                  </button>
+                </div>
+
+                {notifications.length === 0 ? (
+                  <DrawerEmpty title="No notifications" body="New alerts will appear here." />
+                ) : (
+                  notifications.map((n) => (
                     <NotificationCard
                       key={n.id}
                       title={n.title}
@@ -1505,191 +1252,152 @@ export default function AccountPage() {
                       isNew={!n.seen_at}
                       onClick={() => openNotification(n)}
                     />
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="panel">
-              <div className="section-head">
-                <div>
-                  <h2 className="section-title sm">Incoming item requests</h2>
-                  <p className="section-hint">People who requested your give posts.</p>
-                </div>
-                <Chip label={`${incomingInterests.length}`} tone={incomingInterests.length ? "green" : "gray"} />
+                  ))
+                )}
               </div>
+            ) : null}
 
-              {incomingInterests.length === 0 ? (
-                <EmptyState title="No incoming item requests" body="When someone requests your give post, it will show here." compact />
-              ) : (
-                <div className="stack-list">
-                  {incomingInterests.map((r) => (
-                    <RequestRowCard
-                      key={r.id}
-                      photoUrl={r.item?.photo_url ?? null}
-                      title={`${readableName(r.requester)} requested ${r.item?.title ?? "your post"}`}
-                      subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${r.item?.status ?? "—"}`}
-                      chips={[
-                        { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
-                        { label: r.item?.status ?? "—", tone: toneForStatus(r.item?.status) },
-                      ]}
-                      primaryLabel="Manage"
-                      onPrimary={() => router.push(`/manage/${r.item_id}`)}
-                    />
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="panel">
-              <div className="section-head">
+            {drawerSection === "requests" ? (
+              <div className="drawer-stack">
                 <div>
-                  <h2 className="section-title sm">Incoming helper offers</h2>
-                  <p className="section-hint">Accept one, hold some, or decline.</p>
+                  <div className="drawer-title">Requests on my posts</div>
+                  <div className="drawer-sub">Use this drawer as the action center.</div>
                 </div>
-                <Chip label={`${incomingOffers.length}`} tone={incomingOffers.length ? "green" : "gray"} />
-              </div>
 
-              {incomingOffers.length === 0 ? (
-                <EmptyState title="No incoming helper offers" body="When someone offers help on your request post, it will show here." compact />
-              ) : (
-                <div className="stack-list">
-                  {incomingOffers.map((o) => {
-                    const status = (o.status ?? "pending") as OfferStatus;
-                    const busy = incomingOfferBusyId === o.id;
-
-                    return (
-                      <OfferRowCard
-                        key={o.id}
-                        icon="🤝"
-                        title={`${readableName(o.helper)} offered help on ${o.request_item?.title ?? "your request"}`}
-                        subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
-                        note={o.note}
-                        statusLabel={status}
-                        onView={() => router.push(`/manage/${o.request_id}`)}
-                        onAccept={() => void updateIncomingOfferStatus(o, "accepted")}
-                        onHold={() => void updateIncomingOfferStatus(o, "hold")}
-                        onDecline={() => void updateIncomingOfferStatus(o, "declined")}
-                        onChat={() => void openIncomingOfferChat(o)}
-                        busy={busy}
-                        accepted={status === "accepted"}
-                        completed={status === "completed"}
-                        declined={status === "declined"}
+                <DrawerSectionCard
+                  title="Incoming item requests"
+                  count={incomingInterests.length}
+                >
+                  {incomingInterests.length === 0 ? (
+                    <DrawerEmpty title="No incoming item requests" body="When someone requests your item, it appears here." />
+                  ) : (
+                    incomingInterests.map((r) => (
+                      <MiniRowCard
+                        key={r.id}
+                        photoUrl={r.item?.photo_url ?? null}
+                        title={`${readableName(r.requester)} requested ${r.item?.title ?? "your post"}`}
+                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${r.item?.status ?? "—"}`}
+                        chips={[
+                          { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
+                          { label: r.item?.status ?? "—", tone: toneForStatus(r.item?.status) },
+                        ]}
+                        primaryLabel="Manage"
+                        onPrimary={() => {
+                          setDrawerOpen(false);
+                          router.push(`/manage/${r.item_id}`);
+                        }}
                       />
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          </div>
-        ) : null}
+                    ))
+                  )}
+                </DrawerSectionCard>
 
-        {tab === "activity" ? (
-          <div className="content-stack">
-            <section className="panel">
-              <div className="section-head">
-                <div>
-                  <h2 className="section-title sm">My interests</h2>
-                  <p className="section-hint">Give posts you requested.</p>
-                </div>
-                <Chip label={`${myRequests.length}`} tone={myRequests.length ? "green" : "gray"} />
+                <DrawerSectionCard
+                  title="Incoming helper offers"
+                  count={incomingOffers.length}
+                >
+                  {incomingOffers.length === 0 ? (
+                    <DrawerEmpty title="No helper offers" body="When someone offers help on your request post, it appears here." />
+                  ) : (
+                    incomingOffers.map((o) => {
+                      const status = (o.status ?? "pending") as OfferStatus;
+                      const busy = incomingOfferBusyId === o.id;
+
+                      return (
+                        <OfferActionCard
+                          key={o.id}
+                          icon="🤝"
+                          title={`${readableName(o.helper)} offered help on ${o.request_item?.title ?? "your request"}`}
+                          subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
+                          note={o.note}
+                          statusLabel={status}
+                          onView={() => {
+                            setDrawerOpen(false);
+                            router.push(`/manage/${o.request_item?.id ?? o.request_id}`);
+                          }}
+                          onAccept={() => void updateIncomingOfferStatus(o, "accepted")}
+                          onHold={() => void updateIncomingOfferStatus(o, "hold")}
+                          onDecline={() => void updateIncomingOfferStatus(o, "declined")}
+                          onChat={() => void openIncomingOfferChat(o)}
+                          busy={busy}
+                          accepted={status === "accepted"}
+                          completed={status === "completed"}
+                          declined={status === "declined"}
+                        />
+                      );
+                    })
+                  )}
+                </DrawerSectionCard>
               </div>
+            ) : null}
 
-              {myRequests.length === 0 ? (
-                <EmptyState
-                  title="No interests yet"
-                  body="Go to the feed and request an item to see it here."
-                  actionLabel="Browse feed"
-                  onAction={() => router.push("/feed")}
-                  compact
-                />
-              ) : (
-                <div className="stack-list">
-                  {myRequests.map((r, i) => (
-                    <RequestRowCard
-                      key={`${r.item_id}-${r.created_at ?? i}`}
-                      photoUrl={r.item?.photo_url ?? null}
-                      title={r.item?.title ?? "Unknown post"}
-                      subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${r.item?.status ?? "—"}`}
-                      chips={[
-                        { label: "Interest sent", tone: "green" },
-                        { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
-                      ]}
-                      primaryLabel="View"
-                      onPrimary={() => router.push(`/item/${r.item_id}`)}
-                    />
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="panel">
-              <div className="section-head">
+            {drawerSection === "activity" ? (
+              <div className="drawer-stack">
                 <div>
-                  <h2 className="section-title sm">My offers</h2>
-                  <p className="section-hint">Request posts where you offered help.</p>
+                  <div className="drawer-title">My activity</div>
+                  <div className="drawer-sub">Your interests and helper offers live here for now.</div>
                 </div>
-                <Chip label={`${myOffers.length}`} tone={myOffers.length ? "green" : "gray"} />
-              </div>
 
-              {myOffers.length === 0 ? (
-                <EmptyState
-                  title="No offers yet"
-                  body="Find a request post in the feed and offer help."
-                  actionLabel="Browse feed"
-                  onAction={() => router.push("/feed")}
-                  compact
-                />
-              ) : (
-                <div className="stack-list">
-                  {myOffers.map((o) => {
-                    const status = (o.status ?? "pending") as OfferStatus;
-                    const acting = myOfferBusyId === o.id;
-
-                    return (
-                      <OfferRowCard
-                        key={o.id}
-                        icon="🙌"
-                        title={`You offered help on ${o.request_item?.title ?? "a request"}`}
-                        subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
-                        note={o.note}
-                        statusLabel={status}
-                        onView={() => router.push(`/item/${o.request_id}`)}
-                        onChat={() => void openMyOfferChat(o)}
-                        onDecline={() => void withdrawMyOffer(o)}
-                        busy={acting}
-                        accepted={status === "accepted"}
-                        completed={status === "completed"}
-                        declined={false}
-                        customDeclineLabel={acting ? "Working…" : "Withdraw"}
-                        hideAccept
-                        hideHold
+                <DrawerSectionCard title="My interests" count={myRequests.length}>
+                  {myRequests.length === 0 ? (
+                    <DrawerEmpty title="No interests yet" body="When you request an item, it appears here." />
+                  ) : (
+                    myRequests.map((r, i) => (
+                      <MiniRowCard
+                        key={`${r.item_id}-${r.created_at ?? i}`}
+                        photoUrl={r.item?.photo_url ?? null}
+                        title={r.item?.title ?? "Unknown post"}
+                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${r.item?.status ?? "—"}`}
+                        chips={[
+                          { label: "Interest sent", tone: "green" },
+                          { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
+                        ]}
+                        primaryLabel="View"
+                        onPrimary={() => {
+                          setDrawerOpen(false);
+                          router.push(`/item/${r.item_id}`);
+                        }}
                       />
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          </div>
-        ) : null}
+                    ))
+                  )}
+                </DrawerSectionCard>
 
-        {tab === "history" ? (
-          <div className="content-stack">
-            <section className="panel-soft">
-              <h2 className="section-title sm">Completed listings</h2>
-              <p className="section-hint">These were claimed or completed and are now archived.</p>
-            </section>
+                <DrawerSectionCard title="My offers" count={myOffers.length}>
+                  {myOffers.length === 0 ? (
+                    <DrawerEmpty title="No offers yet" body="When you offer help on a request post, it appears here." />
+                  ) : (
+                    myOffers.map((o) => {
+                      const status = (o.status ?? "pending") as OfferStatus;
+                      const acting = myOfferBusyId === o.id;
 
-            {completedListings.length === 0 ? (
-              <EmptyState title="No completed listings yet" body="Finished posts will move here automatically." compact />
-            ) : (
-              <div className="card-grid">
-                {completedListings.map((item) => (
-                  <HistoryCard key={item.id} item={item} />
-                ))}
+                      return (
+                        <OfferActionCard
+                          key={o.id}
+                          icon="🙌"
+                          title={`You offered help on ${o.request_item?.title ?? "a request"}`}
+                          subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
+                          note={o.note}
+                          statusLabel={status}
+                          onView={() => {
+                            setDrawerOpen(false);
+                            router.push(`/item/${o.request_item?.id ?? o.request_id}`);
+                          }}
+                          onChat={() => void openMyOfferChat(o)}
+                          onDecline={() => void withdrawMyOffer(o)}
+                          busy={acting}
+                          accepted={status === "accepted"}
+                          completed={status === "completed"}
+                          declined={false}
+                          customDeclineLabel={acting ? "Working…" : "Withdraw"}
+                          hideAccept
+                          hideHold
+                        />
+                      );
+                    })
+                  )}
+                </DrawerSectionCard>
               </div>
-            )}
-          </div>
+            ) : null}
+          </SideDrawer>
         ) : null}
 
         {confirm ? (
@@ -1714,76 +1422,118 @@ export default function AccountPage() {
    COMPONENTS
 ============================== */
 
-function MetricCard({
-  label,
-  value,
-  hint,
+function ProfileGridTile({
+  item,
   onClick,
-  highlight,
 }: {
-  label: string;
-  value: number;
-  hint: string;
-  onClick?: () => void;
-  highlight?: boolean;
+  item: MyItemRow;
+  onClick: () => void;
 }) {
+  const statusTone = toneForStatus(item.status);
+  const topLabel = item.post_type === "request" ? "REQUEST" : item.post_type === "event" ? "EVENT" : "ITEM";
+
   return (
-    <button onClick={onClick} className={`metric-card ${highlight ? "highlight" : ""}`} type="button">
-      <div className="metric-label">{label}</div>
-      <div className="metric-value">{value}</div>
-      <div className="metric-hint">{hint}</div>
+    <button className="profile-tile" onClick={onClick} type="button">
+      {item.photo_url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={item.photo_url} alt={item.title} className="profile-tile-img" />
+      ) : (
+        <div className={`profile-tile-fallback ${item.post_type ?? "give"}`}>
+          <span>{topLabel}</span>
+        </div>
+      )}
+
+      <div className="tile-top">
+        <span className="tile-type">{itemTypeLabel(item.post_type)}</span>
+      </div>
+
+      <div className="tile-bottom">
+        <div className="tile-title">{item.title}</div>
+        <span className={`tile-status ${statusTone}`}>{item.status ?? "—"}</span>
+      </div>
     </button>
   );
 }
 
-function AttentionCard({
-  title,
-  body,
-  cta,
-  onClick,
+function SideDrawer({
+  open,
+  section,
+  onClose,
+  onBack,
+  children,
 }: {
-  title: string;
-  body: string;
-  cta: string;
-  onClick: () => void;
+  open: boolean;
+  section: DrawerSection;
+  onClose: () => void;
+  onBack: () => void;
+  children: React.ReactNode;
 }) {
+  if (!open) return null;
+
   return (
-    <div className="attention-card">
-      <div>
-        <div className="attention-title">{title}</div>
-        <div className="attention-body">{body}</div>
-      </div>
-      <button onClick={onClick} className="btn btn-primary inline top-gap" type="button">
-        {cta}
-      </button>
+    <div className="drawer-overlay" onClick={onClose}>
+      <aside className="drawer-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="drawer-topbar">
+          {section !== "menu" ? (
+            <button type="button" className="drawer-nav-btn" onClick={onBack}>
+              ←
+            </button>
+          ) : (
+            <div className="drawer-nav-spacer" />
+          )}
+
+          <div className="drawer-topbar-title">Profile menu</div>
+
+          <button type="button" className="drawer-nav-btn" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+
+        <div className="drawer-content">{children}</div>
+      </aside>
     </div>
   );
 }
 
-function QuickActionCard({
-  emoji,
-  title,
-  body,
-  actionLabel,
+function DrawerMenuRow({
+  label,
+  meta,
   onClick,
-  primary,
+  highlight,
 }: {
-  emoji: string;
-  title: string;
-  body: string;
-  actionLabel: string;
+  label: string;
+  meta: string;
   onClick: () => void;
-  primary?: boolean;
+  highlight?: boolean;
 }) {
   return (
-    <div className={`quick-card ${primary ? "primary" : ""}`}>
-      <div className="quick-emoji">{emoji}</div>
-      <div className="quick-title">{title}</div>
-      <div className="quick-body">{body}</div>
-      <button onClick={onClick} className={`btn ${primary ? "btn-primary" : "btn-secondary"} inline top-gap`} type="button">
-        {actionLabel}
-      </button>
-    </div>
+    <button type="button" className={`drawer-menu-row ${highlight ? "highlight" : ""}`} onClick={onClick}>
+      <div className="drawer-menu-copy">
+        <div className="drawer-menu-title">{label}</div>
+        <div className="drawer-menu-meta">{meta}</div>
+      </div>
+      <div className="drawer-menu-arrow">→</div>
+    </button>
+  );
+}
+
+function DrawerSectionCard({
+  title,
+  count,
+  children,
+}: {
+  title: string;
+  count: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="drawer-section-card">
+      <div className="drawer-section-head">
+        <div className="drawer-section-title">{title}</div>
+        <Chip label={`${count}`} tone={count ? "green" : "gray"} />
+      </div>
+      <div className="drawer-section-stack">{children}</div>
+    </section>
   );
 }
 
@@ -1814,144 +1564,7 @@ function NotificationCard({
   );
 }
 
-function CompactItemRow({
-  title,
-  subtitle,
-  photoUrl,
-  chip1,
-  chip2,
-  onClick,
-  ctaLabel,
-}: {
-  title: string;
-  subtitle: string;
-  photoUrl: string | null;
-  chip1?: string;
-  chip2?: string;
-  onClick: () => void;
-  ctaLabel: string;
-}) {
-  return (
-    <div className="compact-row">
-      <MediaThumb photoUrl={photoUrl} label={title} size={62} />
-      <div className="compact-copy">
-        <div className="compact-title">{title}</div>
-        <div className="compact-sub">{subtitle}</div>
-        <div className="chip-row top-gap-sm">
-          {chip1 ? <Chip label={chip1} tone="gray" /> : null}
-          {chip2 ? <Chip label={chip2} tone={toneForStatus(chip2)} /> : null}
-        </div>
-      </div>
-      <button onClick={onClick} className="btn btn-secondary inline" type="button">
-        {ctaLabel}
-      </button>
-    </div>
-  );
-}
-
-function CompactTextRow({
-  icon,
-  title,
-  subtitle,
-  onClick,
-  ctaLabel,
-}: {
-  icon: string;
-  title: string;
-  subtitle: string;
-  onClick: () => void;
-  ctaLabel: string;
-}) {
-  return (
-    <div className="compact-row">
-      <div className="icon-pill">{icon}</div>
-      <div className="compact-copy">
-        <div className="compact-title">{title}</div>
-        <div className="compact-sub">{subtitle}</div>
-      </div>
-      <button onClick={onClick} className="btn btn-secondary inline" type="button">
-        {ctaLabel}
-      </button>
-    </div>
-  );
-}
-
-function ListingCard({
-  item,
-  deleting,
-  onManage,
-  onEdit,
-  onDelete,
-}: {
-  item: MyItemRow;
-  deleting: boolean;
-  onManage: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  return (
-    <div className="listing-card">
-      <div className="listing-image-wrap">
-        {item.photo_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.photo_url} alt={item.title} className="listing-image" />
-        ) : (
-          <div className="listing-image-fallback">{itemTypeLabel(item.post_type)}</div>
-        )}
-
-        <div className="listing-top-badges">
-          <Chip label={itemTypeLabel(item.post_type)} tone="gray" />
-          <Chip label={item.status ?? "—"} tone={toneForStatus(item.status)} />
-        </div>
-      </div>
-
-      <div className="listing-body">
-        <div className="listing-title">{item.title}</div>
-        <div className="listing-sub">{item.description || "No description provided yet."}</div>
-        <div className="listing-meta">Posted {fmtWhen(item.created_at)}</div>
-
-        <div className="listing-actions">
-          <button onClick={onManage} className="btn btn-primary inline" type="button">
-            Manage
-          </button>
-          <button onClick={onEdit} className="btn btn-secondary inline" type="button">
-            Edit
-          </button>
-          <button onClick={onDelete} disabled={deleting} className="btn btn-danger inline" type="button">
-            {deleting ? "Deleting…" : "Delete"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function HistoryCard({ item }: { item: MyItemRow }) {
-  return (
-    <div className="listing-card history-card">
-      <div className="listing-image-wrap">
-        {item.photo_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.photo_url} alt={item.title} className="listing-image" />
-        ) : (
-          <div className="listing-image-fallback">Completed</div>
-        )}
-      </div>
-
-      <div className="listing-body">
-        <div className="listing-title">{item.title}</div>
-        <div className="listing-sub">{item.description || "No description provided."}</div>
-        <div className="chip-row top-gap-sm">
-          <Chip label={itemTypeLabel(item.post_type)} tone="gray" />
-          <Chip label="Completed" tone="green" />
-        </div>
-        <div className="listing-meta">Posted {fmtWhen(item.created_at)}</div>
-      </div>
-    </div>
-  );
-}
-
-function RequestRowCard({
+function MiniRowCard({
   photoUrl,
   title,
   subtitle,
@@ -1967,12 +1580,12 @@ function RequestRowCard({
   onPrimary: () => void;
 }) {
   return (
-    <div className="row-card">
-      <div className="row-main">
-        <MediaThumb photoUrl={photoUrl} label={title} size={68} />
-        <div className="row-copy">
-          <div className="row-title">{title}</div>
-          <div className="row-meta">{subtitle}</div>
+    <div className="mini-row-card">
+      <div className="mini-row-main">
+        <MediaThumb photoUrl={photoUrl} label={title} size={60} />
+        <div className="mini-row-copy">
+          <div className="mini-row-title">{title}</div>
+          <div className="mini-row-sub">{subtitle}</div>
           {chips?.length ? (
             <div className="chip-row top-gap-sm">
               {chips.map((chip, i) => (
@@ -1983,16 +1596,14 @@ function RequestRowCard({
         </div>
       </div>
 
-      <div className="action-row">
-        <button onClick={onPrimary} className="btn btn-primary inline" type="button">
-          {primaryLabel}
-        </button>
-      </div>
+      <button onClick={onPrimary} className="btn btn-secondary inline" type="button">
+        {primaryLabel}
+      </button>
     </div>
   );
 }
 
-function OfferRowCard({
+function OfferActionCard({
   icon,
   title,
   subtitle,
@@ -2030,12 +1641,12 @@ function OfferRowCard({
   hideHold?: boolean;
 }) {
   return (
-    <div className="row-card">
-      <div className="row-main">
+    <div className="offer-card">
+      <div className="offer-main">
         <div className="offer-icon-pill">{icon}</div>
-        <div className="row-copy">
-          <div className="row-title">{title}</div>
-          <div className="row-meta">{subtitle}</div>
+        <div className="offer-copy">
+          <div className="offer-title">{title}</div>
+          <div className="offer-sub">{subtitle}</div>
           <div className="chip-row top-gap-sm">
             <Chip label={statusLabel} tone={toneForStatus(statusLabel)} />
           </div>
@@ -2043,7 +1654,7 @@ function OfferRowCard({
         </div>
       </div>
 
-      <div className="action-row">
+      <div className="offer-actions">
         <button onClick={onView} className="btn btn-secondary inline" type="button">
           View
         </button>
@@ -2067,37 +1678,40 @@ function OfferRowCard({
         ) : null}
 
         <button onClick={onChat} disabled={busy || !accepted} className="btn btn-secondary inline" type="button">
-          {busy ? "Opening…" : "Start chat"}
+          {busy ? "Opening…" : "Chat"}
         </button>
       </div>
     </div>
   );
 }
 
-function EmptyState({
+function DrawerEmpty({
   title,
   body,
-  actionLabel,
-  onAction,
-  compact,
 }: {
   title: string;
   body: string;
-  actionLabel?: string;
-  onAction?: () => void;
-  compact?: boolean;
 }) {
   return (
-    <div className={`empty-box ${compact ? "compact" : ""}`}>
-      <div className="empty-title">{title}</div>
-      <div className="empty-body">{body}</div>
-      {actionLabel && onAction ? (
-        <div className="top-gap">
-          <button onClick={onAction} className="btn btn-secondary inline" type="button">
-            {actionLabel}
-          </button>
-        </div>
-      ) : null}
+    <div className="drawer-empty">
+      <div className="drawer-empty-title">{title}</div>
+      <div className="drawer-empty-body">{body}</div>
+    </div>
+  );
+}
+
+function EmptyGridState({
+  title,
+  body,
+}: {
+  title: string;
+  body: string;
+}) {
+  return (
+    <div className="empty-grid">
+      <div className="empty-grid-icon">⌁</div>
+      <div className="empty-grid-title">{title}</div>
+      <div className="empty-grid-body">{body}</div>
     </div>
   );
 }
@@ -2200,138 +1814,35 @@ function PageStyles() {
         overflow-x: hidden;
       }
 
+      :root {
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --panel-2: #fafafa;
+        --line: #e8eaee;
+        --text: #111827;
+        --muted: #6b7280;
+        --green: #0f766e;
+        --green-bg: rgba(16, 185, 129, 0.08);
+      }
+
       .account-page {
         min-height: 100vh;
-        background: linear-gradient(180deg, #f8fafc 0%, #f4f5f7 45%, #eef2f7 100%);
-        color: #111827;
+        background:
+          radial-gradient(circle at top left, rgba(16, 185, 129, 0.06), transparent 24%),
+          linear-gradient(180deg, #fbfbfc 0%, #f5f7fa 100%);
+        color: var(--text);
       }
 
       .page-shell {
         width: 100%;
-        max-width: 1100px;
+        max-width: 980px;
         margin: 0 auto;
         padding: 12px;
         padding-bottom: calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 24px);
       }
 
-      .page-shell.narrow {
-        max-width: 760px;
-      }
-
-      .hero-card,
-      .panel,
-      .panel-soft,
-      .attention-card,
-      .listing-card,
-      .row-card,
-      .quick-card,
-      .metric-card,
-      .empty-box,
-      .auth-form-panel,
-      .notif-card {
-        min-width: 0;
-      }
-
-      .hero-card {
-        border-radius: 28px;
-        border: 1px solid rgba(229, 231, 235, 0.9);
-        background: linear-gradient(180deg, rgba(255,255,255,0.97) 0%, rgba(255,255,255,0.90) 100%);
-        box-shadow: 0 20px 60px rgba(15,23,42,0.08);
-        padding: 16px;
-      }
-
-      .hero-mobile-first {
-        display: grid;
-        gap: 14px;
-      }
-
-      .hero-head {
-        display: flex;
-        align-items: flex-start;
-        gap: 12px;
-        min-width: 0;
-      }
-
-      .hero-copy {
-        min-width: 0;
-        flex: 1;
-      }
-
-      .eyebrow {
-        font-size: 12px;
-        color: #065f46;
-        font-weight: 900;
-        text-transform: uppercase;
-        letter-spacing: 0.35px;
-      }
-
-      .hero-title {
-        margin: 6px 0 0;
-        font-size: clamp(28px, 7vw, 40px);
-        line-height: 1.02;
-        font-weight: 950;
-        color: #111827;
-        word-break: break-word;
-      }
-
-      .clamp-title {
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-      }
-
-      .hero-sub {
-        margin: 8px 0 0;
-        color: #4b5563;
-        font-size: 14px;
-        line-height: 1.5;
-        overflow-wrap: anywhere;
-      }
-
-      .hero-copy-sub {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-        align-items: center;
-      }
-
-      .dot {
-        color: #9ca3af;
-      }
-
-      .email-chip {
-        max-width: 100%;
-        overflow-wrap: anywhere;
-      }
-
-      .avatar-large {
-        width: 72px;
-        height: 72px;
-        border-radius: 22px;
-        border: 1px solid #e5e7eb;
-        background: linear-gradient(180deg, #ffffff 0%, #f3f4f6 100%);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex: 0 0 72px;
-        font-size: 28px;
-        font-weight: 950;
-      }
-
-      .hero-chip-row,
-      .chip-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        min-width: 0;
-      }
-
-      .hero-action-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 10px;
-        align-items: stretch;
+      .auth-shell {
+        max-width: 560px;
       }
 
       .btn {
@@ -2354,21 +1865,15 @@ function PageStyles() {
       }
 
       .btn.inline {
-        min-height: 42px;
-        padding: 0 14px;
-        border-radius: 14px;
-      }
-
-      .btn.compact-btn {
-        min-height: 42px;
+        min-height: 40px;
         padding: 0 14px;
         border-radius: 14px;
       }
 
       .btn-primary {
         min-height: 48px;
-        border: 1px solid rgba(16,185,129,0.35);
-        background: linear-gradient(180deg, rgba(16,185,129,0.18) 0%, rgba(16,185,129,0.10) 100%);
+        border: 1px solid rgba(16, 185, 129, 0.3);
+        background: linear-gradient(180deg, rgba(16, 185, 129, 0.18) 0%, rgba(16, 185, 129, 0.1) 100%);
         color: #065f46;
         border-radius: 16px;
         padding: 0 16px;
@@ -2376,274 +1881,602 @@ function PageStyles() {
 
       .btn-secondary {
         min-height: 48px;
-        border: 1px solid #e5e7eb;
+        border: 1px solid var(--line);
         background: #fff;
-        color: #111827;
+        color: var(--text);
         border-radius: 16px;
         padding: 0 16px;
       }
 
       .btn-danger {
         min-height: 48px;
-        border: 1px solid rgba(185,28,28,0.28);
+        border: 1px solid rgba(185, 28, 28, 0.22);
         background: #fff;
         color: #991b1b;
         border-radius: 16px;
         padding: 0 16px;
       }
 
-      .stats-grid {
-        display: grid;
-        gap: 10px;
+      .profile-card,
+      .auth-card,
+      .notif-card,
+      .drawer-menu-row,
+      .drawer-section-card,
+      .mini-row-card,
+      .offer-card,
+      .empty-grid {
+        min-width: 0;
       }
 
-      .mobile-stats-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+      .profile-card {
+        border-radius: 28px;
+        border: 1px solid rgba(232, 234, 238, 0.95);
+        background: rgba(255, 255, 255, 0.96);
+        backdrop-filter: blur(10px);
+        box-shadow: 0 18px 48px rgba(15, 23, 42, 0.06);
+        padding: 16px;
       }
 
-      .metric-card {
-        text-align: left;
-        border-radius: 20px;
-        border: 1px solid #e5e7eb;
+      .profile-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 14px;
+      }
+
+      .profile-left {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        min-width: 0;
+        flex: 1;
+      }
+
+      .profile-avatar {
+        width: 72px;
+        height: 72px;
+        border-radius: 24px;
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, #ffffff 0%, #f3f4f6 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 72px;
+        font-size: 28px;
+        font-weight: 950;
+      }
+
+      .profile-copy {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .profile-name {
+        margin: 0;
+        font-size: clamp(26px, 6vw, 34px);
+        line-height: 1.02;
+        font-weight: 950;
+        word-break: break-word;
+      }
+
+      .profile-meta {
+        margin-top: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .dot {
+        color: #9ca3af;
+      }
+
+      .break-any {
+        overflow-wrap: anywhere;
+      }
+
+      .menu-btn {
+        width: 46px;
+        height: 46px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
         background: #fff;
-        padding: 14px;
-        box-shadow: 0 8px 22px rgba(15,23,42,0.04);
+        display: inline-flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        gap: 4px;
+        flex: 0 0 46px;
       }
 
-      .metric-card.highlight {
-        border-color: rgba(16,185,129,0.32);
-        background: rgba(16,185,129,0.08);
+      .menu-btn span {
+        width: 18px;
+        height: 2px;
+        border-radius: 999px;
+        background: #111827;
+        display: block;
       }
 
-      .metric-label {
-        font-size: 12px;
+      .mini-stats {
+        margin-top: 14px;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .mini-pill {
+        border: 1px solid var(--line);
+        background: #fff;
+        border-radius: 18px;
+        padding: 10px 10px 9px;
+        min-height: 64px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 4px;
+        text-align: left;
+      }
+
+      .mini-pill.active {
+        border-color: rgba(16, 185, 129, 0.28);
+        background: rgba(16, 185, 129, 0.08);
+      }
+
+      .mini-pill-label {
+        font-size: 11px;
         font-weight: 900;
         color: #6b7280;
+        text-transform: uppercase;
+        letter-spacing: 0.25px;
       }
 
-      .metric-value {
-        margin-top: 8px;
-        font-size: 28px;
+      .mini-pill-value {
+        font-size: 18px;
         font-weight: 950;
         color: #111827;
         line-height: 1;
       }
 
-      .metric-hint {
-        margin-top: 6px;
-        font-size: 12px;
-        color: #6b7280;
-        line-height: 1.35;
-      }
-
-      .attention-section,
-      .content-stack {
+      .content-head {
+        position: sticky;
+        top: 0;
+        z-index: 18;
         margin-top: 14px;
+        padding-top: 6px;
         display: grid;
-        gap: 14px;
+        gap: 10px;
+        background: linear-gradient(180deg, rgba(246, 247, 249, 0.94) 0%, rgba(246, 247, 249, 0.82) 100%);
+        backdrop-filter: blur(10px);
       }
 
-      .section-head {
+      .media-tabs {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        border-radius: 20px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.88);
+        padding: 6px;
+      }
+
+      .media-tab {
+        min-height: 46px;
+        border: 1px solid transparent;
+        border-radius: 16px;
+        background: transparent;
+        color: var(--text);
+        font-weight: 900;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 0 10px;
+      }
+
+      .media-tab.active {
+        border-color: rgba(16, 185, 129, 0.28);
+        background: rgba(16, 185, 129, 0.1);
+        color: #065f46;
+      }
+
+      .media-tab-count {
+        min-width: 20px;
+        height: 20px;
+        border-radius: 999px;
+        background: rgba(17, 24, 39, 0.08);
+        color: inherit;
+        font-size: 11px;
+        font-weight: 950;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 6px;
+      }
+
+      .mode-chips {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 2px;
+      }
+
+      .mode-chip {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 30px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.8);
+        color: #6b7280;
+        padding: 0 12px;
+        font-size: 12px;
+        font-weight: 900;
+      }
+
+      .mode-chip.selected {
+        border-color: rgba(16, 185, 129, 0.28);
+        background: rgba(16, 185, 129, 0.08);
+        color: #065f46;
+      }
+
+      .grid-wrap {
+        margin-top: 12px;
+      }
+
+      .grid-topline {
         display: flex;
         justify-content: space-between;
-        align-items: flex-start;
+        align-items: flex-end;
         gap: 12px;
-        flex-wrap: wrap;
+        margin-bottom: 10px;
+        padding: 0 2px;
       }
 
-      .section-title {
-        margin: 0;
-        font-size: 22px;
+      .grid-title {
+        font-size: 16px;
+        font-weight: 950;
+        color: var(--text);
+      }
+
+      .grid-sub {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 800;
+      }
+
+      .listing-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+
+      .profile-tile {
+        position: relative;
+        aspect-ratio: 1 / 1;
+        border: 1px solid rgba(232, 234, 238, 0.95);
+        border-radius: 18px;
+        overflow: hidden;
+        background: #eef2f7;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+        text-align: left;
+      }
+
+      .profile-tile-img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .profile-tile-fallback {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+        font-weight: 950;
+        letter-spacing: 0.6px;
+        color: #111827;
+      }
+
+      .profile-tile-fallback.give {
+        background: linear-gradient(180deg, #f8fafc 0%, #e5e7eb 100%);
+      }
+
+      .profile-tile-fallback.request {
+        background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
+      }
+
+      .profile-tile-fallback.event {
+        background: linear-gradient(180deg, #faf5ff 0%, #ede9fe 100%);
+      }
+
+      .tile-top {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        right: 8px;
+        display: flex;
+        justify-content: flex-start;
+      }
+
+      .tile-type {
+        min-height: 24px;
+        border-radius: 999px;
+        padding: 0 8px;
+        background: rgba(17, 24, 39, 0.62);
+        backdrop-filter: blur(8px);
+        color: #fff;
+        font-size: 10px;
+        font-weight: 900;
+        display: inline-flex;
+        align-items: center;
+      }
+
+      .tile-bottom {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        padding: 10px;
+        background: linear-gradient(180deg, rgba(17, 24, 39, 0) 0%, rgba(17, 24, 39, 0.84) 100%);
+      }
+
+      .tile-title {
+        font-size: 12px;
+        font-weight: 900;
+        color: #fff;
+        line-height: 1.25;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+
+      .tile-status {
+        margin-top: 6px;
+        display: inline-flex;
+        align-items: center;
+        min-height: 22px;
+        border-radius: 999px;
+        padding: 0 8px;
+        font-size: 10px;
+        font-weight: 900;
+      }
+
+      .tile-status.green {
+        background: rgba(16, 185, 129, 0.18);
+        color: #d1fae5;
+      }
+
+      .tile-status.amber {
+        background: rgba(245, 158, 11, 0.18);
+        color: #fde68a;
+      }
+
+      .tile-status.red {
+        background: rgba(239, 68, 68, 0.18);
+        color: #fecaca;
+      }
+
+      .tile-status.gray {
+        background: rgba(255, 255, 255, 0.16);
+        color: #f9fafb;
+      }
+
+      .empty-grid {
+        border: 1px dashed #d1d5db;
+        background: rgba(255, 255, 255, 0.84);
+        border-radius: 24px;
+        min-height: 280px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 28px;
+        text-align: center;
+      }
+
+      .empty-grid-icon {
+        width: 52px;
+        height: 52px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+        color: #6b7280;
+      }
+
+      .empty-grid-title {
+        margin-top: 14px;
+        font-size: 20px;
         font-weight: 950;
         color: #111827;
       }
 
-      .section-title.sm {
-        font-size: 18px;
+      .empty-grid-body {
+        margin-top: 6px;
+        max-width: 420px;
+        color: #6b7280;
+        line-height: 1.5;
       }
 
-      .section-hint {
-        margin: 6px 0 0;
+      .drawer-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(17, 24, 39, 0.34);
+        z-index: 9998;
+      }
+
+      .drawer-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: min(92vw, 430px);
+        height: 100vh;
+        background: #fff;
+        border-left: 1px solid var(--line);
+        box-shadow: -16px 0 44px rgba(15, 23, 42, 0.16);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .drawer-topbar {
+        min-height: 62px;
+        padding: 12px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .drawer-topbar-title {
+        font-size: 15px;
+        font-weight: 950;
+        color: #111827;
+      }
+
+      .drawer-nav-btn,
+      .drawer-nav-spacer {
+        width: 38px;
+        height: 38px;
+        border-radius: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .drawer-nav-btn {
+        border: 1px solid var(--line);
+        background: #fff;
+        color: #111827;
+        font-weight: 900;
+      }
+
+      .drawer-content {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px;
+        padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
+      }
+
+      .drawer-stack {
+        display: grid;
+        gap: 12px;
+      }
+
+      .drawer-menu-row {
+        width: 100%;
+        text-align: left;
+        border-radius: 20px;
+        border: 1px solid var(--line);
+        background: #fff;
+        padding: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .drawer-menu-row.highlight {
+        border-color: rgba(16, 185, 129, 0.28);
+        background: rgba(16, 185, 129, 0.08);
+      }
+
+      .drawer-menu-copy {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .drawer-menu-title {
+        font-size: 15px;
+        font-weight: 950;
+        color: #111827;
+      }
+
+      .drawer-menu-meta {
+        margin-top: 4px;
         font-size: 13px;
         color: #6b7280;
         line-height: 1.45;
       }
 
-      .attention-grid,
-      .quick-grid,
-      .two-col-grid,
-      .card-grid {
-        display: grid;
-        gap: 12px;
+      .drawer-menu-arrow {
+        color: #6b7280;
+        font-weight: 900;
       }
 
-      .attention-grid {
-        grid-template-columns: 1fr;
+      .drawer-danger-btn {
+        min-height: 48px;
+        border-radius: 16px;
+        border: 1px solid rgba(185, 28, 28, 0.22);
+        background: #fff;
+        color: #991b1b;
+        font-weight: 900;
       }
 
-      .quick-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .two-col-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .card-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .attention-card {
-        border-radius: 22px;
-        border: 1px solid rgba(16,185,129,0.22);
-        background: linear-gradient(180deg, rgba(16,185,129,0.10) 0%, rgba(255,255,255,1) 100%);
-        padding: 16px;
-        box-shadow: 0 12px 30px rgba(16,185,129,0.06);
-      }
-
-      .attention-title {
-        font-size: 18px;
+      .drawer-title {
+        font-size: 22px;
         font-weight: 950;
         color: #111827;
-        line-height: 1.25;
       }
 
-      .attention-body {
-        margin-top: 6px;
-        color: #4b5563;
+      .drawer-sub {
+        margin-top: 5px;
+        color: #6b7280;
+        font-size: 13px;
         line-height: 1.45;
       }
 
-      .tab-sticky-wrap {
-        position: sticky;
-        top: 0;
-        z-index: 20;
-        padding-top: 8px;
-        margin-top: 14px;
-      }
-
-      .tabs-shell {
+      .drawer-headline-row {
         display: flex;
-        gap: 8px;
-        overflow-x: auto;
-        padding: 6px;
-        border-radius: 18px;
-        border: 1px solid #e5e7eb;
-        background: rgba(255,255,255,0.88);
-        backdrop-filter: blur(10px);
-        scrollbar-width: none;
-      }
-
-      .tabs-shell::-webkit-scrollbar {
-        display: none;
-      }
-
-      .tab-btn {
-        flex: 0 0 auto;
-        min-height: 42px;
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        border-radius: 14px;
-        border: 1px solid transparent;
-        background: transparent;
-        color: #111827;
-        padding: 0 14px;
-        font-weight: 900;
-        white-space: nowrap;
-      }
-
-      .tab-btn.active {
-        border-color: rgba(16,185,129,0.30);
-        background: rgba(16,185,129,0.12);
-        color: #065f46;
-      }
-
-      .badge-red {
-        min-width: 20px;
-        height: 20px;
-        border-radius: 999px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0 6px;
-        font-size: 11px;
-        font-weight: 900;
-        background: #ef4444;
-        color: #fff;
-      }
-
-      .panel,
-      .panel-soft,
-      .auth-form-panel {
-        border-radius: 24px;
-        border: 1px solid #e5e7eb;
-        padding: 16px;
-      }
-
-      .panel,
-      .auth-form-panel {
-        background: #fff;
-        box-shadow: 0 12px 32px rgba(15,23,42,0.06);
-      }
-
-      .panel-soft {
-        background: rgba(255,255,255,0.72);
-      }
-
-      .stack-list {
-        margin-top: 14px;
-        display: grid;
+        justify-content: space-between;
+        align-items: flex-start;
         gap: 12px;
       }
 
-      .quick-card {
+      .drawer-section-card {
         border-radius: 22px;
-        border: 1px solid #e5e7eb;
+        border: 1px solid var(--line);
         background: #fff;
-        padding: 16px;
-        min-height: 180px;
-        display: flex;
-        flex-direction: column;
+        padding: 14px;
       }
 
-      .quick-card.primary {
-        border-color: rgba(16,185,129,0.32);
-        background: rgba(16,185,129,0.08);
-      }
-
-      .quick-emoji {
-        width: 46px;
-        height: 46px;
-        border-radius: 16px;
-        background: #f3f4f6;
+      .drawer-section-head {
         display: flex;
         align-items: center;
-        justify-content: center;
-        font-size: 22px;
+        justify-content: space-between;
+        gap: 10px;
       }
 
-      .quick-title {
-        margin-top: 12px;
+      .drawer-section-title {
         font-size: 16px;
         font-weight: 950;
         color: #111827;
       }
 
-      .quick-body {
-        margin-top: 6px;
-        color: #4b5563;
-        line-height: 1.45;
+      .drawer-section-stack {
+        margin-top: 12px;
+        display: grid;
+        gap: 10px;
       }
 
       .notif-card {
         width: 100%;
         text-align: left;
         border-radius: 18px;
-        border: 1px solid #e5e7eb;
+        border: 1px solid var(--line);
         background: #fff;
         padding: 14px;
-        box-shadow: 0 8px 22px rgba(15,23,42,0.04);
       }
 
       .notif-head {
@@ -2677,181 +2510,51 @@ function PageStyles() {
         font-weight: 800;
       }
 
-      .compact-row,
-      .row-card {
-        border-radius: 20px;
-        border: 1px solid #e5e7eb;
+      .mini-row-card {
+        border-radius: 18px;
+        border: 1px solid var(--line);
         background: #fff;
-      }
-
-      .compact-row {
-        display: flex;
-        align-items: center;
-        gap: 12px;
         padding: 12px;
+        display: grid;
+        gap: 12px;
       }
 
-      .compact-copy,
-      .row-copy {
+      .mini-row-main {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .mini-row-copy {
         min-width: 0;
         flex: 1;
       }
 
-      .compact-title,
-      .row-title,
-      .listing-title,
-      .empty-title,
-      .modal-title {
+      .mini-row-title {
+        font-size: 14px;
         font-weight: 950;
         color: #111827;
-      }
-
-      .compact-title,
-      .row-title {
-        font-size: 15px;
         line-height: 1.35;
         overflow-wrap: anywhere;
       }
 
-      .compact-sub,
-      .row-meta,
-      .listing-sub,
-      .empty-body,
-      .modal-body {
-        color: #6b7280;
-        line-height: 1.45;
-      }
-
-      .compact-sub,
-      .row-meta {
+      .mini-row-sub {
         margin-top: 4px;
         font-size: 13px;
+        color: #6b7280;
+        line-height: 1.45;
         overflow-wrap: anywhere;
       }
 
-      .icon-pill,
-      .offer-icon-pill,
-      .media-thumb {
-        flex-shrink: 0;
-      }
-
-      .icon-pill {
-        width: 62px;
-        height: 62px;
+      .offer-card {
         border-radius: 18px;
-        background: #f3f4f6;
-        border: 1px solid #e5e7eb;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 24px;
-      }
-
-      .media-thumb {
-        border-radius: 18px;
-        border: 1px solid #e5e7eb;
-        background: #f3f4f6;
-        overflow: hidden;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: #6b7280;
-      }
-
-      .media-thumb-img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
-      }
-
-      .listing-card {
-        overflow: hidden;
-        box-shadow: 0 14px 32px rgba(15,23,42,0.06);
-        border-radius: 24px;
-        border: 1px solid #e5e7eb;
+        border: 1px solid var(--line);
         background: #fff;
+        padding: 12px;
       }
 
-      .history-card {
-        background: linear-gradient(180deg, #ffffff 0%, #f9fafb 100%);
-      }
-
-      .listing-image-wrap {
-        position: relative;
-        width: 100%;
-        height: 188px;
-        background: #f3f4f6;
-        border-top-left-radius: 24px;
-        border-top-right-radius: 24px;
-        overflow: hidden;
-      }
-
-      .listing-image {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
-      }
-
-      .listing-image-fallback {
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: #6b7280;
-        font-weight: 900;
-      }
-
-      .listing-top-badges {
-        position: absolute;
-        left: 12px;
-        top: 12px;
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-      }
-
-      .listing-body {
-        padding: 14px;
-      }
-
-      .listing-title {
-        font-size: 18px;
-        line-height: 1.25;
-      }
-
-      .listing-sub {
-        margin-top: 8px;
-        font-size: 14px;
-        display: -webkit-box;
-        -webkit-line-clamp: 3;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-      }
-
-      .listing-meta {
-        margin-top: 12px;
-        font-size: 12px;
-        color: #6b7280;
-        font-weight: 800;
-      }
-
-      .listing-actions,
-      .action-row {
-        margin-top: 14px;
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-      }
-
-      .row-card {
-        padding: 14px;
-        box-shadow: 0 10px 24px rgba(15,23,42,0.05);
-      }
-
-      .row-main {
+      .offer-main {
         display: flex;
         align-items: flex-start;
         gap: 12px;
@@ -2859,15 +2562,44 @@ function PageStyles() {
       }
 
       .offer-icon-pill {
-        width: 68px;
-        height: 68px;
-        border-radius: 20px;
-        background: rgba(16,185,129,0.08);
-        border: 1px solid rgba(16,185,129,0.18);
+        width: 58px;
+        height: 58px;
+        border-radius: 18px;
+        background: rgba(16, 185, 129, 0.08);
+        border: 1px solid rgba(16, 185, 129, 0.18);
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 26px;
+        font-size: 24px;
+        flex-shrink: 0;
+      }
+
+      .offer-copy {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .offer-title {
+        font-size: 14px;
+        font-weight: 950;
+        color: #111827;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+      }
+
+      .offer-sub {
+        margin-top: 4px;
+        color: #6b7280;
+        font-size: 13px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .offer-actions {
+        margin-top: 12px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
       }
 
       .note-box {
@@ -2883,74 +2615,150 @@ function PageStyles() {
         overflow-wrap: anywhere;
       }
 
-      .empty-box {
+      .drawer-empty {
         border: 1px dashed #d1d5db;
         background: #fff;
-        padding: 18px;
-        border-radius: 24px;
-      }
-
-      .empty-box.compact {
-        padding: 14px;
         border-radius: 18px;
+        padding: 14px;
       }
 
-      .empty-title {
-        font-size: 18px;
-      }
-
-      .modal-body,
-      .empty-body {
-        margin-top: 6px;
-      }
-
-      .input {
-        width: 100%;
-        height: 48px;
-        border-radius: 16px;
-        border: 1px solid #e5e7eb;
-        background: #fff;
+      .drawer-empty-title {
+        font-size: 15px;
+        font-weight: 950;
         color: #111827;
-        padding: 0 14px;
-        margin-top: 12px;
-        font-weight: 800;
+      }
+
+      .drawer-empty-body {
+        margin-top: 5px;
+        color: #6b7280;
+        line-height: 1.45;
+      }
+
+      .media-thumb {
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: #f3f4f6;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #6b7280;
+        flex-shrink: 0;
+      }
+
+      .media-thumb-img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 28px;
+        border-radius: 999px;
+        padding: 0 10px;
+        font-size: 12px;
+        font-weight: 900;
+        white-space: nowrap;
+      }
+
+      .chip.green {
+        border: 1px solid rgba(16, 185, 129, 0.25);
+        background: rgba(16, 185, 129, 0.1);
+        color: #065f46;
+      }
+
+      .chip.amber {
+        border: 1px solid rgba(245, 158, 11, 0.25);
+        background: rgba(245, 158, 11, 0.1);
+        color: #92400e;
+      }
+
+      .chip.red {
+        border: 1px solid rgba(239, 68, 68, 0.25);
+        background: rgba(239, 68, 68, 0.1);
+        color: #991b1b;
+      }
+
+      .chip.gray {
+        border: 1px solid var(--line);
+        background: #f9fafb;
+        color: #374151;
       }
 
       .auth-card {
+        border-radius: 28px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: 0 18px 48px rgba(15, 23, 42, 0.06);
+        padding: 18px;
         display: grid;
         gap: 12px;
+      }
+
+      .auth-eyebrow {
+        font-size: 12px;
+        color: #065f46;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0.32px;
+      }
+
+      .auth-title {
+        margin: 0;
+        font-size: 32px;
+        line-height: 1.02;
+        font-weight: 950;
+      }
+
+      .auth-sub {
+        margin: 0;
+        color: #6b7280;
+        line-height: 1.5;
       }
 
       .seg-row {
         display: flex;
         gap: 8px;
-        flex-wrap: wrap;
       }
 
       .seg-btn {
         min-height: 42px;
         padding: 0 14px;
         border-radius: 999px;
-        border: 1px solid #e5e7eb;
+        border: 1px solid var(--line);
         background: #fff;
         color: #111827;
         font-weight: 900;
       }
 
       .seg-btn.active {
-        border-color: rgba(16,185,129,0.35);
-        background: rgba(16,185,129,0.12);
+        border-color: rgba(16, 185, 129, 0.35);
+        background: rgba(16, 185, 129, 0.12);
         color: #065f46;
       }
 
-      .auth-button-stack {
-        display: grid;
-        gap: 10px;
-        margin-top: 12px;
+      .input {
+        width: 100%;
+        height: 48px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: #111827;
+        padding: 0 14px;
+        font-weight: 800;
       }
 
       .error-text {
-        margin-top: 12px;
         color: #b91c1c;
         font-weight: 900;
       }
@@ -2958,8 +2766,8 @@ function PageStyles() {
       .overlay {
         position: fixed;
         inset: 0;
-        background: rgba(17,24,39,0.38);
-        z-index: 9998;
+        background: rgba(17, 24, 39, 0.38);
+        z-index: 9999;
       }
 
       .modal {
@@ -2969,10 +2777,22 @@ function PageStyles() {
         top: 50%;
         transform: translateY(-50%);
         background: #fff;
-        border: 1px solid #e5e7eb;
+        border: 1px solid var(--line);
         border-radius: 24px;
         padding: 16px;
-        box-shadow: 0 30px 80px rgba(0,0,0,0.14);
+        box-shadow: 0 30px 80px rgba(0, 0, 0, 0.14);
+      }
+
+      .modal-title {
+        font-size: 18px;
+        font-weight: 950;
+        color: #111827;
+      }
+
+      .modal-body {
+        margin-top: 6px;
+        color: #6b7280;
+        line-height: 1.45;
       }
 
       .confirm-actions {
@@ -2992,10 +2812,10 @@ function PageStyles() {
         gap: 8px;
         border-radius: 16px;
         padding: 12px 14px;
-        border: 1px solid #e5e7eb;
+        border: 1px solid var(--line);
         background: #fff;
         color: #111827;
-        box-shadow: 0 18px 50px rgba(0,0,0,0.14);
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.14);
         font-weight: 900;
         max-width: min(560px, calc(100vw - 24px));
       }
@@ -3006,55 +2826,6 @@ function PageStyles() {
 
       .toast-mark.err {
         color: #b91c1c;
-      }
-
-      .chip {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 28px;
-        border-radius: 999px;
-        padding: 0 10px;
-        font-size: 12px;
-        font-weight: 900;
-        white-space: nowrap;
-      }
-
-      .chip.green {
-        border: 1px solid rgba(16,185,129,0.25);
-        background: rgba(16,185,129,0.10);
-        color: #065f46;
-      }
-
-      .chip.amber {
-        border: 1px solid rgba(245,158,11,0.25);
-        background: rgba(245,158,11,0.10);
-        color: #92400e;
-      }
-
-      .chip.red {
-        border: 1px solid rgba(239,68,68,0.25);
-        background: rgba(239,68,68,0.10);
-        color: #991b1b;
-      }
-
-      .chip.gray {
-        border: 1px solid #e5e7eb;
-        background: #f9fafb;
-        color: #374151;
-      }
-
-      .link-btn {
-        border: none;
-        background: transparent;
-        color: #065f46;
-        font-weight: 900;
-        cursor: pointer;
-        padding: 0;
-      }
-
-      .top-gap {
-        margin-top: 14px;
       }
 
       .top-gap-sm {
@@ -3068,28 +2839,33 @@ function PageStyles() {
 
       .skel {
         background: #e5e7eb;
-        border-radius: 14px;
+        border-radius: 16px;
       }
 
       .skel-avatar {
         width: 72px;
         height: 72px;
-        border-radius: 22px;
+        border-radius: 24px;
       }
 
       .skel-line.lg {
-        width: 68%;
+        width: 62%;
         height: 24px;
       }
 
       .skel-line.md {
-        width: 84%;
+        width: 78%;
         height: 16px;
       }
 
-      .skel-btn {
-        height: 46px;
+      .skel-pills {
         width: 100%;
+        height: 68px;
+      }
+
+      .skel-grid {
+        width: 100%;
+        height: 320px;
       }
 
       @media (min-width: 700px) {
@@ -3097,35 +2873,16 @@ function PageStyles() {
           padding: 16px;
         }
 
-        .hero-card {
+        .profile-card {
           padding: 18px;
         }
 
-        .mobile-stats-grid {
+        .listing-grid {
           grid-template-columns: repeat(4, minmax(0, 1fr));
-        }
-
-        .attention-grid {
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-        }
-
-        .quick-grid {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-
-        .two-col-grid {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-
-        .card-grid {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
         }
 
         .confirm-actions {
-          grid-template-columns: 1fr 1fr;
-        }
-
-        .auth-button-stack {
           grid-template-columns: 1fr 1fr;
         }
 
@@ -3137,70 +2894,94 @@ function PageStyles() {
         }
       }
 
+      @media (min-width: 1024px) {
+        .listing-grid {
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+        }
+      }
+
       @media (max-width: 560px) {
         .page-shell {
           padding-left: 10px;
           padding-right: 10px;
         }
 
-        .hero-title {
+        .profile-avatar {
+          width: 62px;
+          height: 62px;
+          border-radius: 20px;
+          flex-basis: 62px;
           font-size: 24px;
         }
 
-        .hero-action-grid {
-          grid-template-columns: 1fr;
+        .profile-name {
+          font-size: 24px;
         }
 
-        .compact-row {
-          align-items: flex-start;
-          flex-wrap: wrap;
+        .mini-stats {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 6px;
         }
 
-        .compact-row > .btn.inline {
-          width: 100%;
+        .mini-pill {
+          min-height: 60px;
+          border-radius: 16px;
+          padding: 9px 8px 8px;
         }
 
-        .action-row,
-        .listing-actions {
+        .mini-pill-label {
+          font-size: 10px;
+        }
+
+        .mini-pill-value {
+          font-size: 17px;
+        }
+
+        .media-tabs {
+          gap: 6px;
+          padding: 5px;
+        }
+
+        .media-tab {
+          min-height: 42px;
+          border-radius: 14px;
+          font-size: 13px;
+          padding: 0 8px;
+        }
+
+        .media-tab-count {
+          min-width: 18px;
+          height: 18px;
+          font-size: 10px;
+        }
+
+        .listing-grid {
+          gap: 5px;
+        }
+
+        .profile-tile {
+          border-radius: 14px;
+        }
+
+        .tile-bottom {
+          padding: 8px;
+        }
+
+        .tile-title {
+          font-size: 11px;
+        }
+
+        .drawer-panel {
+          width: 100vw;
+        }
+
+        .offer-actions {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 8px;
+        }
+
+        .offer-actions > .btn.inline {
           width: 100%;
-        }
-
-        .action-row > .btn.inline,
-        .listing-actions > .btn.inline {
-          width: 100%;
-          min-width: 0;
-        }
-      }
-
-      @media (max-width: 430px) {
-        .hero-head {
-          gap: 10px;
-        }
-
-        .avatar-large {
-          width: 60px;
-          height: 60px;
-          flex-basis: 60px;
-          font-size: 24px;
-          border-radius: 18px;
-        }
-
-        .row-main {
-          gap: 10px;
-        }
-
-        .offer-icon-pill {
-          width: 56px;
-          height: 56px;
-          font-size: 22px;
-          border-radius: 16px;
-        }
-
-        .media-thumb {
-          border-radius: 16px;
         }
       }
     `}</style>
