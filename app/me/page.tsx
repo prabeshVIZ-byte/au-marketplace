@@ -481,23 +481,61 @@ export default function AccountPage() {
   }
 
   async function loadMyListings(uid: string) {
-    const { data, error } = await supabase
+  const [itemsRes, eventsRes] = await Promise.all([
+    supabase
       .from("items")
       .select("id,title,description,status,created_at,photo_url,post_type")
-      .eq("owner_id", uid)
-      .order("created_at", { ascending: false });
+      .eq("owner_id", uid),
 
-    if (!mountedRef.current) return [] as MyItemRow[];
+    supabase
+      .from("events")
+      .select("id,title,description,created_at,photo_url,starts_at,ends_at")
+      .eq("created_by", uid),
+  ]);
 
-    if (error) {
-      setMyItems([]);
-      return [];
-    }
+  if (!mountedRef.current) return [] as MyItemRow[];
 
-    const rows = ((data ?? []) as MyItemRow[]).filter(Boolean);
-    setMyItems(rows);
-    return rows;
+  if (itemsRes.error || eventsRes.error) {
+    setMyItems([]);
+    return [];
   }
+
+  const itemRows = ((itemsRes.data ?? []) as MyItemRow[]).filter(Boolean);
+
+  const now = Date.now();
+
+  const eventRows: MyItemRow[] = (
+    (eventsRes.data ?? []) as Array<{
+      id: string;
+      title: string;
+      description: string | null;
+      created_at: string;
+      photo_url: string | null;
+      starts_at: string;
+      ends_at: string | null;
+    }>
+  ).map((event) => {
+    const endTime = event.ends_at ?? event.starts_at;
+    const isPast = new Date(endTime).getTime() < now;
+
+    return {
+      id: event.id,
+      title: event.title,
+      description: event.description ?? null,
+      status: isPast ? "completed" : "available",
+      created_at: event.created_at,
+      photo_url: event.photo_url ?? null,
+      post_type: "event",
+    };
+  });
+
+  const rows = [...itemRows, ...eventRows].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  );
+
+  setMyItems(rows);
+  return rows;
+}
 
   async function loadMyRequests(uid: string) {
     const { data, error } = await supabase
