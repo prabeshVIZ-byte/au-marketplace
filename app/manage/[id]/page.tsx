@@ -62,17 +62,6 @@ type OfferRow = {
   } | null;
 };
 
-type EventAttendeeRow = {
-  id: string;
-  event_id: string;
-  user_id: string;
-  created_at: string;
-  profile: {
-    full_name: string | null;
-    email: string | null;
-  } | null;
-};
-
 type OfferQueryRow = {
   id: string;
   request_id: string;
@@ -96,23 +85,6 @@ type OfferQueryRow = {
     | null;
 };
 
-type EventAttendeeQueryRow = {
-  id: string;
-  event_id: string;
-  user_id: string;
-  created_at: string;
-  profile:
-    | {
-        full_name: string | null;
-        email: string | null;
-      }
-    | {
-        full_name: string | null;
-        email: string | null;
-      }[]
-    | null;
-};
-
 function singleRelation<T>(value: T | T[] | null | undefined): T | null {
   if (Array.isArray(value)) return value[0] ?? null;
   return value ?? null;
@@ -125,15 +97,28 @@ function fmtWhen(ts: string | null | undefined) {
   return d.toLocaleString();
 }
 
+function fmtShort(ts: string | null | undefined) {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 function normStatus(value: string | null | undefined) {
   return (value ?? "").trim().toLowerCase();
 }
 
 function formatTimeLeft(expiresAt: string | null, nowMs: number) {
   if (!expiresAt) return null;
-  const end = new Date(expiresAt).getTime();
-  const diff = end - nowMs;
 
+  const end = new Date(expiresAt).getTime();
+  if (Number.isNaN(end)) return null;
+
+  const diff = end - nowMs;
   if (diff <= 0) return "expired";
 
   const totalSec = Math.floor(diff / 1000);
@@ -170,10 +155,16 @@ function readableName(
   return "Unknown user";
 }
 
+function postTypeLabel(postType: PostType | null | undefined) {
+  if (postType === "request") return "Request";
+  if (postType === "event") return "Event";
+  return "Give";
+}
+
 export default function ManageItemPage() {
   const router = useRouter();
   const params = useParams();
-  const id = params?.id as string;
+  const id = (params?.id as string) || "";
 
   const [viewerId, setViewerId] = useState<string | null>(null);
 
@@ -181,11 +172,11 @@ export default function ManageItemPage() {
   const [interests, setInterests] = useState<InterestRow[]>([]);
   const [profilesById, setProfilesById] = useState<Record<string, ProfileRow>>({});
   const [offers, setOffers] = useState<OfferRow[]>([]);
-  const [attendees, setAttendees] = useState<EventAttendeeRow[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
+  const [wrongPage, setWrongPage] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const [busyAcceptId, setBusyAcceptId] = useState<string | null>(null);
@@ -203,7 +194,6 @@ export default function ManageItemPage() {
   const postType = (item?.post_type ?? "give") as PostType;
   const isGivePost = postType === "give";
   const isRequestPost = postType === "request";
-  const isEventPost = postType === "event";
   const itemStatus = normStatus(item?.status) || "available";
 
   const activeAcceptedInterest = useMemo(
@@ -221,6 +211,16 @@ export default function ManageItemPage() {
     [offers]
   );
 
+  const pendingInterestCount = useMemo(
+    () => interests.filter((x) => normStatus(x.status) === "pending").length,
+    [interests]
+  );
+
+  const pendingOfferCount = useMemo(
+    () => offers.filter((x) => normStatus(x.status) === "pending").length,
+    [offers]
+  );
+
   const canMarkPickedUp =
     isGivePost &&
     itemStatus === "reserved" &&
@@ -235,6 +235,7 @@ export default function ManageItemPage() {
       else setLoading(true);
 
       setErr(null);
+      setWrongPage(false);
 
       try {
         const {
@@ -252,7 +253,6 @@ export default function ManageItemPage() {
           setItem(null);
           setInterests([]);
           setOffers([]);
-          setAttendees([]);
           setProfilesById({});
           setErr("Sign in to manage this post.");
           return;
@@ -273,7 +273,6 @@ export default function ManageItemPage() {
           setItem(null);
           setInterests([]);
           setOffers([]);
-          setAttendees([]);
           setProfilesById({});
           setErr("Post not found.");
           return;
@@ -286,7 +285,6 @@ export default function ManageItemPage() {
           setAccessDenied(true);
           setInterests([]);
           setOffers([]);
-          setAttendees([]);
           setProfilesById({});
           setErr("You can only manage your own post.");
           return;
@@ -295,33 +293,9 @@ export default function ManageItemPage() {
         setAccessDenied(false);
 
         if ((loadedItem.post_type ?? "give") === "event") {
-          const { data: attendeeRows, error: attendeeErr } = await supabase
-            .from("event_attendees")
-            .select(`
-              id,
-              event_id,
-              user_id,
-              created_at,
-              profile:profiles!event_attendees_user_id_fkey(full_name,email)
-            `)
-            .eq("event_id", loadedItem.id)
-            .order("created_at", { ascending: false });
-
-          if (attendeeErr) throw new Error(attendeeErr.message);
-
-          const normalizedAttendees: EventAttendeeRow[] = (
-            ((attendeeRows ?? []) as unknown as EventAttendeeQueryRow[])
-          ).map((row) => ({
-            id: row.id,
-            event_id: row.event_id,
-            user_id: row.user_id,
-            created_at: row.created_at,
-            profile: singleRelation(row.profile),
-          }));
-
-          setAttendees(normalizedAttendees);
-          setOffers([]);
+          setWrongPage(true);
           setInterests([]);
+          setOffers([]);
           setProfilesById({});
           return;
         }
@@ -358,7 +332,6 @@ export default function ManageItemPage() {
           }));
 
           setOffers(normalizedOffers);
-          setAttendees([]);
           setInterests([]);
           setProfilesById({});
           return;
@@ -374,10 +347,9 @@ export default function ManageItemPage() {
 
         if (interestErr) throw new Error(interestErr.message);
 
-        const interestList = ((ints ?? []) as InterestRow[]);
+        const interestList = (ints ?? []) as InterestRow[];
         setInterests(interestList);
         setOffers([]);
-        setAttendees([]);
 
         const uniqueUserIds = Array.from(new Set(interestList.map((x) => x.user_id))).filter(Boolean);
 
@@ -404,7 +376,6 @@ export default function ManageItemPage() {
         setItem(null);
         setInterests([]);
         setOffers([]);
-        setAttendees([]);
         setProfilesById({});
       } finally {
         setLoading(false);
@@ -415,7 +386,7 @@ export default function ManageItemPage() {
   );
 
   async function acceptInterest(interestId: string) {
-    if (!item) return;
+    if (!item || !isGivePost) return;
 
     setErr(null);
     setBusyAcceptId(interestId);
@@ -448,7 +419,7 @@ export default function ManageItemPage() {
   }
 
   async function markPickedUp() {
-    if (!item) return;
+    if (!item || !isGivePost) return;
 
     setErr(null);
     setBusyPickup(true);
@@ -465,7 +436,7 @@ export default function ManageItemPage() {
   }
 
   async function updateOfferStatus(offer: OfferRow, next: OfferStatus) {
-    if (!item) return;
+    if (!item || !isRequestPost) return;
 
     setErr(null);
     setBusyOfferId(offer.id);
@@ -476,10 +447,10 @@ export default function ManageItemPage() {
       if (next === "accepted") {
         const { error: othersErr } = await supabase
           .from("request_offers")
-          .update({ status: "hold", updated_at: nowIso })
+          .update({ status: "declined", updated_at: nowIso })
           .eq("request_id", item.id)
           .neq("id", offer.id)
-          .in("status", ["pending", "accepted"]);
+          .in("status", ["pending", "hold", "accepted"]);
 
         if (othersErr) throw new Error(othersErr.message);
       }
@@ -491,6 +462,23 @@ export default function ManageItemPage() {
 
       if (error) throw new Error(error.message);
 
+      if (next === "accepted") {
+        const threadId = await ensureThread({
+          itemId: item.id,
+          ownerId: item.owner_id,
+          requesterId: offer.helper_id,
+        });
+
+        await insertSystemMessage({
+          threadId,
+          senderId: item.owner_id,
+          body: "✅ Your help offer was accepted. You can coordinate here.",
+        });
+
+        router.push(`/messages/${threadId}`);
+        return;
+      }
+
       await loadAll(true);
     } catch (e: any) {
       setErr(e?.message || `Could not set offer to ${next}.`);
@@ -500,7 +488,7 @@ export default function ManageItemPage() {
   }
 
   async function openHelperChat(offer: OfferRow) {
-    if (!item || !viewerId) return;
+    if (!item || !viewerId || !isRequestPost) return;
 
     if (normStatus(offer.status) !== "accepted") {
       setErr("Accept this helper first before opening chat.");
@@ -578,9 +566,7 @@ export default function ManageItemPage() {
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={item.photo_url} alt={item.title} className="hero-image" />
                 ) : (
-                  <div className="hero-image-fallback">
-                    {isEventPost ? "Event" : isRequestPost ? "Request" : "Give"}
-                  </div>
+                  <div className="hero-image-fallback">{postTypeLabel(item.post_type)}</div>
                 )}
 
                 <div className="hero-copy">
@@ -589,7 +575,7 @@ export default function ManageItemPage() {
                   <p className="muted">{item.description || "No description provided."}</p>
 
                   <div className="pill-row top-gap">
-                    <Pill label={`Type: ${postType}`} tone="gray" />
+                    <Pill label={`Type: ${postTypeLabel(item.post_type)}`} tone="gray" />
                     <Pill label={`Status: ${item.status ?? "—"}`} tone="gray" />
                     <Pill label={`Posted: ${fmtWhen(item.created_at)}`} tone="gray" />
                   </div>
@@ -611,6 +597,49 @@ export default function ManageItemPage() {
               </div>
             </section>
           </div>
+        ) : wrongPage ? (
+          <div className="stack">
+            <section className="hero-card">
+              <div className="hero-main">
+                {item.photo_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.photo_url} alt={item.title} className="hero-image" />
+                ) : (
+                  <div className="hero-image-fallback">Event</div>
+                )}
+
+                <div className="hero-copy">
+                  <div className="eyebrow">Event flow</div>
+                  <h1 className="title clamp">{item.title}</h1>
+                  <p className="muted">
+                    This page should only manage give items and request posts. Keep events on their own screen so
+                    this workflow stays simple.
+                  </p>
+
+                  <div className="pill-row top-gap">
+                    <Pill label="Type: Event" tone="gray" />
+                    <Pill label={`Posted: ${fmtWhen(item.created_at)}`} tone="gray" />
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="card">
+              <h2 className="section-title">Use a separate event manager</h2>
+              <p className="muted">
+                Put event attendance and event actions in an event-specific page, not here.
+              </p>
+
+              <div className="action-row">
+                <button onClick={() => router.push("/me")} className="primary-btn" type="button">
+                  Go to profile
+                </button>
+                <button onClick={() => router.push("/feed")} className="secondary-btn" type="button">
+                  Back to feed
+                </button>
+              </div>
+            </section>
+          </div>
         ) : (
           <div className="stack">
             <section className="hero-card">
@@ -619,9 +648,7 @@ export default function ManageItemPage() {
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={item.photo_url} alt={item.title} className="hero-image" />
                 ) : (
-                  <div className="hero-image-fallback">
-                    {isEventPost ? "Event" : isRequestPost ? "Request" : "Give"}
-                  </div>
+                  <div className="hero-image-fallback">{postTypeLabel(item.post_type)}</div>
                 )}
 
                 <div className="hero-copy">
@@ -630,18 +657,13 @@ export default function ManageItemPage() {
                   <p className="muted">{item.description || "No description provided."}</p>
 
                   <div className="pill-row top-gap">
-                    <Pill label={`Type: ${postType}`} tone="gray" />
+                    <Pill label={`Type: ${postTypeLabel(item.post_type)}`} tone="gray" />
                     <Pill label={`Status: ${item.status ?? "—"}`} tone={toneForStatus(item.status)} />
                     <Pill
-                      label={
-                        isEventPost
-                          ? `Attending: ${attendees.length}`
-                          : isRequestPost
-                          ? `Offers: ${offers.length}`
-                          : `Requests: ${interests.length}`
-                      }
-                      tone={isEventPost ? "green" : "amber"}
+                      label={isRequestPost ? `Offers: ${offers.length}` : `Requests: ${interests.length}`}
+                      tone={isRequestPost ? "green" : "amber"}
                     />
+                    <Pill label={`Posted: ${fmtShort(item.created_at)}`} tone="gray" />
                   </div>
                 </div>
               </div>
@@ -653,7 +675,7 @@ export default function ManageItemPage() {
                     Expires in <b>{formatTimeLeft(activeAcceptedInterest.accepted_expires_at, nowMs) ?? "—"}</b>
                   </div>
                   <div className="fine-print">
-                    If the timer expires without confirmation, you can accept someone else.
+                    Until that confirmation window ends, do not choose someone else.
                   </div>
                 </div>
               ) : null}
@@ -678,10 +700,30 @@ export default function ManageItemPage() {
                 </div>
               ) : null}
 
-              {isGivePost && itemStatus === "claimed" ? (
+              {(isGivePost && itemStatus === "claimed") || (isGivePost && itemStatus === "completed") ? (
                 <div className="status-box gray-box">
-                  <div className="status-title">Claimed ✅</div>
-                  <div className="status-text">This item is already claimed.</div>
+                  <div className="status-title">Finished ✅</div>
+                  <div className="status-text">This give-item workflow is already complete.</div>
+                </div>
+              ) : null}
+
+              {isRequestPost && acceptedOffer ? (
+                <div className="status-box green-box">
+                  <div className="status-title">Helper selected ✅</div>
+                  <div className="status-text">
+                    One helper is already accepted. Continue the coordination in chat.
+                  </div>
+
+                  <div className="action-row top-gap">
+                    <button
+                      onClick={() => void openHelperChat(acceptedOffer)}
+                      disabled={busyChatId === acceptedOffer.id}
+                      className="primary-btn"
+                      type="button"
+                    >
+                      {busyChatId === acceptedOffer.id ? "Opening…" : "Open accepted chat"}
+                    </button>
+                  </div>
                 </div>
               ) : null}
             </section>
@@ -692,11 +734,14 @@ export default function ManageItemPage() {
                   <div>
                     <h2 className="section-title">Incoming item requests</h2>
                     <p className="muted">
-                      Choose one person. They will have <b>2 hours</b> to confirm.
+                      Accept only one person. They get a 2-hour confirmation window and a chat thread.
                     </p>
                   </div>
 
-                  <Pill label={`${interests.length}`} tone={interests.length ? "green" : "gray"} />
+                  <div className="pill-row">
+                    <Pill label={`Pending: ${pendingInterestCount}`} tone={pendingInterestCount ? "amber" : "gray"} />
+                    <Pill label={`Total: ${interests.length}`} tone={interests.length ? "green" : "gray"} />
+                  </div>
                 </div>
 
                 {interests.length === 0 ? (
@@ -709,13 +754,14 @@ export default function ManageItemPage() {
                     {interests.map((request) => {
                       const profile = profilesById[request.user_id];
                       const name = readableName(profile, request.user_id);
+                      const requestStatus = normStatus(request.status);
 
                       const anotherLocked =
                         (!!activeAcceptedInterest && activeAcceptedInterest.id !== request.id) ||
                         !!activeReservedInterest;
 
                       const canAccept =
-                        normStatus(request.status) === "pending" &&
+                        requestStatus === "pending" &&
                         itemStatus === "available" &&
                         !anotherLocked &&
                         busyAcceptId === null;
@@ -730,7 +776,7 @@ export default function ManageItemPage() {
 
                             <div className="pill-row">
                               <Pill label={request.status} tone={toneForStatus(request.status)} />
-                              {request.status === "accepted" ? (
+                              {requestStatus === "accepted" ? (
                                 <Pill
                                   label={`Expires: ${formatTimeLeft(request.accepted_expires_at, nowMs) ?? "—"}`}
                                   tone="amber"
@@ -756,8 +802,35 @@ export default function ManageItemPage() {
                               className="primary-btn"
                               type="button"
                             >
-                              {busyAcceptId === request.id ? "Selecting…" : "Accept"}
+                              {busyAcceptId === request.id
+                                ? "Selecting…"
+                                : requestStatus === "accepted"
+                                ? "Waiting"
+                                : requestStatus === "reserved"
+                                ? "Confirmed"
+                                : requestStatus === "completed"
+                                ? "Completed"
+                                : anotherLocked
+                                ? "Locked"
+                                : "Accept"}
                             </button>
+
+                            {(requestStatus === "accepted" || requestStatus === "reserved") && (
+                              <button
+                                onClick={async () => {
+                                  const threadId = await ensureThread({
+                                    itemId: item.id,
+                                    ownerId: item.owner_id,
+                                    requesterId: request.user_id,
+                                  });
+                                  router.push(`/messages/${threadId}`);
+                                }}
+                                className="secondary-btn"
+                                type="button"
+                              >
+                                Open chat
+                              </button>
+                            )}
                           </div>
                         </div>
                       );
@@ -773,11 +846,14 @@ export default function ManageItemPage() {
                   <div>
                     <h2 className="section-title">Incoming helper offers</h2>
                     <p className="muted">
-                      Review who offered help, then accept one and continue in chat.
+                      Pick one helper. Once accepted, the others should be treated as closed out.
                     </p>
                   </div>
 
-                  <Pill label={`${offers.length}`} tone={offers.length ? "green" : "gray"} />
+                  <div className="pill-row">
+                    <Pill label={`Pending: ${pendingOfferCount}`} tone={pendingOfferCount ? "amber" : "gray"} />
+                    <Pill label={`Total: ${offers.length}`} tone={offers.length ? "green" : "gray"} />
+                  </div>
                 </div>
 
                 {offers.length === 0 ? (
@@ -824,15 +900,6 @@ export default function ManageItemPage() {
                             </button>
 
                             <button
-                              onClick={() => void updateOfferStatus(offer, "hold")}
-                              disabled={busy || status === "completed"}
-                              className="secondary-btn"
-                              type="button"
-                            >
-                              Hold
-                            </button>
-
-                            <button
                               onClick={() => void updateOfferStatus(offer, "declined")}
                               disabled={busy || status === "completed" || status === "declined"}
                               className="danger-btn"
@@ -853,45 +920,6 @@ export default function ManageItemPage() {
                         </div>
                       );
                     })}
-                  </div>
-                )}
-              </section>
-            ) : null}
-
-            {isEventPost ? (
-              <section className="card">
-                <div className="section-head">
-                  <div>
-                    <h2 className="section-title">Attendees</h2>
-                    <p className="muted">People who clicked attend for this event.</p>
-                  </div>
-
-                  <Pill label={`${attendees.length}`} tone={attendees.length ? "green" : "gray"} />
-                </div>
-
-                {attendees.length === 0 ? (
-                  <EmptyState
-                    title="No attendees yet"
-                    body="Once people start attending, they will appear here."
-                  />
-                ) : (
-                  <div className="list">
-                    {attendees.map((attendee) => (
-                      <div key={attendee.id} className="row-card">
-                        <div className="row-top">
-                          <div>
-                            <div className="row-title">
-                              {readableName(attendee.profile, attendee.user_id)}
-                            </div>
-                            <div className="row-meta">Joined {fmtWhen(attendee.created_at)}</div>
-                          </div>
-
-                          <div className="pill-row">
-                            <Pill label="Attending" tone="green" />
-                          </div>
-                        </div>
-                      </div>
-                    ))}
                   </div>
                 )}
               </section>
