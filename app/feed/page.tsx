@@ -38,6 +38,7 @@ type ItemMeta = {
   request_timeframe: string | null;
   request_location: string | null;
   status: string | null;
+  hide_interest_count: boolean | null;
 };
 
 type FeedRow = FeedRowFromView & {
@@ -47,6 +48,7 @@ type FeedRow = FeedRowFromView & {
   request_group: string | null;
   request_timeframe: string | null;
   request_location: string | null;
+  hide_interest_count: boolean | null;
 };
 
 type EventCategory =
@@ -138,8 +140,9 @@ function itemPublicStatus(item: FeedRow): "open" | "in_talks" | "closed" {
   const st = normStatus(item.status);
 
   if (isItemClosed(item) || isExpired(item.expires_at)) return "closed";
-  if (st === "reserved" || st === "accepted" || st === "in_talks" || st === "hold")
+  if (st === "reserved" || st === "accepted" || st === "in_talks" || st === "hold") {
     return "in_talks";
+  }
   return "open";
 }
 
@@ -340,7 +343,7 @@ export default function FeedPage() {
     const { data, error } = await supabase
       .from("items")
       .select(
-        "id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,status"
+        "id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,status,hide_interest_count"
       )
       .in("id", itemIds);
 
@@ -431,6 +434,7 @@ export default function FeedPage() {
           request_location: m?.request_location ?? null,
           status: m?.status ?? row.status ?? "available",
           interest_count: row.interest_count ?? 0,
+          hide_interest_count: m?.hide_interest_count ?? null,
         };
       });
 
@@ -769,7 +773,7 @@ export default function FeedPage() {
       setSort("newest");
     }
 
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.scrollTo({ top: 0, behavior: "auto" });
     void refreshAll();
   }
 
@@ -1456,9 +1460,15 @@ export default function FeedPage() {
 
                       <div className="metaRight">
                         {postType === "request" ? (
-                          <span className="small">Tap to offer help</span>
+                          <span className="small">
+                            {item.hide_interest_count ? "Offer activity hidden" : "Tap to offer help"}
+                          </span>
                         ) : (
-                          <span className="small">{item.interest_count || 0} requests</span>
+                          <span className="small">
+                            {item.hide_interest_count
+                              ? "Requests hidden"
+                              : `${item.interest_count || 0} requests`}
+                          </span>
                         )}
 
                         {item.expires_at ? (
@@ -1617,12 +1627,6 @@ export default function FeedPage() {
           place-items: center;
           cursor: pointer;
           box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
-          transition: transform 0.12s ease, box-shadow 0.12s ease;
-        }
-
-        .plusBtn:active {
-          transform: translateY(1px);
-          box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
         }
 
         .tabsRow {
@@ -1693,11 +1697,6 @@ export default function FeedPage() {
           display: grid;
           place-items: center;
           box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
-          transition: transform 0.12s ease, border-color 0.18s ease, background 0.18s ease;
-        }
-
-        .ctrlBtn:active {
-          transform: translateY(1px);
         }
 
         .ctrlActive {
@@ -1759,11 +1758,6 @@ export default function FeedPage() {
           cursor: pointer;
           display: grid;
           place-items: center;
-          transition: transform 0.12s ease;
-        }
-
-        .searchIconBtn:active {
-          transform: translateY(1px);
         }
 
         .searchRow input {
@@ -1797,11 +1791,6 @@ export default function FeedPage() {
 
         .clearBtn {
           cursor: pointer;
-          transition: transform 0.12s ease;
-        }
-
-        .clearBtn:active {
-          transform: translateY(1px);
         }
 
         .kbdHint {
@@ -2222,42 +2211,30 @@ export default function FeedPage() {
 
         .loveBtn {
           height: 40px;
-          min-width: 68px;
+          min-width: 72px;
           padding: 0 12px;
           border-radius: 999px;
           border: 1px solid #e5e7eb;
           background: #ffffff;
-          color: #374151;
+          color: #475569;
           display: inline-flex;
           align-items: center;
           justify-content: center;
           gap: 8px;
           cursor: pointer;
           box-shadow: 0 6px 16px rgba(15, 23, 42, 0.05);
-          transition: transform 0.14s ease, background 0.18s ease, color 0.18s ease,
-            border-color 0.18s ease, box-shadow 0.18s ease;
           flex-shrink: 0;
         }
 
-        .loveBtn:active {
-          transform: scale(0.96);
-        }
-
         .loveBtn.active {
-          color: #be185d;
-          border-color: rgba(236, 72, 153, 0.28);
-          background: linear-gradient(
-            135deg,
-            rgba(244, 114, 182, 0.18) 0%,
-            rgba(16, 185, 129, 0.14) 100%
-          );
-          box-shadow: 0 10px 22px rgba(236, 72, 153, 0.14);
+          color: #ec4899;
+          border-color: #fbcfe8;
+          background: #fff1f7;
         }
 
         .loveBtnGlyph {
           font-size: 19px;
           line-height: 1;
-          transform: translateY(-0.5px);
         }
 
         .loveBtnCount {
@@ -2284,11 +2261,7 @@ export default function FeedPage() {
           cursor: pointer;
           font-weight: 950;
           border: 1px solid #e5e7eb;
-          transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.15s ease;
-        }
-
-        .btn:active {
-          transform: translateY(1px);
+          transition: background 0.15s ease;
         }
 
         .btnGhost {
