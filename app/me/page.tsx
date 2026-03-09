@@ -12,7 +12,7 @@ import { ensureThread } from "@/lib/ensureThread";
 ============================== */
 
 type MediaTab = "give" | "request" | "event";
-type GridMode = "active" | "done";
+type GridMode = "active" | "archived";
 type DrawerSection = "menu" | "notifications" | "requests" | "activity";
 type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
 type ToastState = { msg: string; kind?: "ok" | "err" } | null;
@@ -280,7 +280,7 @@ function normStatus(s: string | null | undefined) {
   return (s ?? "").trim().toLowerCase();
 }
 
-function isDoneStatus(s: string | null | undefined) {
+function isArchivedStatus(s: string | null | undefined) {
   return ["claimed", "completed"].includes(normStatus(s));
 }
 
@@ -335,23 +335,23 @@ function itemTypeLabel(type: "give" | "request" | "event" | null | undefined) {
   return "Item";
 }
 
+function mediaTabLabel(tab: MediaTab) {
+  if (tab === "request") return "Requests";
+  if (tab === "event") return "Events";
+  return "Items";
+}
+
+function matchesTab(item: MyItemRow, tab: MediaTab) {
+  const t = item.post_type ?? "give";
+  if (tab === "give") return t === "give" || t === null;
+  return t === tab;
+}
+
 function getFriendlyError(e: unknown) {
   if (!e) return "Something went wrong.";
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;
   return "Something went wrong.";
-}
-
-function matchesMediaTab(item: MyItemRow, tab: MediaTab) {
-  const type = item.post_type ?? "give";
-  if (tab === "give") return type === "give" || type === null;
-  return type === tab;
-}
-
-function mediaTabLabel(tab: MediaTab) {
-  if (tab === "give") return "Items";
-  if (tab === "request") return "Requests";
-  return "Events";
 }
 
 /* ==============================
@@ -408,18 +408,16 @@ export default function AccountPage() {
   const displayRole = readableRole(profile?.user_role);
   const memberSince = fmtShort(profile?.created_at);
 
-  const giveItems = useMemo(() => myItems.filter((x) => matchesMediaTab(x, "give")), [myItems]);
-  const requestPosts = useMemo(() => myItems.filter((x) => matchesMediaTab(x, "request")), [myItems]);
-  const eventPosts = useMemo(() => myItems.filter((x) => matchesMediaTab(x, "event")), [myItems]);
+  const itemsGive = useMemo(() => myItems.filter((x) => matchesTab(x, "give")), [myItems]);
+  const itemsRequest = useMemo(() => myItems.filter((x) => matchesTab(x, "request")), [myItems]);
+  const itemsEvent = useMemo(() => myItems.filter((x) => matchesTab(x, "event")), [myItems]);
 
-  const activeItems = useMemo(() => myItems.filter((x) => !isDoneStatus(x.status)), [myItems]);
-  const doneItems = useMemo(() => myItems.filter((x) => isDoneStatus(x.status)), [myItems]);
+  const activeListingsCount = useMemo(() => myItems.filter((x) => !isArchivedStatus(x.status)).length, [myItems]);
+  const archivedListingsCount = useMemo(() => myItems.filter((x) => isArchivedStatus(x.status)).length, [myItems]);
 
-  const unseenNotificationCount = useMemo(() => {
-    return notifications.filter((n) => !n.seen_at).length;
-  }, [notifications]);
+  const unseenNotificationCount = useMemo(() => notifications.filter((n) => !n.seen_at).length, [notifications]);
 
-  const incomingCount = useMemo(() => {
+  const requestsCount = useMemo(() => {
     return incomingInterests.length + incomingOffers.length;
   }, [incomingInterests.length, incomingOffers.length]);
 
@@ -427,16 +425,16 @@ export default function AccountPage() {
     return myRequests.length + myOffers.length;
   }, [myOffers.length, myRequests.length]);
 
-  const selectedTabItems = useMemo(() => {
-    const source = mediaTab === "give" ? giveItems : mediaTab === "request" ? requestPosts : eventPosts;
-    return source.filter((x) => (gridMode === "active" ? !isDoneStatus(x.status) : isDoneStatus(x.status)));
-  }, [eventPosts, giveItems, gridMode, mediaTab, requestPosts]);
+  const gridSource = useMemo(() => {
+    const source = mediaTab === "give" ? itemsGive : mediaTab === "request" ? itemsRequest : itemsEvent;
+    return source.filter((x) => (gridMode === "active" ? !isArchivedStatus(x.status) : isArchivedStatus(x.status)));
+  }, [gridMode, itemsEvent, itemsGive, itemsRequest, mediaTab]);
 
-  const selectedTabTotalCount = useMemo(() => {
-    if (mediaTab === "give") return giveItems.length;
-    if (mediaTab === "request") return requestPosts.length;
-    return eventPosts.length;
-  }, [eventPosts.length, giveItems.length, mediaTab, requestPosts.length]);
+  const gridTotalForTab = useMemo(() => {
+    if (mediaTab === "give") return itemsGive.length;
+    if (mediaTab === "request") return itemsRequest.length;
+    return itemsEvent.length;
+  }, [itemsEvent.length, itemsGive.length, itemsRequest.length, mediaTab]);
 
   const showToast = useCallback((msg: string, kind: "ok" | "err" = "ok") => {
     setToast({ msg, kind });
@@ -734,47 +732,77 @@ export default function AccountPage() {
     }
   }
 
+  async function hideOfferNotifications(offerIds: string[]) {
+    if (!userId || offerIds.length === 0) return;
+
+    try {
+      await supabase.from("notifications").delete().eq("user_id", userId).in("offer_id", offerIds);
+    } catch {
+      // ignore
+    }
+
+    if (!mountedRef.current) return;
+    setNotifications((prev) => prev.filter((n) => !n.offer_id || !offerIds.includes(n.offer_id)));
+  }
+
   function openNotification(notification: NotificationRow) {
     if (notification.item_id) {
-      router.push(`/manage/${notification.item_id}`);
       setDrawerOpen(false);
-      return;
+      router.push(`/manage/${notification.item_id}`);
     }
   }
 
-  async function updateIncomingOfferStatus(offer: IncomingOfferRow, next: OfferStatus) {
-    if (incomingOfferBusyId) return;
+  async function acceptIncomingOffer(offer: IncomingOfferRow) {
+    if (!userId || incomingOfferBusyId) return;
+
+    const requestKey = offer.request_item?.id ?? offer.request_id;
+    if (!requestKey) {
+      showToast("Missing request post.", "err");
+      return;
+    }
 
     setIncomingOfferBusyId(offer.id);
 
     try {
       const nowIso = new Date().toISOString();
 
-      if (next === "accepted" && offer.request_item?.id) {
-        const { error: otherErr } = await supabase
-          .from("request_offers")
-          .update({ status: "hold", updated_at: nowIso })
-          .eq("request_id", offer.request_item.id)
-          .neq("id", offer.id)
-          .in("status", ["pending", "accepted"]);
+      const siblingOffers = incomingOffers.filter(
+        (x) => (x.request_item?.id ?? x.request_id) === requestKey && x.id !== offer.id
+      );
+      const siblingIds = siblingOffers.map((x) => x.id);
 
-        if (otherErr) throw new Error(otherErr.message);
+      if (siblingIds.length > 0) {
+        const { error: declineOthersError } = await supabase
+          .from("request_offers")
+          .update({ status: "declined", updated_at: nowIso })
+          .in("id", siblingIds);
+
+        if (declineOthersError) throw new Error(declineOthersError.message);
       }
 
-      const { error } = await supabase
+      const { error: acceptError } = await supabase
         .from("request_offers")
-        .update({ status: next, updated_at: nowIso })
+        .update({ status: "accepted", updated_at: nowIso })
         .eq("id", offer.id);
 
-      if (error) throw new Error(error.message);
+      if (acceptError) throw new Error(acceptError.message);
+
+      const threadId = await ensureThread({
+        itemId: requestKey,
+        ownerId: userId,
+        requesterId: offer.helper_id,
+      });
+
+      await hideOfferNotifications([offer.id, ...siblingIds]);
 
       if (!mountedRef.current) return;
 
       setIncomingOffers((prev) =>
-        prev.map((x) => (x.id === offer.id ? { ...x, status: next, updated_at: nowIso } : x))
+        prev.filter((x) => (x.request_item?.id ?? x.request_id) !== requestKey)
       );
 
-      showToast(`Set to ${next}.`);
+      setDrawerOpen(false);
+      router.push(`/messages/${threadId}`);
     } catch (e) {
       showToast(getFriendlyError(e), "err");
     } finally {
@@ -782,31 +810,27 @@ export default function AccountPage() {
     }
   }
 
-  async function openIncomingOfferChat(offer: IncomingOfferRow) {
-    if (!userId) return;
+  async function declineIncomingOffer(offer: IncomingOfferRow) {
+    if (incomingOfferBusyId) return;
 
-    if ((offer.status ?? "pending") !== "accepted") {
-      showToast("Accept this helper first.", "err");
-      return;
-    }
-
-    const itemId = offer.request_item?.id;
-    if (!itemId) {
-      showToast("Missing request post.", "err");
-      return;
-    }
+    setIncomingOfferBusyId(offer.id);
 
     try {
-      setIncomingOfferBusyId(offer.id);
+      const nowIso = new Date().toISOString();
 
-      const threadId = await ensureThread({
-        itemId,
-        ownerId: userId,
-        requesterId: offer.helper_id,
-      });
+      const { error } = await supabase
+        .from("request_offers")
+        .update({ status: "declined", updated_at: nowIso })
+        .eq("id", offer.id);
 
-      setDrawerOpen(false);
-      router.push(`/messages/${threadId}`);
+      if (error) throw new Error(error.message);
+
+      await hideOfferNotifications([offer.id]);
+
+      if (!mountedRef.current) return;
+
+      setIncomingOffers((prev) => prev.filter((x) => x.id !== offer.id));
+      showToast("Offer declined.");
     } catch (e) {
       showToast(getFriendlyError(e), "err");
     } finally {
@@ -849,8 +873,9 @@ export default function AccountPage() {
   async function openMyOfferChat(offer: MyOfferRow) {
     if (!userId) return;
 
-    if ((offer.status ?? "pending") !== "accepted") {
-      showToast("Chat unlocks after acceptance.", "err");
+    const status = (offer.status ?? "pending") as OfferStatus;
+    if (status !== "accepted" && status !== "completed") {
+      showToast("Chat opens after acceptance.", "err");
       return;
     }
 
@@ -970,15 +995,18 @@ export default function AccountPage() {
     };
   }, [clearAll, loadAllFor]);
 
+  /* ==============================
+     LOADING
+  ============================== */
+
   if (loading) {
     return (
       <div className="account-page">
         <div className="page-shell">
           <div className="profile-card skeleton-shell">
-            <div className="skel skel-avatar" />
-            <div className="skel skel-line lg" />
-            <div className="skel skel-line md" />
+            <div className="skel skel-head" />
             <div className="skel skel-pills" />
+            <div className="skel skel-tabs" />
             <div className="skel skel-grid" />
           </div>
         </div>
@@ -986,6 +1014,10 @@ export default function AccountPage() {
       </div>
     );
   }
+
+  /* ==============================
+     AUTH
+  ============================== */
 
   if (!isLoggedIn) {
     return (
@@ -1046,6 +1078,10 @@ export default function AccountPage() {
     );
   }
 
+  /* ==============================
+     MAIN
+  ============================== */
+
   return (
     <div className="account-page">
       <div className="page-shell">
@@ -1089,12 +1125,12 @@ export default function AccountPage() {
               onClick={() => setGridMode("active")}
             >
               <span className="mini-pill-label">Active</span>
-              <span className="mini-pill-value">{activeItems.length}</span>
+              <span className="mini-pill-value">{activeListingsCount}</span>
             </button>
 
             <button type="button" className="mini-pill" onClick={() => openDrawer("requests")}>
               <span className="mini-pill-label">Requests</span>
-              <span className="mini-pill-value">{incomingCount}</span>
+              <span className="mini-pill-value">{requestsCount}</span>
             </button>
 
             <button type="button" className="mini-pill" onClick={() => openDrawer("activity")}>
@@ -1104,11 +1140,11 @@ export default function AccountPage() {
 
             <button
               type="button"
-              className={`mini-pill ${gridMode === "done" ? "active" : ""}`}
-              onClick={() => setGridMode("done")}
+              className={`mini-pill ${gridMode === "archived" ? "active" : ""}`}
+              onClick={() => setGridMode("archived")}
             >
-              <span className="mini-pill-label">Done</span>
-              <span className="mini-pill-value">{doneItems.length}</span>
+              <span className="mini-pill-label">Archived</span>
+              <span className="mini-pill-value">{archivedListingsCount}</span>
             </button>
           </div>
         </section>
@@ -1121,7 +1157,7 @@ export default function AccountPage() {
               onClick={() => setMediaTab("give")}
             >
               Items
-              <span className="media-tab-count">{giveItems.length}</span>
+              <span className="media-tab-count">{itemsGive.length}</span>
             </button>
             <button
               type="button"
@@ -1129,7 +1165,7 @@ export default function AccountPage() {
               onClick={() => setMediaTab("request")}
             >
               Requests
-              <span className="media-tab-count">{requestPosts.length}</span>
+              <span className="media-tab-count">{itemsRequest.length}</span>
             </button>
             <button
               type="button"
@@ -1137,28 +1173,23 @@ export default function AccountPage() {
               onClick={() => setMediaTab("event")}
             >
               Events
-              <span className="media-tab-count">{eventPosts.length}</span>
+              <span className="media-tab-count">{itemsEvent.length}</span>
             </button>
-          </div>
-
-          <div className="mode-chips">
-            <span className={`mode-chip ${gridMode === "active" ? "selected" : ""}`}>Live</span>
-            <span className={`mode-chip ${gridMode === "done" ? "selected" : ""}`}>Archived</span>
           </div>
         </section>
 
         <section className="grid-wrap">
-          {selectedTabItems.length === 0 ? (
+          {gridSource.length === 0 ? (
             <EmptyGridState
               title={
                 gridMode === "active"
-                  ? `No live ${mediaTabLabel(mediaTab).toLowerCase()} yet`
+                  ? `No active ${mediaTabLabel(mediaTab).toLowerCase()} yet`
                   : `No archived ${mediaTabLabel(mediaTab).toLowerCase()} yet`
               }
               body={
                 gridMode === "active"
-                  ? `Your ${mediaTabLabel(mediaTab).toLowerCase()} will appear here in a clean profile grid.`
-                  : `Finished ${mediaTabLabel(mediaTab).toLowerCase()} will appear here once completed.`
+                  ? `Your live ${mediaTabLabel(mediaTab).toLowerCase()} will show here.`
+                  : `Completed ${mediaTabLabel(mediaTab).toLowerCase()} will show here when they move to archive.`
               }
             />
           ) : (
@@ -1167,12 +1198,14 @@ export default function AccountPage() {
                 <div className="grid-title">
                   {mediaTabLabel(mediaTab)} · {gridMode === "active" ? "Live" : "Archived"}
                 </div>
-                <div className="grid-sub">{selectedTabItems.length} shown · {selectedTabTotalCount} total</div>
+                <div className="grid-sub">
+                  {gridSource.length} shown · {gridTotalForTab} total
+                </div>
               </div>
 
               <div className="listing-grid">
-                {selectedTabItems.map((item) => (
-                  <ProfileGridTile
+                {gridSource.map((item) => (
+                  <ProfileMediaCard
                     key={item.id}
                     item={item}
                     onClick={() => router.push(`/manage/${item.id}`)}
@@ -1200,22 +1233,14 @@ export default function AccountPage() {
                 />
                 <DrawerMenuRow
                   label="Requests on my posts"
-                  meta={incomingCount ? `${incomingCount} waiting` : "All clear"}
+                  meta={requestsCount ? `${requestsCount} waiting` : "All clear"}
                   onClick={() => setDrawerSection("requests")}
-                  highlight={incomingCount > 0}
+                  highlight={requestsCount > 0}
                 />
                 <DrawerMenuRow
                   label="My activity"
                   meta={activityCount ? `${activityCount} records` : "No recent activity"}
                   onClick={() => setDrawerSection("activity")}
-                />
-                <DrawerMenuRow
-                  label="Refresh"
-                  meta="Reload latest profile data"
-                  onClick={() => {
-                    if (userId) void loadAllFor(userId);
-                    setDrawerOpen(false);
-                  }}
                 />
                 <button className="drawer-danger-btn" onClick={() => void signOut()} type="button">
                   Sign out
@@ -1228,7 +1253,7 @@ export default function AccountPage() {
                 <div className="drawer-headline-row">
                   <div>
                     <div className="drawer-title">Notifications</div>
-                    <div className="drawer-sub">Secondary activity stays here, not on the main profile.</div>
+                    <div className="drawer-sub">Only the remaining alerts stay here.</div>
                   </div>
                   <button
                     onClick={() => void markNotificationsSeen()}
@@ -1261,18 +1286,15 @@ export default function AccountPage() {
               <div className="drawer-stack">
                 <div>
                   <div className="drawer-title">Requests on my posts</div>
-                  <div className="drawer-sub">Use this drawer as the action center.</div>
+                  <div className="drawer-sub">Handle incoming asks and helper offers here.</div>
                 </div>
 
-                <DrawerSectionCard
-                  title="Incoming item requests"
-                  count={incomingInterests.length}
-                >
+                <DrawerSectionCard title="Incoming item requests" count={incomingInterests.length}>
                   {incomingInterests.length === 0 ? (
-                    <DrawerEmpty title="No incoming item requests" body="When someone requests your item, it appears here." />
+                    <DrawerEmpty title="No item requests" body="When someone requests your item, it appears here." />
                   ) : (
                     incomingInterests.map((r) => (
-                      <MiniRowCard
+                      <InterestCard
                         key={r.id}
                         photoUrl={r.item?.photo_url ?? null}
                         title={`${readableName(r.requester)} requested ${r.item?.title ?? "your post"}`}
@@ -1281,8 +1303,7 @@ export default function AccountPage() {
                           { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
                           { label: r.item?.status ?? "—", tone: toneForStatus(r.item?.status) },
                         ]}
-                        primaryLabel="Manage"
-                        onPrimary={() => {
+                        onManage={() => {
                           setDrawerOpen(false);
                           router.push(`/manage/${r.item_id}`);
                         }}
@@ -1291,37 +1312,22 @@ export default function AccountPage() {
                   )}
                 </DrawerSectionCard>
 
-                <DrawerSectionCard
-                  title="Incoming helper offers"
-                  count={incomingOffers.length}
-                >
+                <DrawerSectionCard title="Incoming helper offers" count={incomingOffers.length}>
                   {incomingOffers.length === 0 ? (
                     <DrawerEmpty title="No helper offers" body="When someone offers help on your request post, it appears here." />
                   ) : (
                     incomingOffers.map((o) => {
-                      const status = (o.status ?? "pending") as OfferStatus;
                       const busy = incomingOfferBusyId === o.id;
 
                       return (
-                        <OfferActionCard
+                        <IncomingOfferCard
                           key={o.id}
-                          icon="🤝"
                           title={`${readableName(o.helper)} offered help on ${o.request_item?.title ?? "your request"}`}
                           subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
                           note={o.note}
-                          statusLabel={status}
-                          onView={() => {
-                            setDrawerOpen(false);
-                            router.push(`/manage/${o.request_item?.id ?? o.request_id}`);
-                          }}
-                          onAccept={() => void updateIncomingOfferStatus(o, "accepted")}
-                          onHold={() => void updateIncomingOfferStatus(o, "hold")}
-                          onDecline={() => void updateIncomingOfferStatus(o, "declined")}
-                          onChat={() => void openIncomingOfferChat(o)}
                           busy={busy}
-                          accepted={status === "accepted"}
-                          completed={status === "completed"}
-                          declined={status === "declined"}
+                          onAccept={() => void acceptIncomingOffer(o)}
+                          onDecline={() => void declineIncomingOffer(o)}
                         />
                       );
                     })
@@ -1334,7 +1340,7 @@ export default function AccountPage() {
               <div className="drawer-stack">
                 <div>
                   <div className="drawer-title">My activity</div>
-                  <div className="drawer-sub">Your interests and helper offers live here for now.</div>
+                  <div className="drawer-sub">Things you requested or offered help on.</div>
                 </div>
 
                 <DrawerSectionCard title="My interests" count={myRequests.length}>
@@ -1342,7 +1348,7 @@ export default function AccountPage() {
                     <DrawerEmpty title="No interests yet" body="When you request an item, it appears here." />
                   ) : (
                     myRequests.map((r, i) => (
-                      <MiniRowCard
+                      <InterestCard
                         key={`${r.item_id}-${r.created_at ?? i}`}
                         photoUrl={r.item?.photo_url ?? null}
                         title={r.item?.title ?? "Unknown post"}
@@ -1351,8 +1357,8 @@ export default function AccountPage() {
                           { label: "Interest sent", tone: "green" },
                           { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
                         ]}
-                        primaryLabel="View"
-                        onPrimary={() => {
+                        manageLabel="Open"
+                        onManage={() => {
                           setDrawerOpen(false);
                           router.push(`/item/${r.item_id}`);
                         }}
@@ -1370,26 +1376,18 @@ export default function AccountPage() {
                       const acting = myOfferBusyId === o.id;
 
                       return (
-                        <OfferActionCard
+                        <MyOfferCard
                           key={o.id}
-                          icon="🙌"
                           title={`You offered help on ${o.request_item?.title ?? "a request"}`}
                           subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
                           note={o.note}
-                          statusLabel={status}
-                          onView={() => {
-                            setDrawerOpen(false);
-                            router.push(`/item/${o.request_item?.id ?? o.request_id}`);
-                          }}
-                          onChat={() => void openMyOfferChat(o)}
-                          onDecline={() => void withdrawMyOffer(o)}
+                          status={status}
                           busy={acting}
-                          accepted={status === "accepted"}
-                          completed={status === "completed"}
-                          declined={false}
-                          customDeclineLabel={acting ? "Working…" : "Withdraw"}
-                          hideAccept
-                          hideHold
+                          onPrimary={() =>
+                            status === "accepted" || status === "completed"
+                              ? void openMyOfferChat(o)
+                              : void withdrawMyOffer(o)
+                          }
                         />
                       );
                     })
@@ -1422,7 +1420,7 @@ export default function AccountPage() {
    COMPONENTS
 ============================== */
 
-function ProfileGridTile({
+function ProfileMediaCard({
   item,
   onClick,
 }: {
@@ -1430,26 +1428,36 @@ function ProfileGridTile({
   onClick: () => void;
 }) {
   const statusTone = toneForStatus(item.status);
-  const topLabel = item.post_type === "request" ? "REQUEST" : item.post_type === "event" ? "EVENT" : "ITEM";
 
   return (
-    <button className="profile-tile" onClick={onClick} type="button">
-      {item.photo_url ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={item.photo_url} alt={item.title} className="profile-tile-img" />
-      ) : (
-        <div className={`profile-tile-fallback ${item.post_type ?? "give"}`}>
-          <span>{topLabel}</span>
-        </div>
-      )}
+    <button className="profile-media-card" onClick={onClick} type="button">
+      <div className="profile-media-frame">
+        {item.photo_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={item.photo_url} alt={item.title} className="profile-media-img" />
+        ) : (
+          <div className={`profile-media-fallback ${item.post_type ?? "give"}`}>
+            <span>{itemTypeLabel(item.post_type)}</span>
+          </div>
+        )}
 
-      <div className="tile-top">
-        <span className="tile-type">{itemTypeLabel(item.post_type)}</span>
+        <div className="media-badge-row">
+          <span className="media-type-badge">{itemTypeLabel(item.post_type)}</span>
+        </div>
+
+        <div className="media-gradient" />
+
+        <div className="media-bottom">
+          <div className="media-title">{item.title}</div>
+          <div className="media-meta-row">
+            <span className={`media-status ${statusTone}`}>{item.status ?? "—"}</span>
+            <span className="media-date">{fmtShort(item.created_at)}</span>
+          </div>
+        </div>
       </div>
 
-      <div className="tile-bottom">
-        <div className="tile-title">{item.title}</div>
-        <span className={`tile-status ${statusTone}`}>{item.status ?? "—"}</span>
+      <div className="profile-media-copy">
+        <div className="profile-media-desc">{item.description || "No description provided."}</div>
       </div>
     </button>
   );
@@ -1564,28 +1572,28 @@ function NotificationCard({
   );
 }
 
-function MiniRowCard({
+function InterestCard({
   photoUrl,
   title,
   subtitle,
   chips,
-  primaryLabel,
-  onPrimary,
+  onManage,
+  manageLabel = "Manage",
 }: {
   photoUrl: string | null;
   title: string;
   subtitle: string;
   chips?: Array<{ label: string; tone: "green" | "amber" | "red" | "gray" }>;
-  primaryLabel: string;
-  onPrimary: () => void;
+  onManage: () => void;
+  manageLabel?: string;
 }) {
   return (
-    <div className="mini-row-card">
-      <div className="mini-row-main">
-        <MediaThumb photoUrl={photoUrl} label={title} size={60} />
-        <div className="mini-row-copy">
-          <div className="mini-row-title">{title}</div>
-          <div className="mini-row-sub">{subtitle}</div>
+    <div className="interest-card">
+      <div className="interest-main">
+        <MediaThumb photoUrl={photoUrl} label={title} size={62} />
+        <div className="interest-copy">
+          <div className="interest-title">{title}</div>
+          <div className="interest-sub">{subtitle}</div>
           {chips?.length ? (
             <div className="chip-row top-gap-sm">
               {chips.map((chip, i) => (
@@ -1596,89 +1604,85 @@ function MiniRowCard({
         </div>
       </div>
 
-      <button onClick={onPrimary} className="btn btn-secondary inline" type="button">
-        {primaryLabel}
+      <button onClick={onManage} className="btn btn-secondary inline" type="button">
+        {manageLabel}
       </button>
     </div>
   );
 }
 
-function OfferActionCard({
-  icon,
+function IncomingOfferCard({
   title,
   subtitle,
   note,
-  statusLabel,
-  onView,
-  onAccept,
-  onHold,
-  onDecline,
-  onChat,
   busy,
-  accepted,
-  completed,
-  declined,
-  customDeclineLabel,
-  hideAccept,
-  hideHold,
+  onAccept,
+  onDecline,
 }: {
-  icon: string;
   title: string;
   subtitle: string;
   note?: string | null;
-  statusLabel: string;
-  onView: () => void;
-  onAccept?: () => void;
-  onHold?: () => void;
-  onDecline?: () => void;
-  onChat: () => void;
   busy: boolean;
-  accepted: boolean;
-  completed: boolean;
-  declined: boolean;
-  customDeclineLabel?: string;
-  hideAccept?: boolean;
-  hideHold?: boolean;
+  onAccept: () => void;
+  onDecline: () => void;
 }) {
   return (
     <div className="offer-card">
       <div className="offer-main">
-        <div className="offer-icon-pill">{icon}</div>
+        <div className="offer-icon-pill">🤝</div>
         <div className="offer-copy">
           <div className="offer-title">{title}</div>
           <div className="offer-sub">{subtitle}</div>
-          <div className="chip-row top-gap-sm">
-            <Chip label={statusLabel} tone={toneForStatus(statusLabel)} />
-          </div>
           {note ? <div className="note-box">{note}</div> : null}
         </div>
       </div>
 
       <div className="offer-actions">
-        <button onClick={onView} className="btn btn-secondary inline" type="button">
-          View
+        <button onClick={onAccept} disabled={busy} className="btn btn-primary inline" type="button">
+          {busy ? "Opening…" : "Accept"}
         </button>
+        <button onClick={onDecline} disabled={busy} className="btn btn-danger inline" type="button">
+          Decline
+        </button>
+      </div>
+    </div>
+  );
+}
 
-        {!hideAccept && onAccept ? (
-          <button onClick={onAccept} disabled={busy || accepted || completed} className="btn btn-primary inline" type="button">
-            {busy ? "Working…" : "Accept"}
-          </button>
-        ) : null}
+function MyOfferCard({
+  title,
+  subtitle,
+  note,
+  status,
+  busy,
+  onPrimary,
+}: {
+  title: string;
+  subtitle: string;
+  note?: string | null;
+  status: OfferStatus;
+  busy: boolean;
+  onPrimary: () => void;
+}) {
+  const primaryLabel = status === "accepted" || status === "completed" ? "Open chat" : "Withdraw";
 
-        {!hideHold && onHold ? (
-          <button onClick={onHold} disabled={busy || completed} className="btn btn-secondary inline" type="button">
-            Hold
-          </button>
-        ) : null}
+  return (
+    <div className="offer-card">
+      <div className="offer-main">
+        <div className="offer-icon-pill">🙌</div>
+        <div className="offer-copy">
+          <div className="offer-title">{title}</div>
+          <div className="offer-sub">{subtitle}</div>
+          <div className="chip-row top-gap-sm">
+            <Chip label={status} tone={toneForStatus(status)} />
+          </div>
+          {note ? <div className="note-box">{note}</div> : null}
+        </div>
+      </div>
 
-        {onDecline ? (
-          <button onClick={onDecline} disabled={busy || completed || declined} className="btn btn-danger inline" type="button">
-            {customDeclineLabel || "Decline"}
-          </button>
-        ) : null}
-
-        <button onClick={onChat} disabled={busy || !accepted} className="btn btn-secondary inline" type="button">
-          {busy ? "Opening…" : "Chat"}
+      <div className="offer-actions single">
+        <button onClick={onPrimary} disabled={busy} className="btn btn-secondary inline" type="button">
+          {busy ? "Working…" : primaryLabel}
         </button>
       </div>
     </div>
@@ -1817,12 +1821,9 @@ function PageStyles() {
       :root {
         --bg: #f6f7f9;
         --panel: #ffffff;
-        --panel-2: #fafafa;
-        --line: #e8eaee;
+        --line: #e7ebf0;
         --text: #111827;
         --muted: #6b7280;
-        --green: #0f766e;
-        --green-bg: rgba(16, 185, 129, 0.08);
       }
 
       .account-page {
@@ -1835,7 +1836,7 @@ function PageStyles() {
 
       .page-shell {
         width: 100%;
-        max-width: 980px;
+        max-width: 1040px;
         margin: 0 auto;
         padding: 12px;
         padding-bottom: calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 24px);
@@ -1865,7 +1866,7 @@ function PageStyles() {
       }
 
       .btn.inline {
-        min-height: 40px;
+        min-height: 42px;
         padding: 0 14px;
         border-radius: 14px;
       }
@@ -1883,7 +1884,7 @@ function PageStyles() {
         min-height: 48px;
         border: 1px solid var(--line);
         background: #fff;
-        color: var(--text);
+        color: #111827;
         border-radius: 16px;
         padding: 0 16px;
       }
@@ -1902,15 +1903,16 @@ function PageStyles() {
       .notif-card,
       .drawer-menu-row,
       .drawer-section-card,
-      .mini-row-card,
+      .interest-card,
       .offer-card,
-      .empty-grid {
+      .empty-grid,
+      .profile-media-card {
         min-width: 0;
       }
 
       .profile-card {
         border-radius: 28px;
-        border: 1px solid rgba(232, 234, 238, 0.95);
+        border: 1px solid rgba(231, 235, 240, 0.95);
         background: rgba(255, 255, 255, 0.96);
         backdrop-filter: blur(10px);
         box-shadow: 0 18px 48px rgba(15, 23, 42, 0.06);
@@ -1933,15 +1935,15 @@ function PageStyles() {
       }
 
       .profile-avatar {
-        width: 72px;
-        height: 72px;
+        width: 76px;
+        height: 76px;
         border-radius: 24px;
         border: 1px solid var(--line);
         background: linear-gradient(180deg, #ffffff 0%, #f3f4f6 100%);
         display: flex;
         align-items: center;
         justify-content: center;
-        flex: 0 0 72px;
+        flex: 0 0 76px;
         font-size: 28px;
         font-weight: 950;
       }
@@ -2046,9 +2048,7 @@ function PageStyles() {
         z-index: 18;
         margin-top: 14px;
         padding-top: 6px;
-        display: grid;
-        gap: 10px;
-        background: linear-gradient(180deg, rgba(246, 247, 249, 0.94) 0%, rgba(246, 247, 249, 0.82) 100%);
+        background: linear-gradient(180deg, rgba(246, 247, 249, 0.96) 0%, rgba(246, 247, 249, 0.86) 100%);
         backdrop-filter: blur(10px);
       }
 
@@ -2058,7 +2058,7 @@ function PageStyles() {
         gap: 8px;
         border-radius: 20px;
         border: 1px solid var(--line);
-        background: rgba(255, 255, 255, 0.88);
+        background: rgba(255, 255, 255, 0.9);
         padding: 6px;
       }
 
@@ -2096,35 +2096,8 @@ function PageStyles() {
         padding: 0 6px;
       }
 
-      .mode-chips {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 0 2px;
-      }
-
-      .mode-chip {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 30px;
-        border-radius: 999px;
-        border: 1px solid var(--line);
-        background: rgba(255, 255, 255, 0.8);
-        color: #6b7280;
-        padding: 0 12px;
-        font-size: 12px;
-        font-weight: 900;
-      }
-
-      .mode-chip.selected {
-        border-color: rgba(16, 185, 129, 0.28);
-        background: rgba(16, 185, 129, 0.08);
-        color: #065f46;
-      }
-
       .grid-wrap {
-        margin-top: 12px;
+        margin-top: 14px;
       }
 
       .grid-topline {
@@ -2132,7 +2105,7 @@ function PageStyles() {
         justify-content: space-between;
         align-items: flex-end;
         gap: 12px;
-        margin-bottom: 10px;
+        margin-bottom: 12px;
         padding: 0 2px;
       }
 
@@ -2150,65 +2123,70 @@ function PageStyles() {
 
       .listing-grid {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 6px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
       }
 
-      .profile-tile {
-        position: relative;
-        aspect-ratio: 1 / 1;
-        border: 1px solid rgba(232, 234, 238, 0.95);
-        border-radius: 18px;
-        overflow: hidden;
-        background: #eef2f7;
-        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+      .profile-media-card {
         text-align: left;
+        border-radius: 24px;
+        border: 1px solid var(--line);
+        background: #fff;
+        overflow: hidden;
+        box-shadow: 0 14px 30px rgba(15, 23, 42, 0.06);
       }
 
-      .profile-tile-img {
+      .profile-media-frame {
+        position: relative;
+        aspect-ratio: 0.88;
+        background: #eef2f7;
+        overflow: hidden;
+      }
+
+      .profile-media-img {
         width: 100%;
         height: 100%;
         object-fit: cover;
         display: block;
       }
 
-      .profile-tile-fallback {
+      .profile-media-fallback {
         width: 100%;
         height: 100%;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 13px;
+        font-size: 15px;
         font-weight: 950;
-        letter-spacing: 0.6px;
+        letter-spacing: 0.4px;
         color: #111827;
       }
 
-      .profile-tile-fallback.give {
+      .profile-media-fallback.give {
         background: linear-gradient(180deg, #f8fafc 0%, #e5e7eb 100%);
       }
 
-      .profile-tile-fallback.request {
+      .profile-media-fallback.request {
         background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
       }
 
-      .profile-tile-fallback.event {
+      .profile-media-fallback.event {
         background: linear-gradient(180deg, #faf5ff 0%, #ede9fe 100%);
       }
 
-      .tile-top {
+      .media-badge-row {
         position: absolute;
-        top: 8px;
-        left: 8px;
-        right: 8px;
+        top: 10px;
+        left: 10px;
+        right: 10px;
         display: flex;
         justify-content: flex-start;
       }
 
-      .tile-type {
-        min-height: 24px;
+      .media-type-badge {
+        min-height: 26px;
         border-radius: 999px;
-        padding: 0 8px;
+        padding: 0 9px;
         background: rgba(17, 24, 39, 0.62);
         backdrop-filter: blur(8px);
         color: #fff;
@@ -2218,55 +2196,87 @@ function PageStyles() {
         align-items: center;
       }
 
-      .tile-bottom {
+      .media-gradient {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(180deg, rgba(17, 24, 39, 0) 38%, rgba(17, 24, 39, 0.84) 100%);
+      }
+
+      .media-bottom {
         position: absolute;
         left: 0;
         right: 0;
         bottom: 0;
-        padding: 10px;
-        background: linear-gradient(180deg, rgba(17, 24, 39, 0) 0%, rgba(17, 24, 39, 0.84) 100%);
+        padding: 12px;
       }
 
-      .tile-title {
-        font-size: 12px;
-        font-weight: 900;
+      .media-title {
+        font-size: 14px;
+        font-weight: 950;
         color: #fff;
-        line-height: 1.25;
+        line-height: 1.3;
         display: -webkit-box;
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
       }
 
-      .tile-status {
-        margin-top: 6px;
-        display: inline-flex;
+      .media-meta-row {
+        margin-top: 8px;
+        display: flex;
         align-items: center;
-        min-height: 22px;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .media-status {
+        min-height: 24px;
         border-radius: 999px;
         padding: 0 8px;
         font-size: 10px;
         font-weight: 900;
+        display: inline-flex;
+        align-items: center;
       }
 
-      .tile-status.green {
+      .media-status.green {
         background: rgba(16, 185, 129, 0.18);
         color: #d1fae5;
       }
 
-      .tile-status.amber {
+      .media-status.amber {
         background: rgba(245, 158, 11, 0.18);
         color: #fde68a;
       }
 
-      .tile-status.red {
+      .media-status.red {
         background: rgba(239, 68, 68, 0.18);
         color: #fecaca;
       }
 
-      .tile-status.gray {
+      .media-status.gray {
         background: rgba(255, 255, 255, 0.16);
         color: #f9fafb;
+      }
+
+      .media-date {
+        font-size: 11px;
+        font-weight: 900;
+        color: rgba(255, 255, 255, 0.88);
+      }
+
+      .profile-media-copy {
+        padding: 12px;
+      }
+
+      .profile-media-desc {
+        font-size: 13px;
+        color: #6b7280;
+        line-height: 1.45;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
       }
 
       .empty-grid {
@@ -2510,7 +2520,7 @@ function PageStyles() {
         font-weight: 800;
       }
 
-      .mini-row-card {
+      .interest-card {
         border-radius: 18px;
         border: 1px solid var(--line);
         background: #fff;
@@ -2519,19 +2529,19 @@ function PageStyles() {
         gap: 12px;
       }
 
-      .mini-row-main {
+      .interest-main {
         display: flex;
         align-items: flex-start;
         gap: 12px;
         min-width: 0;
       }
 
-      .mini-row-copy {
+      .interest-copy {
         min-width: 0;
         flex: 1;
       }
 
-      .mini-row-title {
+      .interest-title {
         font-size: 14px;
         font-weight: 950;
         color: #111827;
@@ -2539,7 +2549,7 @@ function PageStyles() {
         overflow-wrap: anywhere;
       }
 
-      .mini-row-sub {
+      .interest-sub {
         margin-top: 4px;
         font-size: 13px;
         color: #6b7280;
@@ -2600,6 +2610,10 @@ function PageStyles() {
         display: flex;
         flex-wrap: wrap;
         gap: 8px;
+      }
+
+      .offer-actions.single {
+        justify-content: flex-start;
       }
 
       .note-box {
@@ -2842,20 +2856,9 @@ function PageStyles() {
         border-radius: 16px;
       }
 
-      .skel-avatar {
-        width: 72px;
-        height: 72px;
-        border-radius: 24px;
-      }
-
-      .skel-line.lg {
-        width: 62%;
-        height: 24px;
-      }
-
-      .skel-line.md {
-        width: 78%;
-        height: 16px;
+      .skel-head {
+        width: 100%;
+        height: 92px;
       }
 
       .skel-pills {
@@ -2863,9 +2866,14 @@ function PageStyles() {
         height: 68px;
       }
 
+      .skel-tabs {
+        width: 100%;
+        height: 56px;
+      }
+
       .skel-grid {
         width: 100%;
-        height: 320px;
+        height: 420px;
       }
 
       @media (min-width: 700px) {
@@ -2878,8 +2886,7 @@ function PageStyles() {
         }
 
         .listing-grid {
-          grid-template-columns: repeat(4, minmax(0, 1fr));
-          gap: 8px;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
         }
 
         .confirm-actions {
@@ -2896,7 +2903,7 @@ function PageStyles() {
 
       @media (min-width: 1024px) {
         .listing-grid {
-          grid-template-columns: repeat(5, minmax(0, 1fr));
+          grid-template-columns: repeat(4, minmax(0, 1fr));
         }
       }
 
@@ -2907,10 +2914,10 @@ function PageStyles() {
         }
 
         .profile-avatar {
-          width: 62px;
-          height: 62px;
+          width: 64px;
+          height: 64px;
           border-radius: 20px;
-          flex-basis: 62px;
+          flex-basis: 64px;
           font-size: 24px;
         }
 
@@ -2919,7 +2926,6 @@ function PageStyles() {
         }
 
         .mini-stats {
-          grid-template-columns: repeat(4, minmax(0, 1fr));
           gap: 6px;
         }
 
@@ -2956,19 +2962,23 @@ function PageStyles() {
         }
 
         .listing-grid {
-          gap: 5px;
+          gap: 10px;
         }
 
-        .profile-tile {
-          border-radius: 14px;
+        .profile-media-card {
+          border-radius: 20px;
         }
 
-        .tile-bottom {
-          padding: 8px;
+        .profile-media-frame {
+          aspect-ratio: 0.9;
         }
 
-        .tile-title {
-          font-size: 11px;
+        .profile-media-copy {
+          padding: 10px;
+        }
+
+        .profile-media-desc {
+          font-size: 12px;
         }
 
         .drawer-panel {
@@ -2978,6 +2988,10 @@ function PageStyles() {
         .offer-actions {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .offer-actions.single {
+          grid-template-columns: 1fr;
         }
 
         .offer-actions > .btn.inline {
