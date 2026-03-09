@@ -5,6 +5,7 @@ export const dynamic = "force-dynamic";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { ensureThread } from "@/lib/ensureThread";
 
 const LOVES_TABLE = "post_likes";
 
@@ -29,11 +30,28 @@ type ItemRow = {
   status: string | null;
   owner_id: string | null;
   hide_interest_count?: boolean | null;
+  reserved_interest_id?: string | null;
 };
 
 type OwnerProfile = {
   full_name: string | null;
   user_role: string | null;
+};
+
+type MyInterestRow = {
+  id: string;
+  item_id: string;
+  user_id: string;
+  status: string | null;
+  created_at: string | null;
+};
+
+type MyOfferRow = {
+  id: string;
+  request_id: string;
+  helper_id: string;
+  status: string | null;
+  created_at: string | null;
 };
 
 function requestGroupLabel(v: string | null) {
@@ -90,15 +108,50 @@ function initials(name: string) {
   return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
 }
 
+function normStatus(v: string | null | undefined) {
+  return (v ?? "").trim().toLowerCase();
+}
+
+function isExpired(expiresAt: string | null | undefined) {
+  if (!expiresAt) return false;
+  const ts = new Date(expiresAt).getTime();
+  if (Number.isNaN(ts)) return false;
+  return ts <= Date.now();
+}
+
+function isGiveClosed(item: ItemRow | null) {
+  if (!item) return false;
+  const st = normStatus(item.status);
+  return st === "claimed" || st === "completed" || isExpired(item.expires_at);
+}
+
+function isRequestClosed(item: ItemRow | null) {
+  if (!item) return false;
+  const st = normStatus(item.status);
+  return st === "claimed" || st === "completed" || isExpired(item.expires_at);
+}
+
+function statusChip(item: ItemRow | null) {
+  const st = normStatus(item?.status);
+
+  if (!item) return { label: "Loading", tone: "neutral" as const };
+  if (isExpired(item.expires_at)) return { label: "Expired", tone: "closed" as const };
+  if (st === "claimed" || st === "completed") return { label: "Closed", tone: "closed" as const };
+  if (st === "reserved") return { label: "Reserved", tone: "warn" as const };
+  return { label: "Available", tone: "good" as const };
+}
+
 export default function ItemDetailPage() {
   const router = useRouter();
   const params = useParams();
   const itemId = (params?.id as string) || "";
 
   const [userId, setUserId] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   const [item, setItem] = useState<ItemRow | null>(null);
@@ -110,6 +163,10 @@ export default function ItemDetailPage() {
   const [interestCount, setInterestCount] = useState(0);
   const [offerCount, setOfferCount] = useState(0);
 
+  const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
+  const [myOffer, setMyOffer] = useState<MyOfferRow | null>(null);
+  const [hasAcceptedOther, setHasAcceptedOther] = useState(false);
+
   const [menuOpen, setMenuOpen] = useState(false);
   const [openImg, setOpenImg] = useState<string | null>(null);
 
@@ -119,15 +176,19 @@ export default function ItemDetailPage() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const postType: PostType = (item?.post_type ?? "give") as PostType;
+  const isAshland = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
 
   const isOwner = useMemo(() => {
     return !!userId && !!item?.owner_id && userId === item.owner_id;
   }, [userId, item?.owner_id]);
 
   const ownerLabel = useMemo(() => ownerNameLabel(item, owner), [item, owner]);
+  const publicActivityHidden = !!item?.hide_interest_count && !isOwner;
+  const itemStateChip = useMemo(() => statusChip(item), [item]);
 
   const subtitle = useMemo(() => {
     if (!item) return "";
+
     if (postType === "request") {
       return [
         requestGroupLabel(item.request_group),
@@ -146,8 +207,6 @@ export default function ItemDetailPage() {
       .join(" • ");
   }, [item, postType]);
 
-  const publicActivityHidden = !!item?.hide_interest_count && !isOwner;
-
   const activityLabel = useMemo(() => {
     if (!item) return "";
     if (publicActivityHidden) {
@@ -159,13 +218,205 @@ export default function ItemDetailPage() {
     return `${offerCount} offer${offerCount === 1 ? "" : "s"}`;
   }, [item, publicActivityHidden, postType, interestCount, offerCount]);
 
+  const giveFlow = useMemo(() => {
+    if (!item || postType !== "give") return null;
+
+    const mine = normStatus(myInterest?.status);
+
+    if (isOwner) {
+      return {
+        kind: "owner" as const,
+        title: "You own this item.",
+        body: "Use manage to handle requests, pickup flow, and completion.",
+        primary: "Manage item",
+        secondary: "Edit item",
+        primaryDisabled: false,
+        secondaryDisabled: false,
+      };
+    }
+
+    if (!isAshland) {
+      return {
+        kind: "login" as const,
+        title: "Log in to request this item.",
+        body: "Only Ashland users can request items.",
+        primary: "Log in",
+        secondary: null,
+        primaryDisabled: false,
+        secondaryDisabled: false,
+      };
+    }
+
+    if (mine === "reserved") {
+      return {
+        kind: "reserved" as const,
+        title: "Pickup confirmed.",
+        body: "This item is reserved for you. Continue in chat.",
+        primary: "Open chat",
+        secondary: null,
+        primaryDisabled: false,
+        secondaryDisabled: false,
+      };
+    }
+
+    if (mine === "accepted") {
+      return {
+        kind: "accepted" as const,
+        title: "Seller accepted your request.",
+        body: "Open chat to continue the pickup flow.",
+        primary: "Open chat",
+        secondary: null,
+        primaryDisabled: false,
+        secondaryDisabled: false,
+      };
+    }
+
+    if (mine === "pending") {
+      return {
+        kind: "pending" as const,
+        title: hasAcceptedOther
+          ? "You are on the waitlist."
+          : "Your request has been sent.",
+        body: hasAcceptedOther
+          ? "Someone else is currently being considered first."
+          : "The owner has not chosen a requester yet.",
+        primary: "Requested",
+        secondary: "Withdraw",
+        primaryDisabled: true,
+        secondaryDisabled: false,
+      };
+    }
+
+    if (isGiveClosed(item)) {
+      return {
+        kind: "closed" as const,
+        title: "This item is no longer available.",
+        body: "You can still view it, but requests are closed.",
+        primary: "Unavailable",
+        secondary: null,
+        primaryDisabled: true,
+        secondaryDisabled: true,
+      };
+    }
+
+    if (normStatus(item.status) === "reserved") {
+      return {
+        kind: "reserved_other" as const,
+        title: "This item is already reserved.",
+        body: "A pickup is already in progress.",
+        primary: "Unavailable",
+        secondary: null,
+        primaryDisabled: true,
+        secondaryDisabled: true,
+      };
+    }
+
+    if (hasAcceptedOther) {
+      return {
+        kind: "waitlist" as const,
+        title: "Someone else is being considered.",
+        body: "You can still join the waitlist in case it falls through.",
+        primary: "Join waitlist",
+        secondary: null,
+        primaryDisabled: false,
+        secondaryDisabled: false,
+      };
+    }
+
+    return {
+      kind: "open" as const,
+      title: "This item is open for requests.",
+      body: "Send your request to start the pickup process.",
+      primary: "Request item",
+      secondary: null,
+      primaryDisabled: false,
+      secondaryDisabled: false,
+    };
+  }, [item, postType, isOwner, isAshland, myInterest, hasAcceptedOther]);
+
+  const requestFlow = useMemo(() => {
+    if (!item || postType !== "request") return null;
+
+    const mine = normStatus(myOffer?.status);
+
+    if (isOwner) {
+      return {
+        kind: "owner" as const,
+        title: "You own this request post.",
+        body: "Use manage to review incoming helper offers.",
+        primary: "Manage request",
+        secondary: "Edit request",
+        primaryDisabled: false,
+        secondaryDisabled: false,
+      };
+    }
+
+    if (!isAshland) {
+      return {
+        kind: "login" as const,
+        title: "Log in to offer help.",
+        body: "Only Ashland users can respond to requests.",
+        primary: "Log in",
+        secondary: null,
+        primaryDisabled: false,
+        secondaryDisabled: false,
+      };
+    }
+
+    if (mine === "accepted" || mine === "completed") {
+      return {
+        kind: "accepted" as const,
+        title: "Your help offer was accepted.",
+        body: "Continue in chat with the requester.",
+        primary: "Open chat",
+        secondary: null,
+        primaryDisabled: false,
+        secondaryDisabled: false,
+      };
+    }
+
+    if (mine === "pending" || mine === "hold") {
+      return {
+        kind: "pending" as const,
+        title: "Your offer is active.",
+        body: mine === "hold" ? "The requester placed your offer on hold." : "Waiting for the requester to decide.",
+        primary: "Offer sent",
+        secondary: "Withdraw",
+        primaryDisabled: true,
+        secondaryDisabled: false,
+      };
+    }
+
+    if (isRequestClosed(item)) {
+      return {
+        kind: "closed" as const,
+        title: "This request is closed.",
+        body: "New helper offers are not being accepted.",
+        primary: "Closed",
+        secondary: null,
+        primaryDisabled: true,
+        secondaryDisabled: true,
+      };
+    }
+
+    return {
+      kind: "open" as const,
+      title: "You can offer help on this request.",
+      body: "Send an offer to let the requester know you can help.",
+      primary: mine === "declined" ? "Offer again" : "Offer help",
+      secondary: null,
+      primaryDisabled: false,
+      secondaryDisabled: false,
+    };
+  }, [item, postType, isOwner, isAshland, myOffer]);
+
   function showToast(msg: string, kind: "ok" | "err" = "ok") {
     setToast({ msg, kind });
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2500);
   }
 
-  async function loadEverything(uid: string | null) {
+  async function loadEverything(uid: string | null, email: string | null) {
     if (!itemId) return;
 
     setLoading(true);
@@ -175,7 +426,7 @@ export default function ItemDetailPage() {
       const { data: it, error: itemErr } = await supabase
         .from("items")
         .select(
-          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id,hide_interest_count"
+          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id,hide_interest_count,reserved_interest_id"
         )
         .eq("id", itemId)
         .single();
@@ -219,27 +470,65 @@ export default function ItemDetailPage() {
         setMyLoved(false);
       }
 
+      setMyInterest(null);
+      setMyOffer(null);
+      setHasAcceptedOther(false);
+      setInterestCount(0);
+      setOfferCount(0);
+
       if ((loaded.post_type ?? "give") === "give") {
-        const { count, error } = await supabase
+        const { data: interestRows, error: interestErr } = await supabase
           .from("interests")
-          .select("*", { count: "exact", head: true })
+          .select("id,item_id,user_id,status,created_at")
           .eq("item_id", itemId);
 
-        if (!error) setInterestCount(count ?? 0);
-        else setInterestCount(0);
+        if (!interestErr) {
+          const rows = (interestRows as MyInterestRow[]) || [];
+          const active = rows.filter((row) =>
+            ["pending", "accepted", "reserved"].includes(normStatus(row.status))
+          );
 
-        setOfferCount(0);
+          setInterestCount(active.length);
+          setHasAcceptedOther(
+            rows.some(
+              (row) =>
+                normStatus(row.status) === "accepted" &&
+                (!!uid ? row.user_id !== uid : true)
+            )
+          );
+
+          if (uid) {
+            const mine =
+              rows.find((row) => row.user_id === uid && normStatus(row.status) !== "withdrawn") ||
+              rows.find((row) => row.user_id === uid) ||
+              null;
+
+            setMyInterest(mine);
+          }
+        }
       } else {
-        const { count, error } = await supabase
+        const { data: offerRows, error: offerErr } = await supabase
           .from("request_offers")
-          .select("*", { count: "exact", head: true })
+          .select("id,request_id,helper_id,status,created_at")
           .eq("request_id", itemId);
 
-        if (!error) setOfferCount(count ?? 0);
-        else setOfferCount(0);
+        if (!offerErr) {
+          const rows = (offerRows as MyOfferRow[]) || [];
+          const active = rows.filter((row) =>
+            ["pending", "hold", "accepted"].includes(normStatus(row.status))
+          );
 
-        setInterestCount(0);
+          setOfferCount(active.length);
+
+          if (uid) {
+            const mine = rows.find((row) => row.helper_id === uid) || null;
+            setMyOffer(mine);
+          }
+        }
       }
+
+      setUserId(uid);
+      setUserEmail(email);
     } catch (e: any) {
       setErr(e?.message || "Failed to load post.");
       setItem(null);
@@ -248,6 +537,9 @@ export default function ItemDetailPage() {
       setMyLoved(false);
       setInterestCount(0);
       setOfferCount(0);
+      setMyInterest(null);
+      setMyOffer(null);
+      setHasAcceptedOther(false);
     } finally {
       setLoading(false);
     }
@@ -256,18 +548,20 @@ export default function ItemDetailPage() {
   async function syncAuthAndLoad() {
     const { data } = await supabase.auth.getSession();
     const uid = data.session?.user?.id ?? null;
-    setUserId(uid);
-    await loadEverything(uid);
+    const email = data.session?.user?.email ?? null;
+    await loadEverything(uid, email);
   }
 
   async function toggleLove() {
     if (!item) return;
+
     if (!userId) {
       router.push("/me");
       return;
     }
 
     setBusy(true);
+
     try {
       if (myLoved) {
         const { error } = await supabase
@@ -288,7 +582,12 @@ export default function ItemDetailPage() {
           },
         ]);
 
-        if (error) throw new Error(error.message);
+        if (error) {
+          const msg = error.message.toLowerCase();
+          if (!msg.includes("duplicate") && !msg.includes("unique")) {
+            throw new Error(error.message);
+          }
+        }
 
         setMyLoved(true);
         setLoveCount((c) => c + 1);
@@ -297,6 +596,202 @@ export default function ItemDetailPage() {
       showToast(e?.message || "Could not update love.", "err");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function openConversation() {
+    if (!item || !item.owner_id || !userId) return;
+
+    setActionBusy("chat");
+
+    try {
+      const threadId = await ensureThread({
+        itemId: item.id,
+        ownerId: item.owner_id,
+        requesterId: userId,
+      });
+
+      router.push(`/messages/${threadId}`);
+    } catch (e: any) {
+      showToast(e?.message || "Could not open chat.", "err");
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function submitGiveInterest() {
+    if (!item || postType !== "give") return;
+
+    if (!userId) {
+      router.push("/me");
+      return;
+    }
+
+    if (isOwner) return;
+    if (isGiveClosed(item) || normStatus(item.status) === "reserved") {
+      showToast("This item is not accepting new requests.", "err");
+      return;
+    }
+
+    const mine = normStatus(myInterest?.status);
+
+    if (mine === "accepted" || mine === "reserved") {
+      await openConversation();
+      return;
+    }
+
+    if (mine === "pending") return;
+
+    setActionBusy("interest");
+
+    try {
+      if (myInterest?.id && ["withdrawn", "declined"].includes(mine)) {
+        const { error } = await supabase
+          .from("interests")
+          .update({
+            status: "pending",
+            accepted_at: null,
+            accepted_expires_at: null,
+            reserved_at: null,
+            completed_at: null,
+          } as any)
+          .eq("id", myInterest.id)
+          .eq("user_id", userId);
+
+        if (error) throw new Error(error.message);
+      } else {
+        const { error } = await supabase.from("interests").insert([
+          {
+            item_id: item.id,
+            user_id: userId,
+            status: "pending",
+          },
+        ]);
+
+        if (error) {
+          const msg = error.message.toLowerCase();
+          if (!msg.includes("duplicate") && !msg.includes("unique")) {
+            throw new Error(error.message);
+          }
+        }
+      }
+
+      await loadEverything(userId, userEmail);
+      showToast(hasAcceptedOther ? "Joined waitlist." : "Request sent.");
+    } catch (e: any) {
+      showToast(e?.message || "Could not send request.", "err");
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function withdrawGiveInterest() {
+    if (!myInterest?.id || !userId) return;
+    if (normStatus(myInterest.status) !== "pending") return;
+
+    setActionBusy("withdraw-interest");
+
+    try {
+      const { error } = await supabase
+        .from("interests")
+        .update({ status: "withdrawn" })
+        .eq("id", myInterest.id)
+        .eq("user_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      await loadEverything(userId, userEmail);
+      showToast("Request withdrawn.");
+    } catch (e: any) {
+      showToast(e?.message || "Could not withdraw request.", "err");
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function submitHelpOffer() {
+    if (!item || postType !== "request") return;
+
+    if (!userId) {
+      router.push("/me");
+      return;
+    }
+
+    if (isOwner) return;
+    if (isRequestClosed(item)) {
+      showToast("This request is closed.", "err");
+      return;
+    }
+
+    const mine = normStatus(myOffer?.status);
+
+    if (mine === "accepted" || mine === "completed") {
+      await openConversation();
+      return;
+    }
+
+    if (mine === "pending" || mine === "hold") return;
+
+    setActionBusy("offer");
+
+    try {
+      if (myOffer?.id && mine === "declined") {
+        const { error } = await supabase
+          .from("request_offers")
+          .update({ status: "pending", updated_at: new Date().toISOString() })
+          .eq("id", myOffer.id)
+          .eq("helper_id", userId);
+
+        if (error) throw new Error(error.message);
+      } else {
+        const { error } = await supabase.from("request_offers").insert([
+          {
+            request_id: item.id,
+            helper_id: userId,
+            status: "pending",
+          },
+        ]);
+
+        if (error) {
+          const msg = error.message.toLowerCase();
+          if (!msg.includes("duplicate") && !msg.includes("unique")) {
+            throw new Error(error.message);
+          }
+        }
+      }
+
+      await loadEverything(userId, userEmail);
+      showToast("Offer sent.");
+    } catch (e: any) {
+      showToast(e?.message || "Could not send offer.", "err");
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function withdrawHelpOffer() {
+    if (!myOffer?.id || !userId) return;
+
+    const mine = normStatus(myOffer.status);
+    if (!["pending", "hold"].includes(mine)) return;
+
+    setActionBusy("withdraw-offer");
+
+    try {
+      const { error } = await supabase
+        .from("request_offers")
+        .delete()
+        .eq("id", myOffer.id)
+        .eq("helper_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      await loadEverything(userId, userEmail);
+      showToast("Offer withdrawn.");
+    } catch (e: any) {
+      showToast(e?.message || "Could not withdraw offer.", "err");
+    } finally {
+      setActionBusy(null);
     }
   }
 
@@ -317,7 +812,7 @@ export default function ItemDetailPage() {
       if (error) throw new Error(error.message);
 
       setItem((prev) => (prev ? { ...prev, hide_interest_count: nextValue } : prev));
-      showToast(nextValue ? "Count hidden ✅" : "Count shown ✅", "ok");
+      showToast(nextValue ? "Count hidden." : "Count shown.");
     } catch (e: any) {
       showToast(e?.message || "Could not update count visibility.", "err");
     } finally {
@@ -329,6 +824,7 @@ export default function ItemDetailPage() {
     if (!item || !isOwner || !userId) return;
 
     setBusy(true);
+
     try {
       if (postType === "give") {
         await supabase.from("interests").delete().eq("item_id", item.id);
@@ -346,7 +842,7 @@ export default function ItemDetailPage() {
 
       if (error) throw new Error(error.message);
 
-      showToast("Listing deleted ✅", "ok");
+      showToast("Listing deleted.");
       router.replace("/feed");
     } catch (e: any) {
       showToast(e?.message || "Could not delete listing.", "err");
@@ -361,8 +857,8 @@ export default function ItemDetailPage() {
 
     const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
       const uid = session?.user?.id ?? null;
-      setUserId(uid);
-      await loadEverything(uid);
+      const email = session?.user?.email ?? null;
+      await loadEverything(uid, email);
     });
 
     return () => sub.subscription.unsubscribe();
@@ -391,7 +887,7 @@ export default function ItemDetailPage() {
     <div className="page">
       <div className="shell">
         <header className="topBar">
-          <button className="iconBtn" onClick={() => router.back()} aria-label="Back">
+          <button className="iconBtn" onClick={() => router.back()} aria-label="Back" type="button">
             ←
           </button>
 
@@ -405,6 +901,8 @@ export default function ItemDetailPage() {
 
         {err && <div className="alert err">{err}</div>}
         {loading && <div className="alert">Loading…</div>}
+
+        {!loading && !err && !item && <div className="alert err">Post not found.</div>}
 
         {!loading && item && (
           <section className="card">
@@ -425,6 +923,7 @@ export default function ItemDetailPage() {
                       className="menuBackdrop"
                       aria-label="Close menu"
                       onClick={() => setMenuOpen(false)}
+                      type="button"
                     />
                   ) : null}
 
@@ -439,6 +938,17 @@ export default function ItemDetailPage() {
 
                   {menuOpen ? (
                     <div className="menuCard">
+                      <button
+                        className="menuItem"
+                        type="button"
+                        onClick={() => {
+                          setMenuOpen(false);
+                          router.push(`/manage/${item.id}`);
+                        }}
+                      >
+                        Manage post
+                      </button>
+
                       <button
                         className="menuItem"
                         type="button"
@@ -519,8 +1029,129 @@ export default function ItemDetailPage() {
 
                 <span className="dot">•</span>
 
+                <span className={`statusPill ${itemStateChip.tone}`}>{itemStateChip.label}</span>
+
+                <span className="dot">•</span>
+
                 <span className="stat">Delists {formatDelist(item.expires_at)}</span>
               </div>
+
+              {(postType === "give" && giveFlow) || (postType === "request" && requestFlow) ? (
+                <div className="flowCard">
+                  <div className="flowTitle">
+                    {postType === "give" ? giveFlow?.title : requestFlow?.title}
+                  </div>
+                  <div className="flowBody">
+                    {postType === "give" ? giveFlow?.body : requestFlow?.body}
+                  </div>
+
+                  <div className="flowActions">
+                    {postType === "give" && giveFlow ? (
+                      <>
+                        <button
+                          className="primaryAction"
+                          type="button"
+                          disabled={giveFlow.primaryDisabled || !!actionBusy}
+                          onClick={() => {
+                            if (giveFlow.kind === "owner") {
+                              router.push(`/manage/${item.id}`);
+                              return;
+                            }
+                            if (giveFlow.kind === "login") {
+                              router.push("/me");
+                              return;
+                            }
+                            if (giveFlow.kind === "accepted" || giveFlow.kind === "reserved") {
+                              void openConversation();
+                              return;
+                            }
+                            if (giveFlow.kind === "open" || giveFlow.kind === "waitlist") {
+                              void submitGiveInterest();
+                            }
+                          }}
+                        >
+                          {actionBusy === "chat"
+                            ? "Opening…"
+                            : actionBusy === "interest"
+                            ? "Sending…"
+                            : giveFlow.primary}
+                        </button>
+
+                        {giveFlow.secondary ? (
+                          <button
+                            className="secondaryAction"
+                            type="button"
+                            disabled={giveFlow.secondaryDisabled || !!actionBusy}
+                            onClick={() => {
+                              if (giveFlow.kind === "owner") {
+                                router.push(`/item/${item.id}/edit`);
+                                return;
+                              }
+                              if (giveFlow.kind === "pending") {
+                                void withdrawGiveInterest();
+                              }
+                            }}
+                          >
+                            {actionBusy === "withdraw-interest" ? "Working…" : giveFlow.secondary}
+                          </button>
+                        ) : null}
+                      </>
+                    ) : null}
+
+                    {postType === "request" && requestFlow ? (
+                      <>
+                        <button
+                          className="primaryAction"
+                          type="button"
+                          disabled={requestFlow.primaryDisabled || !!actionBusy}
+                          onClick={() => {
+                            if (requestFlow.kind === "owner") {
+                              router.push(`/manage/${item.id}`);
+                              return;
+                            }
+                            if (requestFlow.kind === "login") {
+                              router.push("/me");
+                              return;
+                            }
+                            if (requestFlow.kind === "accepted") {
+                              void openConversation();
+                              return;
+                            }
+                            if (requestFlow.kind === "open") {
+                              void submitHelpOffer();
+                            }
+                          }}
+                        >
+                          {actionBusy === "chat"
+                            ? "Opening…"
+                            : actionBusy === "offer"
+                            ? "Sending…"
+                            : requestFlow.primary}
+                        </button>
+
+                        {requestFlow.secondary ? (
+                          <button
+                            className="secondaryAction"
+                            type="button"
+                            disabled={requestFlow.secondaryDisabled || !!actionBusy}
+                            onClick={() => {
+                              if (requestFlow.kind === "owner") {
+                                router.push(`/item/${item.id}/edit`);
+                                return;
+                              }
+                              if (requestFlow.kind === "pending") {
+                                void withdrawHelpOffer();
+                              }
+                            }}
+                          >
+                            {actionBusy === "withdraw-offer" ? "Working…" : requestFlow.secondary}
+                          </button>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
 
               {item.description?.trim() ? (
                 <div className="caption">
@@ -550,10 +1181,10 @@ export default function ItemDetailPage() {
             <div className="modalText">This permanently removes the post.</div>
 
             <div className="modalActions">
-              <button className="ghostBtn" onClick={() => setConfirmDelete(false)}>
+              <button className="ghostBtn" onClick={() => setConfirmDelete(false)} type="button">
                 Cancel
               </button>
-              <button className="dangerBtn" onClick={deleteListing} disabled={busy}>
+              <button className="dangerBtn" onClick={deleteListing} disabled={busy} type="button">
                 {busy ? "Deleting..." : "Delete"}
               </button>
             </div>
@@ -566,7 +1197,7 @@ export default function ItemDetailPage() {
           <div className="imgCard" onClick={(e) => e.stopPropagation()}>
             <div className="imgTop">
               <div className="imgTitle">{item.title}</div>
-              <button className="iconGhost" onClick={() => setOpenImg(null)}>
+              <button className="iconGhost" onClick={() => setOpenImg(null)} type="button">
                 ✕
               </button>
             </div>
@@ -577,9 +1208,7 @@ export default function ItemDetailPage() {
         </div>
       ) : null}
 
-      {toast ? (
-        <div className={`toast ${toast.kind === "err" ? "err" : "ok"}`}>{toast.msg}</div>
-      ) : null}
+      {toast ? <div className={`toast ${toast.kind === "err" ? "err" : "ok"}`}>{toast.msg}</div> : null}
 
       <style jsx>{`
         .page {
@@ -768,7 +1397,7 @@ export default function ItemDetailPage() {
           position: absolute;
           top: calc(100% + 8px);
           right: 0;
-          width: 190px;
+          width: 200px;
           border: 1px solid #e5e7eb;
           background: rgba(255, 255, 255, 0.98);
           border-radius: 16px;
@@ -872,6 +1501,94 @@ export default function ItemDetailPage() {
 
         .dot {
           color: #cbd5e1;
+        }
+
+        .statusPill {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 24px;
+          padding: 0 9px;
+          border-radius: 999px;
+          font-size: 11px;
+          font-weight: 900;
+          border: 1px solid #e5e7eb;
+        }
+
+        .statusPill.good {
+          color: #166534;
+          border-color: #bbf7d0;
+          background: #ecfdf5;
+        }
+
+        .statusPill.warn {
+          color: #92400e;
+          border-color: #fde68a;
+          background: #fffbeb;
+        }
+
+        .statusPill.closed,
+        .statusPill.neutral {
+          color: #475569;
+          border-color: #e5e7eb;
+          background: #f8fafc;
+        }
+
+        .flowCard {
+          margin-top: 14px;
+          padding: 14px;
+          border-radius: 18px;
+          border: 1px solid #e5e7eb;
+          background: #f8fafc;
+        }
+
+        .flowTitle {
+          font-size: 14px;
+          font-weight: 1000;
+          color: #0f172a;
+        }
+
+        .flowBody {
+          margin-top: 5px;
+          font-size: 13px;
+          line-height: 1.5;
+          color: #475569;
+          font-weight: 700;
+        }
+
+        .flowActions {
+          margin-top: 12px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+
+        .primaryAction,
+        .secondaryAction {
+          min-height: 42px;
+          padding: 0 14px;
+          border-radius: 14px;
+          font-size: 13px;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .primaryAction {
+          border: 1px solid rgba(16, 185, 129, 0.26);
+          background: rgba(16, 185, 129, 0.12);
+          color: #065f46;
+        }
+
+        .secondaryAction {
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          color: #0f172a;
+        }
+
+        .primaryAction:disabled,
+        .secondaryAction:disabled {
+          opacity: 0.58;
+          cursor: not-allowed;
         }
 
         .caption {
@@ -1046,6 +1763,16 @@ export default function ItemDetailPage() {
           }
 
           .stat {
+            width: 100%;
+          }
+
+          .flowActions {
+            display: grid;
+            grid-template-columns: 1fr;
+          }
+
+          .primaryAction,
+          .secondaryAction {
             width: 100%;
           }
         }
