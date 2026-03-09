@@ -135,14 +135,6 @@ function requestTimeframeLabel(v: string | null) {
   return "—";
 }
 
-function itemStatusLabel(v: string | null) {
-  const k = (v ?? "available").toLowerCase();
-  if (k === "available") return "Available";
-  if (k === "reserved") return "Reserved";
-  if (k === "claimed") return "Claimed";
-  return "Available";
-}
-
 export default function EditItemPage() {
   const router = useRouter();
   const params = useParams();
@@ -177,7 +169,6 @@ export default function EditItemPage() {
   const [photoUrl, setPhotoUrl] = useState("");
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [expiresAtLocal, setExpiresAtLocal] = useState("");
-  const [status, setStatus] = useState<"available" | "reserved" | "claimed">("available");
 
   const isOwner = useMemo(() => {
     return !!userId && !!item?.owner_id && userId === item.owner_id;
@@ -202,8 +193,7 @@ export default function EditItemPage() {
       requestLocation !== (item.request_location ?? "") ||
       photoUrl !== (item.photo_url ?? "") ||
       isAnonymous !== !!item.is_anonymous ||
-      expiresAtLocal !== toInputDateTime(item.expires_at ?? null) ||
-      status !== (((item.status ?? "available").toLowerCase() as any) ?? "available")
+      expiresAtLocal !== toInputDateTime(item.expires_at ?? null)
     );
   }, [
     item,
@@ -217,7 +207,6 @@ export default function EditItemPage() {
     photoUrl,
     isAnonymous,
     expiresAtLocal,
-    status,
   ]);
 
   async function syncAuth() {
@@ -251,26 +240,21 @@ export default function EditItemPage() {
 
       setTitle(row.title ?? "");
       setDescription(row.description ?? "");
-
       setCategory(((row.category as GiveCategory) ?? "books") as GiveCategory);
       setPickupLocation(
         ((row.pickup_location as PickupLocation) ?? "College Quad") as PickupLocation
       );
-
       setRequestGroup(((row.request_group as RequestGroup) ?? "logistics") as RequestGroup);
       setRequestTimeframe(
         ((row.request_timeframe as RequestTimeframe) ?? "today") as RequestTimeframe
       );
       setRequestLocation(row.request_location ?? "");
-
       setPhotoUrl(row.photo_url ?? "");
       setIsAnonymous(!!row.is_anonymous);
       setExpiresAtLocal(toInputDateTime(row.expires_at ?? null));
-
-      const st = (row.status ?? "available").toLowerCase();
-      setStatus(st === "reserved" ? "reserved" : st === "claimed" ? "claimed" : "available");
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load item.");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to load item.";
+      setErr(message);
       setItem(null);
     } finally {
       setLoading(false);
@@ -285,7 +269,7 @@ export default function EditItemPage() {
 
   function stepSubtitle(step: StepKey) {
     if (step === "write") return "Fix the title, description, and image link.";
-    if (step === "details") return "Update category, pickup, visibility, and status.";
+    if (step === "details") return "Update category, pickup, visibility, and expiry.";
     return "Check everything before saving.";
   }
 
@@ -341,6 +325,7 @@ export default function EditItemPage() {
 
   async function save() {
     if (!item) return;
+
     setSaving(true);
     setErr(null);
     setOk(null);
@@ -348,9 +333,7 @@ export default function EditItemPage() {
     try {
       if (!isOwner) throw new Error("You are not allowed to edit this item.");
       if (editingLocked) {
-        throw new Error(
-          "Editing is locked because this post is already in an active pickup flow."
-        );
+        throw new Error("Editing is locked because this post is already in an active pickup flow.");
       }
 
       const finalProblem =
@@ -362,7 +345,7 @@ export default function EditItemPage() {
           ? {
               title: title.trim(),
               description: description.trim() ? description.trim() : null,
-              category: category,
+              category,
               pickup_location: pickupLocation,
               request_group: null,
               request_timeframe: null,
@@ -370,7 +353,6 @@ export default function EditItemPage() {
               photo_url: photoUrl.trim() ? photoUrl.trim() : null,
               is_anonymous: isAnonymous,
               expires_at: fromInputDateTime(expiresAtLocal),
-              status: status,
             }
           : {
               title: title.trim(),
@@ -383,7 +365,6 @@ export default function EditItemPage() {
               photo_url: photoUrl.trim() ? photoUrl.trim() : null,
               is_anonymous: isAnonymous,
               expires_at: fromInputDateTime(expiresAtLocal),
-              status: status,
             };
 
       const { error } = await supabase.from("items").update(payload).eq("id", item.id);
@@ -392,8 +373,9 @@ export default function EditItemPage() {
       setOk("Saved successfully ✅");
       await loadItem();
       setCurrentStepIndex(2);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to save.");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to save.";
+      setErr(message);
     } finally {
       setSaving(false);
     }
@@ -430,15 +412,15 @@ export default function EditItemPage() {
   }
 
   return (
-    <div className="page" style={{ paddingBottom: pageBottomPad as any }}>
+    <div className="page" style={{ paddingBottom: pageBottomPad as string }}>
       <div className="shell" ref={topRef}>
         <div className="topBar">
-          <button className="topBtn" onClick={() => router.push(`/item/${id}`)}>
+          <button className="topBtn" onClick={() => router.push(`/item/${id}`)} type="button">
             ← View post
           </button>
 
           <div className="topRight">
-            <button className="topBtn" onClick={() => router.push("/me")}>
+            <button className="topBtn" onClick={() => router.push("/me")} type="button">
               My posts
             </button>
           </div>
@@ -451,9 +433,7 @@ export default function EditItemPage() {
         </div>
 
         {!isOwner && (
-          <div className="errorBanner">
-            You are not the owner of this item. Editing is disabled.
-          </div>
+          <div className="errorBanner">You are not the owner of this item. Editing is disabled.</div>
         )}
 
         {editingLocked && (
@@ -664,23 +644,6 @@ export default function EditItemPage() {
                     Leave blank to keep it open until you cancel it.
                   </div>
                 </div>
-
-                <div className="fieldBlock">
-                  <label className="fieldLabel">Status</label>
-                  <select
-                    value={status}
-                    onChange={(e) => setStatus(e.target.value as any)}
-                    className="softInput"
-                    disabled={!isOwner || saving || editingLocked}
-                  >
-                    <option value="available">Available</option>
-                    <option value="reserved">Reserved</option>
-                    <option value="claimed">Claimed</option>
-                  </select>
-                  <div className="helperText">
-                    Change manually only if that matches your actual pickup status.
-                  </div>
-                </div>
               </section>
             )}
 
@@ -743,11 +706,6 @@ export default function EditItemPage() {
                   </div>
 
                   <div className="reviewRow">
-                    <span className="reviewKey">Status</span>
-                    <span className="reviewValue">{itemStatusLabel(status)}</span>
-                  </div>
-
-                  <div className="reviewRow">
                     <span className="reviewKey">Expires</span>
                     <span className="reviewValue">{formatExpiry(fromInputDateTime(expiresAtLocal))}</span>
                   </div>
@@ -756,6 +714,11 @@ export default function EditItemPage() {
                     <span className="reviewKey">Changed</span>
                     <span className="reviewValue">{dirty ? "Yes" : "No changes yet"}</span>
                   </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Workflow status</span>
+                    <span className="reviewValue">{item.status ?? "available"} (read-only)</span>
+                  </div>
                 </div>
               </section>
             )}
@@ -763,7 +726,7 @@ export default function EditItemPage() {
         )}
       </div>
 
-      <div className="stickyBar" style={{ bottom: bottomOffset as any }}>
+      <div className="stickyBar" style={{ bottom: bottomOffset as string }}>
         <div className="stickyInner">
           <div className="stickyText">
             <div className="stickyMini">Edit flow</div>
@@ -780,7 +743,7 @@ export default function EditItemPage() {
             </div>
           </div>
 
-          <button className="secondaryBtn" onClick={goPrev} disabled={saving}>
+          <button className="secondaryBtn" onClick={goPrev} disabled={saving} type="button">
             {currentStepIndex === 0 ? "Back" : "Previous"}
           </button>
 
@@ -789,6 +752,7 @@ export default function EditItemPage() {
               className="primaryBtn"
               onClick={goNext}
               disabled={!isOwner || saving || editingLocked}
+              type="button"
             >
               Continue
             </button>
@@ -797,6 +761,7 @@ export default function EditItemPage() {
               className="primaryBtn"
               onClick={save}
               disabled={!isOwner || saving || editingLocked || !dirty}
+              type="button"
             >
               {saving ? "Saving..." : "Save changes"}
             </button>
