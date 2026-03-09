@@ -101,20 +101,39 @@ type IncomingOfferRow = {
   } | null;
 };
 
+type NotificationType =
+  | "item_interest_created"
+  | "item_interest_accepted"
+  | "item_interest_declined"
+  | "help_offer_created"
+  | "help_offer_accepted"
+  | "help_offer_declined"
+  | "event_joined"
+  | "event_left"
+  | "event_updated"
+  | "message_received"
+  | "system_notice"
+  | string;
+
 type NotificationRow = {
   id: string;
-  type: "item_interest" | "help_offer";
-  item_id: string | null;
-  interest_id: string | null;
-  offer_id: string | null;
-  title: string;
+  recipient_id: string | null;
+  actor_id: string | null;
+  type: NotificationType;
+  category: string | null;
+  entity_type: string | null;
+  entity_id: string | null;
+  parent_entity_type: string | null;
+  parent_entity_id: string | null;
+  title: string | null;
   body: string | null;
-  seen_at: string | null;
+  image_url: string | null;
+  action_url: string | null;
+  is_read: boolean | null;
+  read_at: string | null;
+  is_hidden: boolean | null;
+  hidden_at: string | null;
   created_at: string;
-  actor: {
-    full_name: string | null;
-    email: string | null;
-  } | null;
 };
 
 type MyRequestQueryRow = {
@@ -237,28 +256,6 @@ type IncomingOfferQueryRow = {
         full_name: string | null;
         email: string | null;
         user_role: string | null;
-      }[]
-    | null;
-};
-
-type NotificationQueryRow = {
-  id: string;
-  type: "item_interest" | "help_offer";
-  item_id: string | null;
-  interest_id: string | null;
-  offer_id: string | null;
-  title: string;
-  body: string | null;
-  seen_at: string | null;
-  created_at: string;
-  actor:
-    | {
-        full_name: string | null;
-        email: string | null;
-      }
-    | {
-        full_name: string | null;
-        email: string | null;
       }[]
     | null;
 };
@@ -433,7 +430,10 @@ export default function AccountPage() {
     return currentTabItems.filter((x) => isArchivedItem(x)).length;
   }, [currentTabItems]);
 
-  const unseenNotificationCount = useMemo(() => notifications.filter((n) => !n.seen_at).length, [notifications]);
+  const unseenNotificationCount = useMemo(
+    () => notifications.filter((n) => !n.is_read && !n.is_hidden).length,
+    [notifications]
+  );
 
   const requestsCount = useMemo(() => {
     return incomingInterests.length + incomingOffers.length;
@@ -696,19 +696,11 @@ export default function AccountPage() {
   async function loadNotifications(uid: string) {
     const { data, error } = await supabase
       .from("notifications")
-      .select(`
-        id,
-        type,
-        item_id,
-        interest_id,
-        offer_id,
-        title,
-        body,
-        seen_at,
-        created_at,
-        actor:profiles!notifications_actor_id_fkey(full_name,email)
-      `)
-      .eq("user_id", uid)
+      .select(
+        "id,recipient_id,actor_id,type,category,entity_type,entity_id,parent_entity_type,parent_entity_id,title,body,image_url,action_url,is_read,read_at,is_hidden,hidden_at,created_at"
+      )
+      .eq("recipient_id", uid)
+      .eq("is_hidden", false)
       .order("created_at", { ascending: false })
       .limit(30);
 
@@ -719,19 +711,7 @@ export default function AccountPage() {
       return [];
     }
 
-    const normalized: NotificationRow[] = (((data ?? []) as unknown) as NotificationQueryRow[]).map((row) => ({
-      id: row.id,
-      type: row.type,
-      item_id: row.item_id,
-      interest_id: row.interest_id,
-      offer_id: row.offer_id,
-      title: row.title,
-      body: row.body,
-      seen_at: row.seen_at,
-      created_at: row.created_at,
-      actor: singleRelation(row.actor),
-    }));
-
+    const normalized: NotificationRow[] = ((data ?? []) as NotificationRow[]).filter((row) => !row.is_hidden);
     setNotifications(normalized);
     return normalized;
   }
@@ -761,7 +741,7 @@ export default function AccountPage() {
   async function markNotificationsSeen() {
     if (!userId) return;
 
-    const unseenIds = notifications.filter((n) => !n.seen_at).map((n) => n.id);
+    const unseenIds = notifications.filter((n) => !n.is_read).map((n) => n.id);
     if (unseenIds.length === 0) return;
 
     setMarkingNotifs(true);
@@ -771,15 +751,17 @@ export default function AccountPage() {
 
       const { error } = await supabase
         .from("notifications")
-        .update({ seen_at: nowIso })
+        .update({ is_read: true, read_at: nowIso })
         .in("id", unseenIds)
-        .eq("user_id", userId);
+        .eq("recipient_id", userId);
 
       if (error) throw new Error(error.message);
 
       if (!mountedRef.current) return;
 
-      setNotifications((prev) => prev.map((n) => (n.seen_at ? n : { ...n, seen_at: nowIso })));
+      setNotifications((prev) =>
+        prev.map((n) => (unseenIds.includes(n.id) ? { ...n, is_read: true, read_at: nowIso } : n))
+      );
       showToast("Notifications marked seen.");
     } catch (e) {
       showToast(getFriendlyError(e), "err");
@@ -792,20 +774,71 @@ export default function AccountPage() {
     if (!userId || offerIds.length === 0) return;
 
     try {
-      await supabase.from("notifications").delete().eq("user_id", userId).in("offer_id", offerIds);
+      const nowIso = new Date().toISOString();
+      await supabase
+        .from("notifications")
+        .update({ is_hidden: true, hidden_at: nowIso })
+        .eq("recipient_id", userId)
+        .in("entity_id", offerIds)
+        .eq("entity_type", "offer");
     } catch {
       // ignore
     }
 
     if (!mountedRef.current) return;
-    setNotifications((prev) => prev.filter((n) => !n.offer_id || !offerIds.includes(n.offer_id)));
+    setNotifications((prev) =>
+      prev.filter((n) => !(n.entity_type === "offer" && n.entity_id && offerIds.includes(n.entity_id)))
+    );
   }
 
-  function openNotification(notification: NotificationRow) {
-    if (notification.item_id) {
-      setDrawerOpen(false);
-      router.push(`/manage/${notification.item_id}`);
+  async function openNotification(notification: NotificationRow) {
+    if (!userId) return;
+
+    try {
+      if (!notification.is_read) {
+        const nowIso = new Date().toISOString();
+
+        const { error } = await supabase
+          .from("notifications")
+          .update({ is_read: true, read_at: nowIso })
+          .eq("id", notification.id)
+          .eq("recipient_id", userId);
+
+        if (error) throw new Error(error.message);
+
+        if (mountedRef.current) {
+          setNotifications((prev) =>
+            prev.map((n) => (n.id === notification.id ? { ...n, is_read: true, read_at: nowIso } : n))
+          );
+        }
+      }
+    } catch {
+      // ignore read-mark failure
     }
+
+    setDrawerOpen(false);
+
+    if (notification.action_url && notification.action_url.startsWith("/")) {
+      router.push(notification.action_url);
+      return;
+    }
+
+    if (notification.entity_type === "event" && notification.entity_id) {
+      router.push(`/event/${notification.entity_id}`);
+      return;
+    }
+
+    if (notification.parent_entity_type === "item" && notification.parent_entity_id) {
+      router.push(`/manage/${notification.parent_entity_id}`);
+      return;
+    }
+
+    if (notification.entity_type === "item" && notification.entity_id) {
+      router.push(`/manage/${notification.entity_id}`);
+      return;
+    }
+
+    router.push("/messages");
   }
 
   async function acceptIncomingOffer(offer: IncomingOfferRow) {
@@ -1050,6 +1083,30 @@ export default function AccountPage() {
       if (toastTimer.current) clearTimeout(toastTimer.current);
     };
   }, [clearAll, loadAllFor]);
+
+  useEffect(() => {
+    if (!isLoggedIn || !userId) return;
+
+    const channel = supabase
+      .channel(`me-notifications-${userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "notifications",
+          filter: `recipient_id=eq.${userId}`,
+        },
+        () => {
+          void loadNotifications(userId);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [isLoggedIn, userId]);
 
   if (loading) {
     return (
@@ -1317,11 +1374,11 @@ export default function AccountPage() {
                   notifications.map((n) => (
                     <NotificationCard
                       key={n.id}
-                      title={n.title}
-                      body={n.body || `${readableName(n.actor)} interacted with your post.`}
+                      title={n.title || "Notification"}
+                      body={n.body || "Open to see details."}
                       meta={fmtWhen(n.created_at)}
-                      isNew={!n.seen_at}
-                      onClick={() => openNotification(n)}
+                      isNew={!n.is_read}
+                      onClick={() => void openNotification(n)}
                     />
                   ))
                 )}

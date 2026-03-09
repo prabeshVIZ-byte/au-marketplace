@@ -112,6 +112,41 @@ type MyEventLoveRow = {
   event_id: string;
 };
 
+type NotificationType =
+  | "item_interest_created"
+  | "item_interest_accepted"
+  | "item_interest_declined"
+  | "help_offer_created"
+  | "help_offer_accepted"
+  | "help_offer_declined"
+  | "event_joined"
+  | "event_left"
+  | "event_updated"
+  | "message_received"
+  | "system_notice"
+  | string;
+
+type NotificationRow = {
+  id: string;
+  recipient_id: string | null;
+  actor_id: string | null;
+  type: NotificationType;
+  category: string | null;
+  entity_type: string | null;
+  entity_id: string | null;
+  parent_entity_type: string | null;
+  parent_entity_id: string | null;
+  title: string | null;
+  body: string | null;
+  image_url: string | null;
+  action_url: string | null;
+  is_read: boolean | null;
+  read_at: string | null;
+  is_hidden: boolean | null;
+  hidden_at: string | null;
+  created_at: string;
+};
+
 const NAV_APPROX_HEIGHT = 86;
 const PAGE_BOTTOM_PAD = NAV_APPROX_HEIGHT + 28;
 const ATTEND_TABLE = "event_attendees";
@@ -205,6 +240,18 @@ function formatShortDate(d: string) {
   return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function formatDateTime(d: string | null | undefined) {
+  if (!d) return "";
+  const dt = new Date(d);
+  if (Number.isNaN(dt.getTime())) return "";
+  return dt.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function formatTimeRange(startsAtISO: string, endsAtISO: string | null) {
   const s = new Date(startsAtISO);
   if (Number.isNaN(s.getTime())) return "";
@@ -282,6 +329,56 @@ function LoveButton({
   );
 }
 
+function BellButton({
+  unreadCount,
+  onClick,
+}: {
+  unreadCount: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className="bellBtn"
+      onClick={onClick}
+      aria-label="Notifications"
+      type="button"
+      data-no-card-doubletap="true"
+    >
+      <span className="bellGlyph">🔔</span>
+      {unreadCount > 0 ? (
+        <span className="bellBadge">{unreadCount > 99 ? "99+" : unreadCount}</span>
+      ) : null}
+    </button>
+  );
+}
+
+function NotificationTypePill({ type }: { type: NotificationType }) {
+  const mapped =
+    type === "item_interest_created"
+      ? { label: "Item request", cls: "item" }
+      : type === "item_interest_accepted"
+      ? { label: "Accepted", cls: "good" }
+      : type === "item_interest_declined"
+      ? { label: "Declined", cls: "bad" }
+      : type === "help_offer_created"
+      ? { label: "Offer", cls: "request" }
+      : type === "help_offer_accepted"
+      ? { label: "Accepted", cls: "good" }
+      : type === "help_offer_declined"
+      ? { label: "Declined", cls: "bad" }
+      : type === "event_joined"
+      ? { label: "Event", cls: "event" }
+      : type === "event_left"
+      ? { label: "Event", cls: "event" }
+      : type === "event_updated"
+      ? { label: "Updated", cls: "event" }
+      : type === "message_received"
+      ? { label: "Message", cls: "message" }
+      : { label: "Notice", cls: "system" };
+
+  return <span className={`notifType ${mapped.cls}`}>{mapped.label}</span>;
+}
+
 export default function FeedPage() {
   const router = useRouter();
 
@@ -310,6 +407,13 @@ export default function FeedPage() {
   const [likedEventMap, setLikedEventMap] = useState<Record<string, boolean>>({});
   const [savingLoveKey, setSavingLoveKey] = useState<string | null>(null);
 
+  const [notifications, setNotifications] = useState<NotificationRow[]>([]);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [loadingNotifications, setLoadingNotifications] = useState(false);
+  const [notificationsErr, setNotificationsErr] = useState<string | null>(null);
+  const [markingAllRead, setMarkingAllRead] = useState(false);
+  const [openingNotifId, setOpeningNotifId] = useState<string | null>(null);
+
   const [burstCardKey, setBurstCardKey] = useState<string | null>(null);
   const burstTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapRef = useRef<Record<string, { ts: number; x: number; y: number }>>({});
@@ -328,6 +432,11 @@ export default function FeedPage() {
   const [searchPulse, setSearchPulse] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const chipRowRef = useRef<HTMLDivElement | null>(null);
+
+  const unreadNotificationCount = useMemo(
+    () => notifications.filter((n) => !n.is_read && !n.is_hidden).length,
+    [notifications]
+  );
 
   function showLoveBurst(cardKey: string) {
     setBurstCardKey(cardKey);
@@ -402,6 +511,38 @@ export default function FeedPage() {
       next[String(row.event_id)] = true;
     }
     setMyAttending(next);
+  }
+
+  async function loadNotifications(nextAuth: AuthState) {
+    if (!nextAuth.isLoggedIn || !nextAuth.userId) {
+      setNotifications([]);
+      setNotificationsErr(null);
+      return;
+    }
+
+    setLoadingNotifications(true);
+    setNotificationsErr(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("notifications")
+        .select(
+          "id,recipient_id,actor_id,type,category,entity_type,entity_id,parent_entity_type,parent_entity_id,title,body,image_url,action_url,is_read,read_at,is_hidden,hidden_at,created_at"
+        )
+        .eq("recipient_id", nextAuth.userId)
+        .eq("is_hidden", false)
+        .order("created_at", { ascending: false })
+        .limit(40);
+
+      if (error) throw new Error(error.message);
+
+      setNotifications(((data as NotificationRow[]) || []).filter((x) => !x.is_hidden));
+    } catch (e: any) {
+      setNotifications([]);
+      setNotificationsErr(e?.message || "Unable to load notifications.");
+    } finally {
+      setLoadingNotifications(false);
+    }
   }
 
   async function loadFeedItems(nextAuth: AuthState) {
@@ -580,7 +721,93 @@ export default function FeedPage() {
   async function refreshAll(nextAuth?: AuthState) {
     const resolvedAuth = nextAuth ?? (await getAuthState());
     setAuth(resolvedAuth);
-    await Promise.all([loadFeedItems(resolvedAuth), loadFeedEvents(resolvedAuth)]);
+    await Promise.all([
+      loadFeedItems(resolvedAuth),
+      loadFeedEvents(resolvedAuth),
+      loadNotifications(resolvedAuth),
+    ]);
+  }
+
+  async function markAllNotificationsRead() {
+    if (!auth.userId || markingAllRead) return;
+
+    const unreadIds = notifications.filter((n) => !n.is_read).map((n) => n.id);
+    if (unreadIds.length === 0) return;
+
+    setMarkingAllRead(true);
+
+    try {
+      const nowIso = new Date().toISOString();
+      const { error } = await supabase
+        .from("notifications")
+        .update({ is_read: true, read_at: nowIso })
+        .eq("recipient_id", auth.userId)
+        .in("id", unreadIds);
+
+      if (error) throw new Error(error.message);
+
+      setNotifications((prev) =>
+        prev.map((n) => (unreadIds.includes(n.id) ? { ...n, is_read: true, read_at: nowIso } : n))
+      );
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setMarkingAllRead(false);
+    }
+  }
+
+  async function openNotification(notif: NotificationRow) {
+    if (!auth.userId) {
+      router.push("/me");
+      return;
+    }
+
+    setOpeningNotifId(notif.id);
+
+    try {
+      if (!notif.is_read) {
+        const nowIso = new Date().toISOString();
+        const { error } = await supabase
+          .from("notifications")
+          .update({ is_read: true, read_at: nowIso })
+          .eq("id", notif.id)
+          .eq("recipient_id", auth.userId);
+
+        if (error) throw new Error(error.message);
+
+        setNotifications((prev) =>
+          prev.map((n) => (n.id === notif.id ? { ...n, is_read: true, read_at: nowIso } : n))
+        );
+      }
+
+      setNotificationsOpen(false);
+
+      if (notif.action_url && notif.action_url.startsWith("/")) {
+        router.push(notif.action_url);
+        return;
+      }
+
+      if (notif.entity_type === "event" && notif.entity_id) {
+        router.push(`/event/${notif.entity_id}`);
+        return;
+      }
+
+      if (notif.parent_entity_type === "item" && notif.parent_entity_id) {
+        router.push(`/manage/${notif.parent_entity_id}`);
+        return;
+      }
+
+      if (notif.entity_type === "item" && notif.entity_id) {
+        router.push(`/item/${notif.entity_id}`);
+        return;
+      }
+
+      router.push("/me");
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setOpeningNotifId(null);
+    }
   }
 
   async function onAttendToggle(ev: EventRow) {
@@ -785,7 +1012,7 @@ export default function FeedPage() {
   }, [query]);
 
   useEffect(() => {
-    refreshAll();
+    void refreshAll();
 
     const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
       const nextAuth: AuthState = {
@@ -805,6 +1032,30 @@ export default function FeedPage() {
   }, []);
 
   useEffect(() => {
+    if (!auth.isLoggedIn || !auth.userId) return;
+
+    const channel = supabase
+      .channel(`feed-notifications-${auth.userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "notifications",
+          filter: `recipient_id=eq.${auth.userId}`,
+        },
+        () => {
+          void loadNotifications(auth);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [auth.isLoggedIn, auth.userId]);
+
+  useEffect(() => {
     return () => {
       if (burstTimerRef.current) clearTimeout(burstTimerRef.current);
     };
@@ -819,9 +1070,10 @@ export default function FeedPage() {
       if (e.key === "Escape") {
         setOpenImg(null);
         setFiltersOpen(false);
+        setNotificationsOpen(false);
       }
 
-      if (e.key === "/" && !openImg) {
+      if (e.key === "/" && !openImg && !notificationsOpen) {
         e.preventDefault();
         searchRef.current?.focus();
       }
@@ -829,7 +1081,7 @@ export default function FeedPage() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openImg]);
+  }, [openImg, notificationsOpen]);
 
   useEffect(() => {
     const el = chipRowRef.current;
@@ -1006,15 +1258,16 @@ export default function FeedPage() {
             />
           </div>
 
-          <button
-            className="plusBtn"
-            onClick={() => router.push("/create")}
-            aria-label="Create"
-            type="button"
-            data-no-card-doubletap="true"
-          >
-            +
-          </button>
+          <BellButton
+            unreadCount={auth.isLoggedIn ? unreadNotificationCount : 0}
+            onClick={() => {
+              if (!auth.isLoggedIn) {
+                router.push("/me");
+                return;
+              }
+              setNotificationsOpen(true);
+            }}
+          />
         </div>
 
         <div className="row tabsRow">
@@ -1150,6 +1403,103 @@ export default function FeedPage() {
         {err && <div className="err">{err}</div>}
         {loading && <div className="loading">Loading…</div>}
       </header>
+
+      {notificationsOpen && (
+        <div
+          className="notifBackdrop"
+          onClick={() => setNotificationsOpen(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="notifSheet" onClick={(e) => e.stopPropagation()}>
+            <div className="notifTop">
+              <div>
+                <div className="notifTitle">Notifications</div>
+                <div className="notifSub">
+                  {unreadNotificationCount > 0
+                    ? `${unreadNotificationCount} unread`
+                    : "You’re all caught up"}
+                </div>
+              </div>
+
+              <div className="notifTopActions">
+                <button
+                  className="notifGhostBtn"
+                  onClick={() => void markAllNotificationsRead()}
+                  disabled={markingAllRead || unreadNotificationCount === 0}
+                  type="button"
+                  data-no-card-doubletap="true"
+                >
+                  {markingAllRead ? "Saving…" : "Mark all read"}
+                </button>
+                <button
+                  className="sheetClose"
+                  onClick={() => setNotificationsOpen(false)}
+                  type="button"
+                  aria-label="Close"
+                  data-no-card-doubletap="true"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="notifBody">
+              {loadingNotifications ? <div className="notifEmpty">Loading notifications…</div> : null}
+              {notificationsErr ? <div className="notifError">{notificationsErr}</div> : null}
+
+              {!loadingNotifications && !notificationsErr && notifications.length === 0 ? (
+                <div className="notifEmpty">No notifications yet.</div>
+              ) : null}
+
+              {!loadingNotifications && !notificationsErr
+                ? notifications.map((notif) => {
+                    const busy = openingNotifId === notif.id;
+
+                    return (
+                      <button
+                        key={notif.id}
+                        className={`notifCard ${notif.is_read ? "" : "notifUnread"}`}
+                        onClick={() => void openNotification(notif)}
+                        type="button"
+                        data-no-card-doubletap="true"
+                      >
+                        <div className="notifCardTop">
+                          <div className="notifCardLeft">
+                            {notif.image_url ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img src={notif.image_url} alt="" className="notifThumb" />
+                            ) : (
+                              <div className="notifThumbFallback">•</div>
+                            )}
+
+                            <div className="notifCopy">
+                              <div className="notifLine1">
+                                <NotificationTypePill type={notif.type} />
+                                {!notif.is_read ? <span className="notifNewDot" /> : null}
+                              </div>
+                              <div className="notifCardTitle">
+                                {notif.title || "Notification"}
+                              </div>
+                              <div className="notifCardBody">
+                                {notif.body || "Open to view details."}
+                              </div>
+                              <div className="notifMeta">
+                                {formatDateTime(notif.created_at)}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="notifOpenHint">{busy ? "…" : "→"}</div>
+                        </div>
+                      </button>
+                    );
+                  })
+                : null}
+            </div>
+          </div>
+        </div>
+      )}
 
       {filtersOpen && (
         <div
@@ -1614,19 +1964,43 @@ export default function FeedPage() {
           transform: translateY(1px);
         }
 
-        .plusBtn {
+        .bellBtn {
           width: 44px;
           height: 44px;
           border-radius: 16px;
-          border: 1px solid rgba(16, 185, 129, 0.35);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
-          font-size: 24px;
-          font-weight: 900;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          color: #111827;
           display: grid;
           place-items: center;
           cursor: pointer;
           box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
+          position: relative;
+        }
+
+        .bellGlyph {
+          font-size: 19px;
+          line-height: 1;
+          transform: translateY(-1px);
+        }
+
+        .bellBadge {
+          position: absolute;
+          top: -4px;
+          right: -4px;
+          min-width: 20px;
+          height: 20px;
+          border-radius: 999px;
+          background: #ef4444;
+          color: #ffffff;
+          border: 2px solid #f7f7f8;
+          padding: 0 6px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 10px;
+          font-weight: 950;
+          line-height: 1;
         }
 
         .tabsRow {
@@ -1865,6 +2239,7 @@ export default function FeedPage() {
           font-weight: 800;
         }
 
+        .notifBackdrop,
         .sheetBackdrop {
           position: fixed;
           inset: 0;
@@ -1876,6 +2251,7 @@ export default function FeedPage() {
           padding: 12px;
         }
 
+        .notifSheet,
         .sheet {
           width: min(720px, 100%);
           border-radius: 18px;
@@ -1886,22 +2262,38 @@ export default function FeedPage() {
           overflow: hidden;
         }
 
+        .notifTop,
         .sheetTop {
           padding: 12px 12px 8px;
           display: flex;
-          align-items: center;
+          align-items: flex-start;
           justify-content: space-between;
           border-bottom: 1px solid #e5e7eb;
+          gap: 12px;
         }
 
+        .notifTitle,
         .sheetTitle {
           font-weight: 950;
           font-size: 14px;
           color: #111827;
         }
 
+        .notifSub {
+          margin-top: 4px;
+          font-size: 12px;
+          font-weight: 800;
+          color: #6b7280;
+        }
+
+        .notifTopActions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .notifGhostBtn,
         .sheetClose {
-          width: 38px;
           height: 38px;
           border-radius: 14px;
           border: 1px solid #e5e7eb;
@@ -1909,6 +2301,176 @@ export default function FeedPage() {
           color: #111827;
           cursor: pointer;
           font-weight: 950;
+          padding: 0 12px;
+        }
+
+        .notifBody {
+          max-height: min(72vh, 620px);
+          overflow-y: auto;
+          padding: 12px;
+          display: grid;
+          gap: 10px;
+        }
+
+        .notifError {
+          color: #b91c1c;
+          font-weight: 900;
+        }
+
+        .notifEmpty {
+          padding: 18px;
+          border-radius: 16px;
+          border: 1px dashed #d1d5db;
+          background: #ffffff;
+          color: #6b7280;
+          font-weight: 800;
+          text-align: center;
+        }
+
+        .notifCard {
+          width: 100%;
+          text-align: left;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          padding: 12px;
+          cursor: pointer;
+          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
+        }
+
+        .notifUnread {
+          border-color: rgba(16, 185, 129, 0.24);
+          background: linear-gradient(180deg, rgba(16, 185, 129, 0.04), #ffffff);
+        }
+
+        .notifCardTop {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 10px;
+        }
+
+        .notifCardLeft {
+          display: flex;
+          align-items: flex-start;
+          gap: 10px;
+          min-width: 0;
+          flex: 1;
+        }
+
+        .notifThumb,
+        .notifThumbFallback {
+          width: 46px;
+          height: 46px;
+          border-radius: 14px;
+          object-fit: cover;
+          flex-shrink: 0;
+          border: 1px solid #e5e7eb;
+        }
+
+        .notifThumbFallback {
+          display: grid;
+          place-items: center;
+          background: #f3f4f6;
+          color: #9ca3af;
+          font-size: 22px;
+        }
+
+        .notifCopy {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .notifLine1 {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .notifType {
+          display: inline-flex;
+          align-items: center;
+          min-height: 24px;
+          padding: 0 9px;
+          border-radius: 999px;
+          font-size: 11px;
+          font-weight: 950;
+          border: 1px solid #e5e7eb;
+          background: #f9fafb;
+          color: #374151;
+        }
+
+        .notifType.item,
+        .notifType.request {
+          border-color: rgba(16, 185, 129, 0.22);
+          background: rgba(16, 185, 129, 0.1);
+          color: #065f46;
+        }
+
+        .notifType.good {
+          border-color: rgba(16, 185, 129, 0.22);
+          background: rgba(16, 185, 129, 0.1);
+          color: #065f46;
+        }
+
+        .notifType.bad {
+          border-color: rgba(239, 68, 68, 0.22);
+          background: rgba(239, 68, 68, 0.08);
+          color: #991b1b;
+        }
+
+        .notifType.event {
+          border-color: rgba(59, 130, 246, 0.22);
+          background: rgba(59, 130, 246, 0.1);
+          color: #1d4ed8;
+        }
+
+        .notifType.message {
+          border-color: rgba(99, 102, 241, 0.22);
+          background: rgba(99, 102, 241, 0.1);
+          color: #4338ca;
+        }
+
+        .notifType.system {
+          border-color: #e5e7eb;
+          background: #f9fafb;
+          color: #374151;
+        }
+
+        .notifNewDot {
+          width: 8px;
+          height: 8px;
+          border-radius: 999px;
+          background: #10b981;
+          flex-shrink: 0;
+        }
+
+        .notifCardTitle {
+          margin-top: 6px;
+          font-size: 14px;
+          font-weight: 950;
+          color: #111827;
+          line-height: 1.35;
+        }
+
+        .notifCardBody {
+          margin-top: 4px;
+          font-size: 13px;
+          line-height: 1.45;
+          color: #6b7280;
+        }
+
+        .notifMeta {
+          margin-top: 6px;
+          font-size: 12px;
+          font-weight: 800;
+          color: #9ca3af;
+        }
+
+        .notifOpenHint {
+          color: #9ca3af;
+          font-weight: 950;
+          padding-top: 2px;
         }
 
         .sheetGrid {
@@ -2373,6 +2935,19 @@ export default function FeedPage() {
 
           .bigHeartBurst {
             font-size: 78px;
+          }
+
+          .notifTop {
+            align-items: flex-start;
+          }
+
+          .notifTopActions {
+            flex-direction: column;
+            align-items: stretch;
+          }
+
+          .notifGhostBtn {
+            width: 100%;
           }
         }
       `}</style>
