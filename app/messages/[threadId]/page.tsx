@@ -63,21 +63,6 @@ type ThreadReadRow = {
   last_seen_at: string;
 };
 
-type TradeRow = {
-  id: string;
-  item_id: string;
-  thread_id: string;
-  seller_id: string;
-  buyer_id: string;
-  state: "proposed" | "confirmed" | "fulfilled" | "canceled";
-  proposed_by: string;
-  confirmed_by: string | null;
-  fulfilled_by: string | null;
-  canceled_by: string | null;
-  updated_at: string;
-  created_at?: string;
-};
-
 /* ================= CONFIG ================= */
 
 const PAGE_SIZE = 30;
@@ -137,32 +122,15 @@ function normStatus(s?: string | null) {
 function statusBadge(status?: string | null) {
   const st = normStatus(status);
   if (!st) return { label: "Active", tone: "neutral" as const };
-  if (st.includes("complete") || st === "completed") return { label: "Completed", tone: "done" as const };
-  if (st.includes("claim") || st === "claimed") return { label: "Claimed", tone: "done" as const };
-  if (st.includes("reserve") || st === "reserved") return { label: "Reserved", tone: "warn" as const };
-  if (st.includes("available")) return { label: "Available", tone: "good" as const };
+  if (st.includes("complete") || st === "completed")
+    return { label: "Completed", tone: "done" as const };
+  if (st.includes("claim") || st === "claimed")
+    return { label: "Claimed", tone: "done" as const };
+  if (st.includes("reserve") || st === "reserved")
+    return { label: "Reserved", tone: "warn" as const };
+  if (st.includes("available"))
+    return { label: "Available", tone: "good" as const };
   return { label: "Active", tone: "neutral" as const };
-}
-
-function dealLabelOf(trade: TradeRow | null) {
-  if (!trade) return "Not started";
-  if (trade.state === "proposed") return "Waiting for confirmation";
-  if (trade.state === "confirmed") return "Confirmed";
-  if (trade.state === "fulfilled") return "Completed";
-  return "Not started";
-}
-
-function dealToneOf(trade: TradeRow | null) {
-  if (!trade) return "neutral" as const;
-  if (trade.state === "proposed") return "warn" as const;
-  if (trade.state === "confirmed") return "good" as const;
-  if (trade.state === "fulfilled") return "done" as const;
-  return "neutral" as const;
-}
-
-function isParticipant(t: TradeRow, uid: string | null) {
-  if (!uid) return false;
-  return t.seller_id === uid || t.buyer_id === uid;
 }
 
 function isImageAttachment(att: any) {
@@ -190,11 +158,6 @@ export default function ThreadPage() {
   const [item, setItem] = useState<ItemRow | null>(null);
   const [otherProfile, setOtherProfile] = useState<ProfileRow | null>(null);
   const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
-
-  /* ---------- trade ---------- */
-  const [trade, setTrade] = useState<TradeRow | null>(null);
-  const [tradeLoading, setTradeLoading] = useState(false);
-  const [tradeErr, setTradeErr] = useState<string | null>(null);
 
   /* ---------- messages + reactions ---------- */
   const [messages, setMessages] = useState<MessageRow[]>([]);
@@ -232,7 +195,6 @@ export default function ThreadPage() {
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
 
-  // critical: read actual bottom nav height so sheet/composer sit above it on phone
   const [bottomNavH, setBottomNavH] = useState(96);
 
   useEffect(() => {
@@ -256,10 +218,9 @@ export default function ThreadPage() {
     return !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
   }, [userId, userEmail]);
 
-  const myStatus = (myInterest?.status ?? "").toLowerCase();
-  const canConfirmPickup = myStatus === "accepted";
+  const myStatus = normStatus(myInterest?.status);
   const isBuyer = !!userId && !!thread?.requester_id && userId === thread.requester_id;
-  const mustConfirmBeforeChat = isBuyer && canConfirmPickup;
+  const mustConfirmBeforeChat = isBuyer && myStatus === "accepted";
 
   const otherId = useMemo(() => {
     if (!userId || !thread) return null;
@@ -289,7 +250,7 @@ export default function ThreadPage() {
 
   async function trackTyping(isTyping: boolean) {
     const ch = channelRef.current as any;
-    if (!ch || !userId) return;
+    if (!ch || !userId || mustConfirmBeforeChat) return;
     try {
       await ch.track({ user_id: userId, typing: isTyping });
     } catch {}
@@ -297,17 +258,19 @@ export default function ThreadPage() {
 
   function stopTypingNow() {
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    trackTyping(false);
+    void trackTyping(false);
   }
 
   function onTextChange(v: string) {
     setText(v);
     if (!userId || mustConfirmBeforeChat) return;
 
-    trackTyping(true);
+    void trackTyping(true);
 
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => trackTyping(false), 900);
+    typingTimeoutRef.current = setTimeout(() => {
+      void trackTyping(false);
+    }, 900);
   }
 
   /* ================= AUTH ================= */
@@ -376,7 +339,7 @@ export default function ThreadPage() {
         .eq("id", other)
         .single();
 
-      setOtherProfile((pData as any) ?? null);
+      setOtherProfile((pData as ProfileRow) ?? null);
     } else {
       setOtherProfile(null);
     }
@@ -445,7 +408,7 @@ export default function ThreadPage() {
 
   /* ================= READS ================= */
 
-  async function loadReads(uid: string) {
+  async function loadReads(uid: string, resolvedOtherId?: string | null) {
     try {
       const { data: mine } = await supabase
         .from("thread_reads")
@@ -456,12 +419,13 @@ export default function ThreadPage() {
 
       setMyLastSeenAt((mine as ThreadReadRow | null)?.last_seen_at ?? null);
 
-      if (otherId) {
+      const targetOtherId = resolvedOtherId ?? otherId;
+      if (targetOtherId) {
         const { data: oth } = await supabase
           .from("thread_reads")
           .select("thread_id,user_id,last_seen_at")
           .eq("thread_id", threadId)
-          .eq("user_id", otherId)
+          .eq("user_id", targetOtherId)
           .maybeSingle();
 
         setOtherLastSeenAt((oth as ThreadReadRow | null)?.last_seen_at ?? null);
@@ -479,9 +443,10 @@ export default function ThreadPage() {
     const nowIso = new Date().toISOString();
 
     try {
-      await supabase.from("thread_reads").upsert([{ thread_id: threadId, user_id: uid, last_seen_at: nowIso }], {
-        onConflict: "thread_id,user_id",
-      });
+      await supabase.from("thread_reads").upsert(
+        [{ thread_id: threadId, user_id: uid, last_seen_at: nowIso }],
+        { onConflict: "thread_id,user_id" }
+      );
       setMyLastSeenAt(nowIso);
     } catch {}
   }
@@ -516,7 +481,7 @@ export default function ThreadPage() {
   }
 
   async function toggleReaction(messageId: string, emoji: string) {
-    if (!userId) return;
+    if (!userId || mustConfirmBeforeChat) return;
 
     const already = !!myReactions?.[messageId]?.[emoji];
 
@@ -538,9 +503,16 @@ export default function ThreadPage() {
     });
 
     if (already) {
-      await supabase.from("message_reactions").delete().eq("message_id", messageId).eq("user_id", userId).eq("emoji", emoji);
+      await supabase
+        .from("message_reactions")
+        .delete()
+        .eq("message_id", messageId)
+        .eq("user_id", userId)
+        .eq("emoji", emoji);
     } else {
-      await supabase.from("message_reactions").insert([{ message_id: messageId, user_id: userId, emoji }]);
+      await supabase
+        .from("message_reactions")
+        .insert([{ message_id: messageId, user_id: userId, emoji }]);
     }
   }
 
@@ -560,7 +532,6 @@ export default function ThreadPage() {
     const client_id = makeClientId();
     const tempId = `temp-${client_id}`;
     const now = new Date().toISOString();
-
     const reply = replyTo;
 
     const optimistic: MessageRow = {
@@ -600,7 +571,9 @@ export default function ThreadPage() {
 
     if (error) {
       setErr(error.message || "Send failed. Tap retry.");
-      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, edited_at: "FAILED" } : m)));
+      setMessages((prev) =>
+        prev.map((m) => (m.id === tempId ? { ...m, edited_at: "FAILED" } : m))
+      );
       return;
     }
 
@@ -617,7 +590,7 @@ export default function ThreadPage() {
   }
 
   async function startEdit(m: MessageRow) {
-    if (!userId) return;
+    if (!userId || mustConfirmBeforeChat) return;
     if (m.sender_id !== userId) return;
     if (m.deleted_at) return;
     if (String(m.id).startsWith("temp-")) return;
@@ -628,7 +601,7 @@ export default function ThreadPage() {
   }
 
   async function saveEdit() {
-    if (!userId || !editingId) return;
+    if (!userId || !editingId || mustConfirmBeforeChat) return;
     const body = editingText.trim();
     if (!body) return;
 
@@ -644,7 +617,7 @@ export default function ThreadPage() {
   }
 
   async function deleteMessage(id: string) {
-    if (!userId) return;
+    if (!userId || mustConfirmBeforeChat) return;
 
     const m = messages.find((x) => x.id === id);
     if (!m) return;
@@ -747,7 +720,9 @@ export default function ThreadPage() {
     setErr(null);
 
     try {
-      const { error: rpcErr } = await supabase.rpc("confirm_pickup", { p_interest_id: myInterest.id });
+      const { error: rpcErr } = await supabase.rpc("confirm_pickup", {
+        p_interest_id: myInterest.id,
+      });
       if (rpcErr) throw new Error(rpcErr.message);
 
       await insertSystemMessage({
@@ -757,188 +732,18 @@ export default function ThreadPage() {
       });
 
       await loadMyInterest(userId, thread.item_id);
+
+      const { data: refreshedItem } = await supabase
+        .from("items")
+        .select("id,title,photo_url,status,owner_id")
+        .eq("id", thread.item_id)
+        .single();
+
+      if (refreshedItem) setItem(refreshedItem as ItemRow);
+
       await markSeenNow(userId);
     } catch (e: any) {
       setErr(e?.message || "Could not confirm pickup.");
-    }
-  }
-
-  /* ================= TRADE ================= */
-
-  async function loadTrade() {
-    if (!threadId) return;
-
-    setTradeLoading(true);
-    setTradeErr(null);
-
-    const { data, error } = await supabase
-      .from("trades")
-      .select("*")
-      .eq("thread_id", threadId)
-      .order("created_at", { ascending: false })
-      .limit(1);
-
-    if (error) {
-      setTradeErr(error.message);
-      setTrade(null);
-      setTradeLoading(false);
-      return;
-    }
-
-    const row = (data?.[0] as TradeRow) ?? null;
-    if (row?.state === "canceled") setTrade(null);
-    else setTrade(row);
-
-    setTradeLoading(false);
-  }
-
-  async function proposeTrade() {
-    if (!userId || !thread || !thread.item_id || !thread.owner_id || !thread.requester_id) return;
-    if (mustConfirmBeforeChat) return;
-
-    setTradeErr(null);
-
-    const { error } = await supabase.from("trades").insert([
-      {
-        item_id: thread.item_id,
-        thread_id: threadId,
-        seller_id: thread.owner_id,
-        buyer_id: thread.requester_id,
-        state: "proposed",
-        proposed_by: userId,
-      },
-    ]);
-
-    if (error) {
-      await loadTrade();
-      return;
-    }
-
-    await insertSystemMessage({
-      threadId,
-      senderId: userId,
-      body: "📌 Pickup/help proposed. Waiting for the other person to confirm.",
-    });
-
-    await loadTrade();
-  }
-
-  async function confirmTrade() {
-    if (!trade || !userId) return;
-    if (!isParticipant(trade, userId)) return;
-    if (trade.state !== "proposed") return;
-
-    if (trade.proposed_by === userId) {
-      setTradeErr("Waiting for the other person to confirm.");
-      return;
-    }
-
-    setTradeErr(null);
-
-    const { error: updErr } = await supabase
-      .from("trades")
-      .update({ state: "confirmed", confirmed_by: userId })
-      .eq("id", trade.id);
-
-    if (updErr) {
-      setTradeErr(updErr.message);
-      return;
-    }
-
-    await supabase.from("items").update({ status: "reserved" }).eq("id", trade.item_id);
-
-    await insertSystemMessage({
-      threadId,
-      senderId: userId,
-      body: "✅ Confirmed. You can mark it completed after pickup/help is done.",
-    });
-
-    await loadTrade();
-
-    if (thread?.item_id) {
-      const { data: it } = await supabase
-        .from("items")
-        .select("id,title,photo_url,status,owner_id")
-        .eq("id", thread.item_id)
-        .single();
-
-      if (it) setItem(it as any);
-    }
-  }
-
-  async function markFulfilled() {
-    if (!trade || !userId) return;
-    if (!isParticipant(trade, userId)) return;
-    if (trade.state !== "confirmed") return;
-
-    setTradeErr(null);
-
-    const { error: updErr } = await supabase
-      .from("trades")
-      .update({ state: "fulfilled", fulfilled_by: userId })
-      .eq("id", trade.id);
-
-    if (updErr) {
-      setTradeErr(updErr.message);
-      return;
-    }
-
-    await supabase.from("items").update({ status: "completed" }).eq("id", trade.item_id);
-
-    await insertSystemMessage({
-      threadId,
-      senderId: userId,
-      body: "🏁 Marked completed. Thanks for using ScholarSwap.",
-    });
-
-    await loadTrade();
-
-    if (thread?.item_id) {
-      const { data: it } = await supabase
-        .from("items")
-        .select("id,title,photo_url,status,owner_id")
-        .eq("id", thread.item_id)
-        .single();
-
-      if (it) setItem(it as any);
-    }
-  }
-
-  async function cancelTrade() {
-    if (!trade || !userId) return;
-    if (!isParticipant(trade, userId)) return;
-    if (trade.state !== "proposed" && trade.state !== "confirmed") return;
-
-    setTradeErr(null);
-
-    const { error: updErr } = await supabase
-      .from("trades")
-      .update({ state: "canceled", canceled_by: userId })
-      .eq("id", trade.id);
-
-    if (updErr) {
-      setTradeErr(updErr.message);
-      return;
-    }
-
-    await supabase.from("items").update({ status: "available" }).eq("id", trade.item_id);
-
-    await insertSystemMessage({
-      threadId,
-      senderId: userId,
-      body: "↩️ Deal canceled. Item is available again.",
-    });
-
-    setTrade(null);
-
-    if (thread?.item_id) {
-      const { data: it } = await supabase
-        .from("items")
-        .select("id,title,photo_url,status,owner_id")
-        .eq("id", thread.item_id)
-        .single();
-
-      if (it) setItem(it as any);
     }
   }
 
@@ -1006,7 +811,7 @@ export default function ThreadPage() {
 
             if (row.sender_id && row.sender_id !== userId) {
               setTimeout(() => {
-                if (stickToBottom) markSeenNow(userId);
+                if (stickToBottom) void markSeenNow(userId);
               }, 60);
             }
 
@@ -1020,7 +825,10 @@ export default function ThreadPage() {
         }
       )
       .on("postgres_changes", { event: "*", schema: "public", table: "message_reactions" }, () => {
-        if (userId) loadReactions(userId, messages.map((m) => m.id));
+        if (userId) void loadReactions(userId, messages.map((m) => m.id));
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "thread_reads", filter: `thread_id=eq.${threadId}` }, () => {
+        if (userId) void loadReads(userId);
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
@@ -1039,7 +847,7 @@ export default function ThreadPage() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, userId, stickToBottom, mustConfirmBeforeChat]);
+  }, [threadId, userId, stickToBottom, mustConfirmBeforeChat, messages.length]);
 
   useEffect(() => {
     if (!threadId) return;
@@ -1061,11 +869,17 @@ export default function ThreadPage() {
         const th = await loadThreadAndItem(uid);
         if (!th) return;
 
+        const resolvedOtherId =
+          th.owner_id && th.requester_id
+            ? th.owner_id === uid
+              ? th.requester_id
+              : th.owner_id
+            : null;
+
         await loadMyInterest(uid, th.item_id ?? null);
         await loadInitialMessages();
-        await loadReads(uid);
+        await loadReads(uid, resolvedOtherId);
         await markSeenNow(uid);
-        await loadTrade();
         setLoading(false);
       } catch (e: any) {
         setErr(e?.message || "Failed to load conversation.");
@@ -1076,7 +890,7 @@ export default function ThreadPage() {
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
       syncAuth().then((s) => {
         if (s.uid && s.email && s.email.toLowerCase().endsWith("@ashland.edu")) {
-          loadReads(s.uid);
+          void loadReads(s.uid);
         }
       });
     });
@@ -1088,7 +902,7 @@ export default function ThreadPage() {
   useEffect(() => {
     if (!userId) return;
     if (messages.length === 0) return;
-    loadReactions(userId, messages.map((m) => m.id));
+    void loadReactions(userId, messages.map((m) => m.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length, userId]);
 
@@ -1141,13 +955,6 @@ export default function ThreadPage() {
   }, [messages]);
 
   const st = statusBadge(item?.status);
-  const dealLabel = dealLabelOf(trade);
-  const dealTone = dealToneOf(trade);
-
-  const canProposeDeal = !trade && !!thread?.item_id && !!thread?.owner_id && !!thread?.requester_id && !mustConfirmBeforeChat;
-  const canConfirmDeal = !!trade && trade.state === "proposed" && trade.proposed_by !== userId && isParticipant(trade, userId);
-  const canCompleteDeal = !!trade && trade.state === "confirmed" && isParticipant(trade, userId);
-  const canCancelDeal = !!trade && (trade.state === "proposed" || trade.state === "confirmed") && isParticipant(trade, userId);
 
   if (!threadId) {
     return <div style={{ minHeight: "100vh", padding: 18 }}>Invalid thread.</div>;
@@ -1189,8 +996,10 @@ export default function ThreadPage() {
             className="iconGhost"
             type="button"
             onClick={() => {
-              if (userId) loadReads(userId);
-              loadTrade();
+              if (userId) {
+                void loadReads(userId);
+                if (thread?.item_id) void loadMyInterest(userId, thread.item_id);
+              }
             }}
             aria-label="Refresh"
           >
@@ -1221,7 +1030,7 @@ export default function ThreadPage() {
             </button>
 
             <button className="dealPillBtn" type="button" onClick={() => setShowOptionsSheet(true)}>
-              <span className={`dealChip ${dealTone}`}>{tradeLoading ? "Loading…" : dealLabel}</span>
+              <span className="dealChip neutral">Options</span>
               {unseenCount > 0 ? <span className="notifDot">{unseenCount}</span> : null}
             </button>
           </div>
@@ -1292,7 +1101,11 @@ export default function ThreadPage() {
                 >
                   {!mine ? (
                     <div className="avatarSlot">
-                      {showAvatar ? <div className="miniAvatar">{initialsOf(otherName)}</div> : <div className="avatarSpacer" />}
+                      {showAvatar ? (
+                        <div className="miniAvatar">{initialsOf(otherName)}</div>
+                      ) : (
+                        <div className="avatarSpacer" />
+                      )}
                     </div>
                   ) : null}
 
@@ -1311,7 +1124,9 @@ export default function ThreadPage() {
                           Replying to {replyTarget.sender_id === userId ? "you" : otherName}
                         </div>
                         <div className="replyPreview">
-                          {replyTarget.deleted_at ? "Message deleted" : (replyTarget.body || "").slice(0, 120) || "Attachment"}
+                          {replyTarget.deleted_at
+                            ? "Message deleted"
+                            : (replyTarget.body || "").slice(0, 120) || "Attachment"}
                         </div>
                       </button>
                     )}
@@ -1333,7 +1148,11 @@ export default function ThreadPage() {
                           {m.body ? <div className="bubbleText">{m.body}</div> : null}
 
                           {failed ? (
-                            <button className="failedBtn" type="button" onClick={() => failed && isTemp && retrySend(m)}>
+                            <button
+                              className="failedBtn"
+                              type="button"
+                              onClick={() => failed && isTemp && retrySend(m)}
+                            >
                               Send failed — tap to retry
                             </button>
                           ) : null}
@@ -1362,14 +1181,21 @@ export default function ThreadPage() {
                     <div className={`metaLine ${mine ? "mine" : "theirs"}`}>
                       <span>{time}</span>
                       {m.edited_at && m.edited_at !== "FAILED" && !deleted ? <span>Edited</span> : null}
-                      {mine && lastMyMessage?.id === m.id && !deleted ? <span>{lastMyMessageSeen ? "Seen" : "Sent"}</span> : null}
+                      {mine && lastMyMessage?.id === m.id && !deleted ? (
+                        <span>{lastMyMessageSeen ? "Seen" : "Sent"}</span>
+                      ) : null}
                     </div>
 
                     {isSelected && !deleted && (
                       <div className={`actionTray ${mine ? "mine" : "theirs"}`}>
                         <div className="quickReactions">
                           {QUICK_REACTIONS.map((emoji) => (
-                            <button key={emoji} className="quickReactionBtn" type="button" onClick={() => toggleReaction(m.id, emoji)}>
+                            <button
+                              key={emoji}
+                              className="quickReactionBtn"
+                              type="button"
+                              onClick={() => toggleReaction(m.id, emoji)}
+                            >
                               {emoji}
                             </button>
                           ))}
@@ -1467,7 +1293,6 @@ export default function ThreadPage() {
         </div>
       )}
 
-      {/* FIXED: this sheet now sits ABOVE both composer and bottom nav */}
       {showOptionsSheet && (
         <div
           className="sheetOverlay"
@@ -1479,39 +1304,13 @@ export default function ThreadPage() {
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
             <div className="sheetHandle" />
             <div className="sheetTitle">Conversation options</div>
-            <div className="sheetSub">Keep the thread clean. Manage deal actions here.</div>
+            <div className="sheetSub">Keep the thread clean.</div>
 
             <div className="sheetActions">
-              {canProposeDeal && (
-                <button className="sheetPrimary" type="button" onClick={proposeTrade}>
-                  Propose deal
-                </button>
-              )}
-
-              {canConfirmDeal && (
-                <button className="sheetPrimary" type="button" onClick={confirmTrade}>
-                  Confirm deal
-                </button>
-              )}
-
-              {canCompleteDeal && (
-                <button className="sheetGood" type="button" onClick={markFulfilled}>
-                  Mark completed
-                </button>
-              )}
-
-              {canCancelDeal && (
-                <button className="sheetGhost" type="button" onClick={cancelTrade}>
-                  Cancel deal
-                </button>
-              )}
-
               <button className="sheetDanger" type="button" onClick={deleteThreadForMe}>
                 Delete for me
               </button>
             </div>
-
-            {tradeErr ? <div className="sheetErr">{tradeErr}</div> : null}
           </div>
         </div>
       )}
@@ -1536,11 +1335,11 @@ export default function ThreadPage() {
               value={text}
               onChange={(e) => onTextChange(e.target.value)}
               onBlur={stopTypingNow}
-              onFocus={() => userId && markSeenNow(userId)}
+              onFocus={() => userId && void markSeenNow(userId)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  sendMessage({ body: text, attachments: null });
+                  void sendMessage({ body: text, attachments: null });
                 }
               }}
               disabled={mustConfirmBeforeChat}
@@ -1552,7 +1351,7 @@ export default function ThreadPage() {
           <button
             className={`sendFab ${!text.trim() || uploading || mustConfirmBeforeChat ? "disabled" : ""}`}
             type="button"
-            onClick={() => sendMessage({ body: text, attachments: null })}
+            onClick={() => void sendMessage({ body: text, attachments: null })}
             disabled={!text.trim() || uploading || mustConfirmBeforeChat}
             aria-label="Send"
           >
@@ -1732,22 +1531,19 @@ export default function ThreadPage() {
           color: #334155;
         }
 
-        .statusChip.good,
-        .dealChip.good {
+        .statusChip.good {
           background: rgba(16, 185, 129, 0.12);
           border-color: rgba(16, 185, 129, 0.24);
           color: #047857;
         }
 
-        .statusChip.warn,
-        .dealChip.warn {
+        .statusChip.warn {
           background: rgba(245, 158, 11, 0.12);
           border-color: rgba(245, 158, 11, 0.24);
           color: #92400e;
         }
 
-        .statusChip.done,
-        .dealChip.done {
+        .statusChip.done {
           background: rgba(59, 130, 246, 0.12);
           border-color: rgba(59, 130, 246, 0.24);
           color: #1d4ed8;
@@ -2294,7 +2090,6 @@ export default function ThreadPage() {
           font-weight: 800;
         }
 
-        /* This is the actual fix */
         .sheetOverlay {
           position: fixed;
           inset: 0;
@@ -2345,45 +2140,14 @@ export default function ThreadPage() {
           gap: 10px;
         }
 
-        .sheetPrimary,
-        .sheetGood,
-        .sheetGhost,
         .sheetDanger {
           height: 48px;
           border-radius: 16px;
           font-weight: 950;
           cursor: pointer;
-        }
-
-        .sheetPrimary {
-          border: 1px solid rgba(16, 185, 129, 0.24);
-          background: rgba(16, 185, 129, 0.12);
-          color: #047857;
-        }
-
-        .sheetGood {
-          border: 1px solid rgba(34, 197, 94, 0.24);
-          background: rgba(34, 197, 94, 0.12);
-          color: #166534;
-        }
-
-        .sheetGhost {
-          border: 1px solid rgba(15, 23, 42, 0.08);
-          background: #ffffff;
-          color: #0f172a;
-        }
-
-        .sheetDanger {
           border: 1px solid rgba(239, 68, 68, 0.22);
           background: rgba(239, 68, 68, 0.08);
           color: #b91c1c;
-        }
-
-        .sheetErr {
-          margin-top: 10px;
-          color: #b91c1c;
-          font-size: 13px;
-          font-weight: 900;
         }
 
         .composerDock {
