@@ -27,6 +27,8 @@ type ItemRow = {
   photo_url: string | null;
   status: string | null;
   owner_id: string | null;
+
+  hide_interest_count: boolean | null;
 };
 
 type OwnerProfile = {
@@ -76,8 +78,16 @@ function formatExpiry(expiresAt: string | null) {
   if (diff <= 0) return "Expired";
 
   const oneDay = 24 * 60 * 60 * 1000;
-  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+  const startToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate()
+  ).getTime();
+  const startEnd = new Date(
+    end.getFullYear(),
+    end.getMonth(),
+    end.getDate()
+  ).getTime();
   const dayDiff = Math.round((startEnd - startToday) / oneDay);
 
   if (dayDiff === 0) return "Today";
@@ -156,6 +166,14 @@ function prettyDate(iso: string | null) {
   });
 }
 
+function initialsFromName(name: string) {
+  const clean = name.trim();
+  if (!clean) return "A";
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 1).toUpperCase();
+  return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
+}
+
 export default function ItemDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -164,7 +182,10 @@ export default function ItemDetailPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  const isLoggedIn = useMemo(() => !!userId && isAshlandEmail(userEmail), [userId, userEmail]);
+  const isLoggedIn = useMemo(
+    () => !!userId && isAshlandEmail(userEmail),
+    [userId, userEmail]
+  );
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -201,7 +222,9 @@ export default function ItemDetailPage() {
   const [offerNote, setOfferNote] = useState("");
 
   const [openImg, setOpenImg] = useState<string | null>(null);
-  const toastTimer = useRef<any>(null);
+  const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
+
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadSeq = useRef(0);
 
   const postType: PostType = (item?.post_type ?? "give") as PostType;
@@ -212,6 +235,7 @@ export default function ItemDetailPage() {
 
   const itemStatus = (item?.status ?? "available").toLowerCase();
   const expiryText = formatExpiry(item?.expires_at ?? null);
+  const activityHidden = !!item?.hide_interest_count;
 
   const mineInterested = !!myInterest?.id;
   const myInterestStatus = (myInterest?.status ?? "").toLowerCase();
@@ -238,7 +262,7 @@ export default function ItemDetailPage() {
       const { data: it, error: itemErr } = await supabase
         .from("items")
         .select(
-          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id"
+          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id,hide_interest_count"
         )
         .eq("id", itemId)
         .single();
@@ -646,6 +670,73 @@ export default function ItemDetailPage() {
     }
   }
 
+  async function toggleActivityVisibility() {
+    if (!item || !isMinePost || !userId) return;
+
+    const nextValue = !item.hide_interest_count;
+    setBusy(true);
+    setOwnerMenuOpen(false);
+
+    try {
+      const { error } = await supabase
+        .from("items")
+        .update({ hide_interest_count: nextValue })
+        .eq("id", item.id)
+        .eq("owner_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      setItem((prev) => (prev ? { ...prev, hide_interest_count: nextValue } : prev));
+      showToast(nextValue ? "Count hidden ✅" : "Count shown ✅", "ok");
+    } catch (e: any) {
+      showToast(e?.message || "Could not update visibility.", "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function askDeleteListing() {
+    if (!item || !isMinePost || !userId) return;
+
+    setOwnerMenuOpen(false);
+    setConfirm({
+      title: "Delete listing?",
+      body: "This permanently removes the listing.",
+      actionLabel: "Delete",
+      danger: true,
+      onYes: async () => {
+        setConfirm(null);
+        setBusy(true);
+
+        try {
+          if (postType === "give") {
+            await supabase.from("interests").delete().eq("item_id", item.id);
+          } else {
+            await supabase.from("request_offers").delete().eq("request_id", item.id);
+          }
+
+          const { error } = await supabase
+            .from("items")
+            .delete()
+            .eq("id", item.id)
+            .eq("owner_id", userId);
+
+          if (error) throw new Error(error.message);
+
+          showToast("Listing deleted ✅", "ok");
+          router.replace("/feed");
+        } catch (e: any) {
+          showToast(
+            e?.message || "Could not delete listing. Check related foreign keys.",
+            "err"
+          );
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
+  }
+
   useEffect(() => {
     if (!itemId) return;
 
@@ -677,8 +768,10 @@ export default function ItemDetailPage() {
         setShowInterestModal(false);
         setShowOfferModal(false);
         setConfirm(null);
+        setOwnerMenuOpen(false);
       }
     }
+
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
@@ -721,33 +814,71 @@ export default function ItemDetailPage() {
     return (owner?.user_role ?? "").trim();
   }, [item, owner]);
 
+  const ownerAvatarText = useMemo(() => {
+    return item?.is_anonymous ? "A" : initialsFromName(ownerLabel);
+  }, [item?.is_anonymous, ownerLabel]);
+
+  const activityText = useMemo(() => {
+    if (!item) return "";
+    if (activityHidden) {
+      return postType === "give" ? "Interest hidden" : "Offer count hidden";
+    }
+    if (postType === "give") {
+      return `${interestCount} request${interestCount === 1 ? "" : "s"}`;
+    }
+    if (isMinePost) {
+      return `${offers.length} offer${offers.length === 1 ? "" : "s"}`;
+    }
+    return myOffer?.id ? "Offer sent" : "Open request";
+  }, [activityHidden, postType, interestCount, offers.length, isMinePost, myOffer?.id, item]);
+
+  const visibilityMenuLabel = useMemo(() => {
+    if (postType === "give") {
+      return activityHidden ? "Show interest count" : "Hide interest count";
+    }
+    return activityHidden ? "Show offer count" : "Hide offer count";
+  }, [postType, activityHidden]);
+
   const primaryCTA = useMemo(() => {
     if (!item) return { label: "Loading…", disabled: true, onClick: () => {} };
 
     if (postType === "give") {
       if (isMinePost) return { label: "Your listing", disabled: true, onClick: () => {} };
-      if (!isLoggedIn)
+      if (!isLoggedIn) {
         return { label: "Request item", disabled: false, onClick: () => router.push("/me") };
+      }
       if (mineInterested) {
         if (interestReserved) return { label: "Reserved ✅", disabled: true, onClick: () => {} };
         if (interestAccepted) return { label: "Accepted ✅", disabled: true, onClick: () => {} };
         return { label: "Request sent", disabled: true, onClick: () => {} };
       }
-      if (itemStatus !== "available") return { label: "Unavailable", disabled: true, onClick: () => {} };
-      return { label: "Request item", disabled: false, onClick: () => setShowInterestModal(true) };
+      if (itemStatus !== "available") {
+        return { label: "Unavailable", disabled: true, onClick: () => {} };
+      }
+      return {
+        label: "Request item",
+        disabled: false,
+        onClick: () => setShowInterestModal(true),
+      };
     }
 
-    if (isMinePost) return { label: "View offers below", disabled: true, onClick: () => {} };
-    if (!isLoggedIn)
+    if (isMinePost) return { label: "Your request", disabled: true, onClick: () => {} };
+    if (!isLoggedIn) {
       return { label: "Offer help", disabled: false, onClick: () => router.push("/me") };
-    if (myOffer?.id)
+    }
+    if (myOffer?.id) {
       return {
         label: `Offer sent • ${offerStatusLabel(myOffer.status ?? "pending")}`,
         disabled: true,
         onClick: () => {},
       };
+    }
 
-    return { label: "Offer help", disabled: false, onClick: () => setShowOfferModal(true) };
+    return {
+      label: "Offer help",
+      disabled: false,
+      onClick: () => setShowOfferModal(true),
+    };
   }, [
     item,
     postType,
@@ -761,8 +892,70 @@ export default function ItemDetailPage() {
     myOffer,
   ]);
 
+  const secondaryCTA = useMemo(() => {
+    if (!item) return null;
+
+    if (postType === "give") {
+      if (isMinePost) return null;
+      if (interestAccepted) {
+        return {
+          label: "Confirm & chat",
+          disabled: false,
+          onClick: confirmPickupAndChat,
+        };
+      }
+      if (mineInterested && !interestAccepted && !interestReserved) {
+        return {
+          label: "Withdraw",
+          disabled: false,
+          onClick: withdrawInterest,
+        };
+      }
+      return null;
+    }
+
+    if (isMinePost) return null;
+
+    if (myOffer?.id) {
+      if (myOfferAccepted) {
+        return {
+          label: "Start chat",
+          disabled: false,
+          onClick: () => openChatForOffer(myOffer),
+        };
+      }
+
+      return {
+        label: "Withdraw",
+        disabled: false,
+        onClick: withdrawOffer,
+      };
+    }
+
+    if (!isLoggedIn) {
+      return {
+        label: "Account",
+        disabled: false,
+        onClick: () => router.push("/me"),
+      };
+    }
+
+    return null;
+  }, [
+    item,
+    postType,
+    isMinePost,
+    interestAccepted,
+    mineInterested,
+    interestReserved,
+    myOffer,
+    myOfferAccepted,
+    isLoggedIn,
+    router,
+  ]);
+
   const bottomOffset = `calc(${APP_NAV_HEIGHT_PX}px + env(safe-area-inset-bottom) + 10px)`;
-  const pageBottomPad = `calc(${APP_NAV_HEIGHT_PX}px + ${ACTION_BAR_HEIGHT_PX}px + env(safe-area-inset-bottom) + 22px)`;
+  const pageBottomPad = `calc(${APP_NAV_HEIGHT_PX}px + ${ACTION_BAR_HEIGHT_PX}px + env(safe-area-inset-bottom) + 24px)`;
 
   return (
     <div className="page" style={{ paddingBottom: pageBottomPad as any }}>
@@ -776,17 +969,7 @@ export default function ItemDetailPage() {
           <div className="brandTitle">ScholarSwap</div>
         </div>
 
-        <div className="topRight">
-          {isMinePost ? (
-            <button className="chipBtn" onClick={() => router.push(`/edit/${itemId}`)}>
-              Edit
-            </button>
-          ) : (
-            <button className="chipBtn" onClick={() => router.push("/feed")}>
-              Feed
-            </button>
-          )}
-        </div>
+        <div className="topSpacer" />
       </header>
 
       {err && <div className="alert err">{err}</div>}
@@ -795,10 +978,83 @@ export default function ItemDetailPage() {
       {!loading && item && (
         <main className="wrap">
           <section className="heroCard">
+            <div className="cardHead">
+              <div className="ownerMini">
+                <div className="ownerAvatar">{ownerAvatarText}</div>
+
+                <div className="ownerText">
+                  <div className="ownerName">{ownerLabel}</div>
+                  <div className="ownerSub">
+                    {postType === "give" ? "Item" : "Request"}
+                    {ownerRole ? ` • ${ownerRole}` : ""}
+                  </div>
+                </div>
+              </div>
+
+              {isMinePost ? (
+                <div className="menuWrap">
+                  {ownerMenuOpen && (
+                    <button
+                      className="menuOverlay"
+                      aria-label="Close menu"
+                      onClick={() => setOwnerMenuOpen(false)}
+                    />
+                  )}
+
+                  <button
+                    className="menuBtn"
+                    aria-label="More options"
+                    onClick={() => setOwnerMenuOpen((v) => !v)}
+                    disabled={busy}
+                    type="button"
+                  >
+                    ⋯
+                  </button>
+
+                  {ownerMenuOpen && (
+                    <div className="menuCard">
+                      <button
+                        className="menuItem"
+                        onClick={() => {
+                          setOwnerMenuOpen(false);
+                          router.push(`/edit/${item.id}`);
+                        }}
+                        type="button"
+                      >
+                        Edit
+                      </button>
+
+                      <button
+                        className="menuItem"
+                        onClick={toggleActivityVisibility}
+                        type="button"
+                      >
+                        {visibilityMenuLabel}
+                      </button>
+
+                      <button
+                        className="menuItem danger"
+                        onClick={askDeleteListing}
+                        type="button"
+                      >
+                        Delete listing
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="headRightPill">{itemStatusLabel(item.status)}</div>
+              )}
+            </div>
+
             <div className="heroMedia">
               {postType === "give" ? (
                 item.photo_url ? (
-                  <button className="imgBtn" onClick={() => setOpenImg(item.photo_url!)} type="button">
+                  <button
+                    className="imgBtn"
+                    onClick={() => setOpenImg(item.photo_url!)}
+                    type="button"
+                  >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img src={item.photo_url} alt={item.title} className="heroImg" />
                   </button>
@@ -810,9 +1066,12 @@ export default function ItemDetailPage() {
                   <div className="requestHeroPills">
                     <span className="miniPill blue">{requestGroupLabel(item.request_group)}</span>
                     {item.request_timeframe ? (
-                      <span className="miniPill blue">{requestTimeframeLabel(item.request_timeframe)}</span>
+                      <span className="miniPill blue">
+                        {requestTimeframeLabel(item.request_timeframe)}
+                      </span>
                     ) : null}
                   </div>
+
                   <div className="requestHeroText">
                     {item.description?.trim() || "No extra details provided."}
                   </div>
@@ -832,78 +1091,51 @@ export default function ItemDetailPage() {
                 </span>
               </div>
 
-              <div className="metaStack">
-                <div className="metaCard">
-                  <div className="metaLabel">{postType === "give" ? "Posted by" : "Requester"}</div>
-                  <div className="metaValue">
-                    {ownerLabel}
-                    {ownerRole ? <span className="muted"> ({ownerRole})</span> : null}
-                  </div>
-                </div>
+              {postType === "give" && item.description?.trim() ? (
+                <div className="caption">{item.description.trim()}</div>
+              ) : null}
 
-                <div className="metaCard">
-                  <div className="metaLabel">Closes</div>
-                  <div className="metaValue">
+              <div className="metaRow">
+                <div className="miniMeta">
+                  <span className="metaKey">Closes</span>
+                  <span className="metaVal">
                     {item.expires_at ? prettyDate(item.expires_at) : "Until canceled"}
-                    <span className="muted"> • {expiryText}</span>
-                  </div>
+                  </span>
                 </div>
 
-                {postType === "give" ? (
-                  <div className="metaCard">
-                    <div className="metaLabel">Interest</div>
-                    <div className="metaValue">{interestCount} request{interestCount === 1 ? "" : "s"}</div>
-                  </div>
-                ) : (
-                  <div className="metaCard">
-                    <div className="metaLabel">Offers</div>
-                    <div className="metaValue">{isMinePost ? offers.length : myOffer?.id ? "1 sent" : "Open"}</div>
-                  </div>
-                )}
+                <div className="miniMeta">
+                  <span className="metaKey">Status</span>
+                  <span className="metaVal">{expiryText}</span>
+                </div>
+
+                <div className="miniMeta">
+                  <span className="metaKey">{postType === "give" ? "Interest" : "Offers"}</span>
+                  <span className="metaVal">{activityText}</span>
+                </div>
               </div>
-
-              {isMinePost && (
-                <div className="ownerActions">
-                  <button className="softBtn" onClick={() => router.push(`/edit/${item.id}`)}>
-                    Edit post
-                  </button>
-
-                  {postType === "give" ? (
-                    <button className="softBtn" onClick={() => router.push(`/manage/${item.id}`)}>
-                      Manage requests
-                    </button>
-                  ) : (
-                    <button className="softBtn" onClick={() => router.push("/messages")}>
-                      Messages
-                    </button>
-                  )}
-                </div>
-              )}
             </div>
           </section>
 
-          {postType === "give" && (
-            <section className="panel">
-              <div className="panelTitle">Description</div>
-              <div className="panelBody">{item.description?.trim() || "No description added."}</div>
-            </section>
-          )}
-
           {postType === "request" && !isMinePost && (
-            <section className="panel">
-              <div className="panelTitle">What this person needs</div>
-              <div className="infoGrid">
-                <div className="infoBox">
-                  <div className="infoKey">Request type</div>
-                  <div className="infoVal">{requestGroupLabel(item.request_group)}</div>
+            <section className="panel compactPanel">
+              <div className="compactGrid">
+                <div className="compactBox">
+                  <div className="compactKey">Type</div>
+                  <div className="compactVal">{requestGroupLabel(item.request_group)}</div>
                 </div>
-                <div className="infoBox">
-                  <div className="infoKey">Timeframe</div>
-                  <div className="infoVal">{requestTimeframeLabel(item.request_timeframe) || "—"}</div>
+
+                <div className="compactBox">
+                  <div className="compactKey">Timeframe</div>
+                  <div className="compactVal">
+                    {requestTimeframeLabel(item.request_timeframe) || "—"}
+                  </div>
                 </div>
-                <div className="infoBox full">
-                  <div className="infoKey">Location</div>
-                  <div className="infoVal">{item.request_location?.trim() || "No location provided"}</div>
+
+                <div className="compactBox full">
+                  <div className="compactKey">Location</div>
+                  <div className="compactVal">
+                    {item.request_location?.trim() || "No location provided"}
+                  </div>
                 </div>
               </div>
             </section>
@@ -932,6 +1164,7 @@ export default function ItemDetailPage() {
                             {helperName}
                             <span className="muted">{helperRole}</span>
                           </div>
+
                           <span className={`pill ${toneClassForOffer(offer.status)}`}>
                             {offerStatusLabel(offer.status)}
                           </span>
@@ -947,37 +1180,61 @@ export default function ItemDetailPage() {
 
                         <div className="offerActions">
                           {(st === "pending" || st === "hold") && (
-                            <button className="btn green" onClick={() => acceptOfferAsRequester(offer)} disabled={busy}>
+                            <button
+                              className="btn green"
+                              onClick={() => acceptOfferAsRequester(offer)}
+                              disabled={busy}
+                            >
                               Accept
                             </button>
                           )}
 
                           {st === "pending" && (
-                            <button className="btn blue" onClick={() => setOfferStatusAsRequester(offer, "hold")} disabled={busy}>
+                            <button
+                              className="btn blue"
+                              onClick={() => setOfferStatusAsRequester(offer, "hold")}
+                              disabled={busy}
+                            >
                               Hold
                             </button>
                           )}
 
                           {st === "hold" && (
-                            <button className="btn ghost" onClick={() => setOfferStatusAsRequester(offer, "pending")} disabled={busy}>
+                            <button
+                              className="btn ghost"
+                              onClick={() => setOfferStatusAsRequester(offer, "pending")}
+                              disabled={busy}
+                            >
                               Move back
                             </button>
                           )}
 
                           {(st === "accepted" || st === "completed") && (
-                            <button className="btn greenSoft" onClick={() => openChatForOffer(offer)} disabled={busy}>
+                            <button
+                              className="btn greenSoft"
+                              onClick={() => openChatForOffer(offer)}
+                              disabled={busy}
+                            >
                               Open chat
                             </button>
                           )}
 
                           {st === "accepted" && (
-                            <button className="btn amber" onClick={() => completeOfferAsRequester(offer)} disabled={busy}>
-                              Mark completed
+                            <button
+                              className="btn amber"
+                              onClick={() => completeOfferAsRequester(offer)}
+                              disabled={busy}
+                            >
+                              Complete
                             </button>
                           )}
 
                           {(st === "pending" || st === "hold") && (
-                            <button className="btn danger" onClick={() => setOfferStatusAsRequester(offer, "declined")} disabled={busy}>
+                            <button
+                              className="btn danger"
+                              onClick={() => setOfferStatusAsRequester(offer, "declined")}
+                              disabled={busy}
+                            >
                               Decline
                             </button>
                           )}
@@ -994,7 +1251,12 @@ export default function ItemDetailPage() {
 
       {!loading && item && (
         <div className="actionBar" style={{ bottom: bottomOffset as any }}>
-          <div className="barInner">
+          <div
+            className="barInner"
+            style={{
+              gridTemplateColumns: secondaryCTA ? "1.45fr 1fr" : "1fr",
+            }}
+          >
             <button
               className={`cta primary ${primaryCTA.disabled ? "disabled" : ""}`}
               onClick={primaryCTA.onClick}
@@ -1003,39 +1265,15 @@ export default function ItemDetailPage() {
               {busy ? "Working…" : primaryCTA.label}
             </button>
 
-            {postType === "give" ? (
-              interestAccepted && !isMinePost ? (
-                <button className="cta secondary" onClick={confirmPickupAndChat} disabled={busy}>
-                  Confirm & chat
-                </button>
-              ) : (
-                <button
-                  className={`cta secondary ${(!mineInterested || interestAccepted || interestReserved || isMinePost) ? "disabled" : ""}`}
-                  onClick={withdrawInterest}
-                  disabled={busy || !mineInterested || interestAccepted || interestReserved || isMinePost}
-                >
-                  Withdraw
-                </button>
-              )
-            ) : isMinePost ? (
-              <button className="cta secondary" onClick={() => router.push(`/edit/${item.id}`)} disabled={busy}>
-                Edit request
+            {secondaryCTA ? (
+              <button
+                className={`cta secondary ${secondaryCTA.disabled ? "disabled" : ""}`}
+                onClick={secondaryCTA.onClick}
+                disabled={secondaryCTA.disabled || busy}
+              >
+                {busy ? "Working…" : secondaryCTA.label}
               </button>
-            ) : myOffer?.id ? (
-              myOfferAccepted ? (
-                <button className="cta secondary" onClick={() => openChatForOffer(myOffer)} disabled={busy}>
-                  Start chat
-                </button>
-              ) : (
-                <button className="cta secondary" onClick={withdrawOffer} disabled={busy}>
-                  Withdraw
-                </button>
-              )
-            ) : (
-              <button className="cta secondary" onClick={() => router.push("/me")} disabled={busy}>
-                Account
-              </button>
-            )}
+            ) : null}
           </div>
         </div>
       )}
@@ -1050,13 +1288,14 @@ export default function ItemDetailPage() {
               </button>
             </div>
 
-            <div className="modalHint">
-              Let the owner know when you can meet.
-            </div>
+            <div className="modalHint">Let the owner know when you can meet.</div>
 
             <div className="field">
               <label>Earliest pickup</label>
-              <select value={earliestPickup} onChange={(e) => setEarliestPickup(e.target.value as any)}>
+              <select
+                value={earliestPickup}
+                onChange={(e) => setEarliestPickup(e.target.value as any)}
+              >
                 <option value="today">Today</option>
                 <option value="tomorrow">Tomorrow</option>
                 <option value="weekend">Weekend</option>
@@ -1065,7 +1304,10 @@ export default function ItemDetailPage() {
 
             <div className="field">
               <label>Time window</label>
-              <select value={timeWindow} onChange={(e) => setTimeWindow(e.target.value as any)}>
+              <select
+                value={timeWindow}
+                onChange={(e) => setTimeWindow(e.target.value as any)}
+              >
                 <option value="morning">Morning</option>
                 <option value="afternoon">Afternoon</option>
                 <option value="evening">Evening</option>
@@ -1109,7 +1351,10 @@ export default function ItemDetailPage() {
 
             <div className="field">
               <label>Availability</label>
-              <select value={offerAvailability} onChange={(e) => setOfferAvailability(e.target.value as any)}>
+              <select
+                value={offerAvailability}
+                onChange={(e) => setOfferAvailability(e.target.value as any)}
+              >
                 <option value="today">Today</option>
                 <option value="tomorrow">Tomorrow</option>
                 <option value="this_week">This week</option>
@@ -1154,7 +1399,10 @@ export default function ItemDetailPage() {
               <button className="btn ghost" onClick={() => setConfirm(null)}>
                 Cancel
               </button>
-              <button className={`btn ${confirm.danger ? "danger" : "green"}`} onClick={confirm.onYes}>
+              <button
+                className={`btn ${confirm.danger ? "danger" : "green"}`}
+                onClick={confirm.onYes}
+              >
                 {confirm.actionLabel}
               </button>
             </div>
@@ -1171,6 +1419,7 @@ export default function ItemDetailPage() {
                 ✕
               </button>
             </div>
+
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={openImg} alt={item.title} className="imgFull" />
           </div>
@@ -1187,87 +1436,76 @@ export default function ItemDetailPage() {
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background: linear-gradient(180deg, #f8fafc 0%, #f6f7fb 42%, #f8fafc 100%);
+          background: #f6f7fb;
           color: #0f172a;
-          padding: 14px 14px 0;
+          padding: 12px 12px 0;
         }
 
         .top {
           position: sticky;
           top: 0;
           z-index: 40;
-          display: flex;
+          display: grid;
+          grid-template-columns: 44px 1fr 44px;
           align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          padding: 10px 0;
-          background: rgba(248, 250, 252, 0.9);
+          gap: 10px;
+          padding: 8px 0 10px;
+          background: rgba(246, 247, 251, 0.88);
           backdrop-filter: blur(14px);
-          border-bottom: 1px solid rgba(15, 23, 42, 0.06);
-        }
-
-        .iconBtn,
-        .chipBtn {
-          border: 1px solid #e5e7eb;
-          background: rgba(255, 255, 255, 0.92);
-          color: #0f172a;
-          border-radius: 16px;
-          font-weight: 900;
-          cursor: pointer;
-          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
         }
 
         .iconBtn {
           width: 44px;
           height: 44px;
+          border: 1px solid #e5e7eb;
+          background: rgba(255, 255, 255, 0.96);
+          color: #0f172a;
+          border-radius: 14px;
+          font-size: 20px;
+          font-weight: 900;
+          cursor: pointer;
+          box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
         }
 
-        .chipBtn {
-          padding: 10px 14px;
-          white-space: nowrap;
+        .topSpacer {
+          width: 44px;
+          height: 44px;
         }
 
         .brandBlock {
           min-width: 0;
-          flex: 1;
           display: grid;
           justify-items: center;
           line-height: 1.05;
         }
 
         .brandEyebrow {
-          font-size: 11px;
+          font-size: 10px;
           font-weight: 1000;
           color: #64748b;
-          letter-spacing: 0.12em;
+          letter-spacing: 0.14em;
         }
 
         .brandTitle {
-          font-size: 16px;
+          font-size: 15px;
           font-weight: 1000;
           letter-spacing: -0.03em;
         }
 
-        .topRight {
-          display: flex;
-          align-items: center;
-          justify-content: flex-end;
-          min-width: 64px;
-        }
-
         .wrap {
-          max-width: 980px;
+          max-width: 920px;
           margin: 0 auto;
         }
 
         .alert {
-          margin: 12px 0;
+          margin: 10px 0 0;
           border: 1px solid #e5e7eb;
           background: #fff;
-          padding: 12px 14px;
-          border-radius: 18px;
-          font-weight: 900;
-          box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
+          padding: 11px 13px;
+          border-radius: 16px;
+          font-weight: 800;
+          font-size: 13px;
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
         }
 
         .alert.err {
@@ -1277,16 +1515,143 @@ export default function ItemDetailPage() {
         }
 
         .heroCard {
-          margin-top: 12px;
-          background: rgba(255, 255, 255, 0.94);
-          border: 1px solid #e5e7eb;
-          border-radius: 28px;
+          margin-top: 8px;
+          background: #fff;
+          border: 1px solid #e8ebf0;
+          border-radius: 24px;
           overflow: hidden;
-          box-shadow: 0 20px 50px rgba(15, 23, 42, 0.06);
+          box-shadow: 0 16px 40px rgba(15, 23, 42, 0.05);
+        }
+
+        .cardHead {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 12px 12px 10px;
+          border-bottom: 1px solid #f0f2f6;
+          background: #fff;
+        }
+
+        .ownerMini {
+          min-width: 0;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .ownerAvatar {
+          width: 36px;
+          height: 36px;
+          border-radius: 999px;
+          background: linear-gradient(135deg, #dbeafe 0%, #eef2ff 100%);
+          border: 1px solid #dbe3f0;
+          display: grid;
+          place-items: center;
+          font-size: 12px;
+          font-weight: 1000;
+          color: #0f172a;
+          flex: 0 0 auto;
+        }
+
+        .ownerText {
+          min-width: 0;
+        }
+
+        .ownerName {
+          font-size: 13px;
+          font-weight: 900;
+          line-height: 1.1;
+          color: #0f172a;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .ownerSub {
+          margin-top: 3px;
+          font-size: 11px;
+          font-weight: 800;
+          color: #64748b;
+          line-height: 1.1;
+        }
+
+        .headRightPill {
+          padding: 6px 10px;
+          border-radius: 999px;
+          background: #f8fafc;
+          border: 1px solid #e5e7eb;
+          font-size: 11px;
+          font-weight: 900;
+          color: #475569;
+          white-space: nowrap;
+        }
+
+        .menuWrap {
+          position: relative;
+          flex: 0 0 auto;
+          z-index: 120;
+        }
+
+        .menuBtn {
+          width: 36px;
+          height: 36px;
+          border-radius: 999px;
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          color: #0f172a;
+          font-size: 24px;
+          line-height: 0;
+          font-weight: 900;
+          cursor: pointer;
+          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+        }
+
+        .menuOverlay {
+          position: fixed;
+          inset: 0;
+          z-index: 0;
+          background: transparent;
+          border: 0;
+          padding: 0;
+          margin: 0;
+          cursor: default;
+        }
+
+        .menuCard {
+          position: absolute;
+          top: calc(100% + 8px);
+          right: 0;
+          width: 196px;
+          border: 1px solid #e5e7eb;
+          background: rgba(255, 255, 255, 0.98);
+          border-radius: 18px;
+          box-shadow: 0 20px 44px rgba(15, 23, 42, 0.14);
+          overflow: hidden;
+          z-index: 2;
+        }
+
+        .menuItem {
+          width: 100%;
+          border: 0;
+          background: #fff;
+          text-align: left;
+          padding: 12px 14px;
+          font-size: 13px;
+          font-weight: 900;
+          color: #0f172a;
+          cursor: pointer;
+        }
+
+        .menuItem + .menuItem {
+          border-top: 1px solid #eef2f7;
+        }
+
+        .menuItem.danger {
+          color: #b91c1c;
         }
 
         .heroMedia {
-          border-bottom: 1px solid #eef2f7;
           background: #f8fafc;
         }
 
@@ -1310,13 +1675,14 @@ export default function ItemDetailPage() {
           display: grid;
           place-items: center;
           color: #64748b;
+          font-size: 13px;
           font-weight: 900;
           background: linear-gradient(135deg, #f8fafc 0%, #ffffff 100%);
         }
 
         .requestHero {
-          padding: 18px;
-          min-height: 190px;
+          padding: 14px;
+          min-height: 170px;
           background: linear-gradient(135deg, #eff6ff 0%, #ffffff 100%);
           display: flex;
           flex-direction: column;
@@ -1330,22 +1696,22 @@ export default function ItemDetailPage() {
         }
 
         .requestHeroText {
-          margin-top: 18px;
-          font-size: 15px;
-          line-height: 1.6;
+          margin-top: 14px;
+          font-size: 13px;
+          line-height: 1.55;
           color: #0f172a;
           white-space: pre-wrap;
         }
 
         .heroBody {
-          padding: 18px;
+          padding: 14px;
         }
 
         .titleRow {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
-          gap: 12px;
+          gap: 10px;
         }
 
         .titleWrap {
@@ -1355,130 +1721,125 @@ export default function ItemDetailPage() {
 
         .h1 {
           margin: 0;
-          font-size: 30px;
-          line-height: 1.05;
+          font-size: 22px;
+          line-height: 1.08;
           font-weight: 1000;
-          letter-spacing: -0.05em;
+          letter-spacing: -0.04em;
           overflow-wrap: anywhere;
         }
 
         .sub {
-          margin-top: 8px;
-          color: #64748b;
-          font-weight: 800;
-          line-height: 1.45;
-        }
-
-        .metaStack {
-          margin-top: 16px;
-          display: grid;
-          gap: 10px;
-        }
-
-        .metaCard {
-          border: 1px solid #eef2f7;
-          background: #fff;
-          border-radius: 18px;
-          padding: 12px 14px;
-        }
-
-        .metaLabel {
-          font-size: 12px;
-          color: #64748b;
-          font-weight: 900;
-        }
-
-        .metaValue {
           margin-top: 6px;
-          font-size: 14px;
-          color: #0f172a;
-          font-weight: 900;
+          color: #64748b;
+          font-size: 12px;
+          font-weight: 800;
           line-height: 1.4;
         }
 
-        .muted {
-          color: #64748b;
-          font-weight: 800;
+        .caption {
+          margin-top: 10px;
+          color: #334155;
+          font-size: 13px;
+          line-height: 1.55;
+          white-space: pre-wrap;
         }
 
-        .ownerActions {
-          margin-top: 16px;
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
+        .metaRow {
+          margin-top: 12px;
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
         }
 
-        .softBtn {
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-          padding: 11px 14px;
+        .miniMeta {
+          border: 1px solid #eef2f7;
           border-radius: 16px;
+          background: #fafbfc;
+          padding: 10px 11px;
+          min-width: 0;
+        }
+
+        .metaKey {
+          display: block;
+          font-size: 10px;
+          font-weight: 1000;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+          color: #64748b;
+        }
+
+        .metaVal {
+          display: block;
+          margin-top: 5px;
+          font-size: 12px;
+          line-height: 1.3;
           font-weight: 900;
-          cursor: pointer;
+          color: #0f172a;
+          overflow-wrap: anywhere;
         }
 
         .panel {
-          margin-top: 14px;
-          background: rgba(255, 255, 255, 0.94);
-          border: 1px solid #e5e7eb;
-          border-radius: 24px;
-          padding: 16px;
-          box-shadow: 0 18px 44px rgba(15, 23, 42, 0.05);
+          margin-top: 12px;
+          background: #fff;
+          border: 1px solid #e8ebf0;
+          border-radius: 22px;
+          padding: 14px;
+          box-shadow: 0 16px 38px rgba(15, 23, 42, 0.04);
+        }
+
+        .compactPanel {
+          padding: 12px;
+        }
+
+        .compactGrid {
+          display: grid;
+          gap: 8px;
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .compactBox {
+          border: 1px solid #eef2f7;
+          border-radius: 16px;
+          background: #fafbfc;
+          padding: 10px 11px;
+        }
+
+        .compactBox.full {
+          grid-column: 1 / -1;
+        }
+
+        .compactKey {
+          font-size: 10px;
+          color: #64748b;
+          font-weight: 1000;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+        }
+
+        .compactVal {
+          margin-top: 5px;
+          font-size: 12px;
+          color: #0f172a;
+          font-weight: 900;
+          line-height: 1.35;
         }
 
         .panelTop {
           display: flex;
           justify-content: space-between;
-          gap: 12px;
-          align-items: baseline;
-          margin-bottom: 12px;
+          gap: 10px;
+          align-items: center;
+          margin-bottom: 10px;
         }
 
         .panelTitle {
-          font-size: 16px;
+          font-size: 15px;
           font-weight: 1000;
-        }
-
-        .panelBody {
-          color: #334155;
-          line-height: 1.65;
-          white-space: pre-wrap;
-        }
-
-        .infoGrid {
-          display: grid;
-          gap: 10px;
-          grid-template-columns: 1fr;
-        }
-
-        .infoBox {
-          border: 1px solid #eef2f7;
-          border-radius: 18px;
-          background: #fff;
-          padding: 12px 14px;
-        }
-
-        .infoBox.full {
-          grid-column: 1 / -1;
-        }
-
-        .infoKey {
-          font-size: 12px;
-          color: #64748b;
-          font-weight: 900;
-        }
-
-        .infoVal {
-          margin-top: 6px;
-          font-size: 14px;
-          color: #0f172a;
-          font-weight: 900;
         }
 
         .smallMuted {
           color: #64748b;
-          font-size: 13px;
+          font-size: 12px;
           font-weight: 900;
         }
 
@@ -1486,55 +1847,58 @@ export default function ItemDetailPage() {
           border: 1px dashed #cbd5e1;
           border-radius: 18px;
           background: #f8fafc;
-          padding: 18px;
+          padding: 16px;
           color: #64748b;
+          font-size: 13px;
           font-weight: 900;
           text-align: center;
         }
 
         .offerList {
           display: grid;
-          gap: 12px;
+          gap: 10px;
         }
 
         .offerCard {
           border: 1px solid #eef2f7;
           background: #fff;
-          border-radius: 20px;
-          padding: 14px;
+          border-radius: 18px;
+          padding: 12px;
         }
 
         .offerTop {
           display: flex;
           justify-content: space-between;
-          gap: 12px;
+          gap: 10px;
           flex-wrap: wrap;
           align-items: center;
         }
 
         .offerName {
+          font-size: 13px;
           font-weight: 1000;
           color: #0f172a;
         }
 
         .offerMeta {
-          margin-top: 10px;
+          margin-top: 8px;
           color: #64748b;
-          font-size: 13px;
+          font-size: 12px;
           font-weight: 900;
         }
 
         .offerNote {
-          margin-top: 10px;
+          margin-top: 8px;
           color: #334155;
+          font-size: 13px;
           white-space: pre-wrap;
           line-height: 1.5;
         }
 
         .offerActions {
-          margin-top: 12px;
+          margin-top: 10px;
           display: flex;
-          gap: 10px;
+          gap: 8px;
           flex-wrap: wrap;
         }
 
@@ -1548,14 +1912,15 @@ export default function ItemDetailPage() {
         }
 
         .pill {
-          padding: 7px 11px;
-          font-size: 12px;
+          padding: 6px 10px;
+          font-size: 11px;
           border: 1px solid #e5e7eb;
+          white-space: nowrap;
         }
 
         .miniPill {
           padding: 6px 10px;
-          font-size: 12px;
+          font-size: 11px;
           border: 1px solid #bfdbfe;
           background: #dbeafe;
           color: #1d4ed8;
@@ -1591,9 +1956,15 @@ export default function ItemDetailPage() {
           color: #9f1239;
         }
 
+        .muted {
+          color: #64748b;
+          font-weight: 800;
+        }
+
         .btn {
-          border-radius: 16px;
-          padding: 10px 13px;
+          border-radius: 14px;
+          padding: 9px 12px;
+          font-size: 12px;
           font-weight: 900;
           cursor: pointer;
           border: 1px solid #e5e7eb;
@@ -1641,23 +2012,23 @@ export default function ItemDetailPage() {
           right: 0;
           z-index: 70;
           padding: 10px 12px;
-          background: rgba(248, 250, 252, 0.92);
+          background: rgba(246, 247, 251, 0.92);
           backdrop-filter: blur(14px);
           border-top: 1px solid rgba(15, 23, 42, 0.06);
-          box-shadow: 0 -18px 44px rgba(15, 23, 42, 0.08);
+          box-shadow: 0 -16px 36px rgba(15, 23, 42, 0.08);
         }
 
         .barInner {
-          max-width: 980px;
+          max-width: 920px;
           margin: 0 auto;
           display: grid;
-          grid-template-columns: 1.4fr 1fr;
           gap: 10px;
         }
 
         .cta {
-          height: 50px;
-          border-radius: 18px;
+          height: 48px;
+          border-radius: 16px;
+          font-size: 14px;
           font-weight: 1000;
           cursor: pointer;
           border: none;
@@ -1667,7 +2038,7 @@ export default function ItemDetailPage() {
         .cta.primary {
           background: #03133d;
           color: #fff;
-          box-shadow: 0 18px 35px rgba(3, 19, 61, 0.2);
+          box-shadow: 0 16px 32px rgba(3, 19, 61, 0.18);
         }
 
         .cta.secondary {
@@ -1698,8 +2069,8 @@ export default function ItemDetailPage() {
           max-width: 520px;
           background: #fff;
           border: 1px solid #e5e7eb;
-          border-radius: 24px;
-          padding: 16px;
+          border-radius: 22px;
+          padding: 15px;
           box-shadow: 0 30px 80px rgba(15, 23, 42, 0.18);
         }
 
@@ -1711,7 +2082,7 @@ export default function ItemDetailPage() {
         }
 
         .modalTitle {
-          font-size: 16px;
+          font-size: 15px;
           font-weight: 1000;
           color: #0f172a;
         }
@@ -1720,15 +2091,17 @@ export default function ItemDetailPage() {
           border: 1px solid #e5e7eb;
           background: #fff;
           color: #0f172a;
-          padding: 7px 11px;
-          border-radius: 14px;
+          padding: 7px 10px;
+          border-radius: 12px;
           cursor: pointer;
+          font-size: 12px;
           font-weight: 1000;
         }
 
         .modalHint {
           margin-top: 10px;
           color: #475569;
+          font-size: 13px;
           font-weight: 700;
           line-height: 1.45;
         }
@@ -1741,7 +2114,7 @@ export default function ItemDetailPage() {
           display: block;
           margin-bottom: 6px;
           color: #0f172a;
-          font-size: 13px;
+          font-size: 12px;
           font-weight: 900;
         }
 
@@ -1751,14 +2124,15 @@ export default function ItemDetailPage() {
           background: #fff;
           color: #0f172a;
           border: 1px solid #e5e7eb;
-          border-radius: 16px;
-          padding: 12px 13px;
+          border-radius: 14px;
+          padding: 11px 12px;
           outline: none;
+          font-size: 13px;
           font-weight: 800;
         }
 
         .field textarea {
-          min-height: 100px;
+          min-height: 96px;
           resize: vertical;
         }
 
@@ -1801,6 +2175,7 @@ export default function ItemDetailPage() {
         }
 
         .imgTitle {
+          font-size: 13px;
           font-weight: 1000;
           overflow: hidden;
           text-overflow: ellipsis;
@@ -1820,13 +2195,14 @@ export default function ItemDetailPage() {
           position: fixed;
           left: 50%;
           transform: translateX(-50%);
-          top: 16px;
+          top: 14px;
           z-index: 10000;
-          border-radius: 16px;
-          padding: 10px 13px;
+          border-radius: 14px;
+          padding: 10px 12px;
           background: #fff;
           border: 1px solid #e5e7eb;
-          box-shadow: 0 18px 50px rgba(15, 23, 42, 0.14);
+          box-shadow: 0 16px 42px rgba(15, 23, 42, 0.14);
+          font-size: 13px;
           font-weight: 1000;
           max-width: min(720px, calc(100vw - 24px));
         }
@@ -1841,29 +2217,38 @@ export default function ItemDetailPage() {
 
         @media (min-width: 760px) {
           .heroImg {
-            height: 420px;
+            height: 430px;
           }
 
-          .metaStack {
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-          }
-
-          .infoGrid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+          .requestHero {
+            min-height: 220px;
           }
         }
 
-        @media (max-width: 520px) {
-          .h1 {
-            font-size: 26px;
-          }
-
+        @media (max-width: 560px) {
           .heroImg {
             height: 300px;
           }
 
-          .barInner {
+          .h1 {
+            font-size: 20px;
+          }
+
+          .metaRow {
             grid-template-columns: 1fr;
+          }
+
+          .compactGrid {
+            grid-template-columns: 1fr;
+          }
+
+          .barInner {
+            grid-template-columns: 1fr !important;
+          }
+
+          .menuCard {
+            right: 0;
+            width: 188px;
           }
         }
       `}</style>

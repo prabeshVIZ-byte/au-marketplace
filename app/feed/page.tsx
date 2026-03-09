@@ -110,7 +110,6 @@ type MyEventLoveRow = {
   event_id: string;
 };
 
-const brandGreen = "#10b981";
 const NAV_APPROX_HEIGHT = 86;
 const PAGE_BOTTOM_PAD = NAV_APPROX_HEIGHT + 28;
 const ATTEND_TABLE = "event_attendees";
@@ -231,11 +230,6 @@ function formatTimeRange(startsAtISO: string, endsAtISO: string | null) {
   return `${day} ${st} → ${endDay} ${et}`;
 }
 
-function loveCountText(count: number) {
-  if (count === 1) return "1 love";
-  return `${count} loves`;
-}
-
 function isInteractiveDoubleTapTarget(target: EventTarget | null) {
   const el = target as HTMLElement | null;
   if (!el) return false;
@@ -257,6 +251,32 @@ async function getAuthState(): Promise<AuthState> {
     isAshland,
     isLoggedIn: !!userId && !!userEmail && isAshland,
   };
+}
+
+function LoveButton({
+  active,
+  count,
+  disabled,
+  onClick,
+}: {
+  active: boolean;
+  count: number;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`loveBtn ${active ? "active" : ""}`}
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      data-no-card-doubletap="true"
+      aria-label={active ? "Unlike" : "Like"}
+    >
+      <span className="loveBtnGlyph">{active ? "♥" : "♡"}</span>
+      <span className="loveBtnCount">{count}</span>
+    </button>
+  );
 }
 
 export default function FeedPage() {
@@ -286,8 +306,8 @@ export default function FeedPage() {
   const [likedItemMap, setLikedItemMap] = useState<Record<string, boolean>>({});
   const [likedEventMap, setLikedEventMap] = useState<Record<string, boolean>>({});
   const [savingLoveKey, setSavingLoveKey] = useState<string | null>(null);
-  const [burstCardKey, setBurstCardKey] = useState<string | null>(null);
 
+  const [burstCardKey, setBurstCardKey] = useState<string | null>(null);
   const burstTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapRef = useRef<Record<string, { ts: number; x: number; y: number }>>({});
 
@@ -381,89 +401,6 @@ export default function FeedPage() {
     setMyAttending(next);
   }
 
-  async function loadLoveStateForFeed(nextAuth?: AuthState, nextItems?: FeedRow[], nextEvents?: EventRow[]) {
-    const resolvedAuth = nextAuth ?? auth;
-    const resolvedItems = nextItems ?? items;
-    const resolvedEvents = nextEvents ?? events;
-
-    const itemIds = resolvedItems.map((x) => x.id);
-    const eventIds = resolvedEvents.map((x) => x.id);
-
-    try {
-      if (itemIds.length > 0) {
-        const { data: itemCountRows } = await supabase
-          .from("v_item_love_counts")
-          .select("item_id,love_count")
-          .in("item_id", itemIds);
-
-        const nextItemCounts: Record<string, number> = {};
-        for (const row of (itemCountRows as ItemLoveCountRow[]) || []) {
-          nextItemCounts[row.item_id] = Number(row.love_count ?? 0);
-        }
-        setItemLoveCounts(nextItemCounts);
-      } else {
-        setItemLoveCounts({});
-      }
-
-      if (eventIds.length > 0) {
-        const { data: eventCountRows } = await supabase
-          .from("v_event_love_counts")
-          .select("event_id,love_count")
-          .in("event_id", eventIds);
-
-        const nextEventCounts: Record<string, number> = {};
-        for (const row of (eventCountRows as EventLoveCountRow[]) || []) {
-          nextEventCounts[row.event_id] = Number(row.love_count ?? 0);
-        }
-        setEventLoveCounts(nextEventCounts);
-      } else {
-        setEventLoveCounts({});
-      }
-
-      if (resolvedAuth.isLoggedIn && resolvedAuth.userId) {
-        if (itemIds.length > 0) {
-          const { data: myItemLikes } = await supabase
-            .from("post_likes")
-            .select("item_id")
-            .eq("user_id", resolvedAuth.userId)
-            .in("item_id", itemIds);
-
-          const nextLikedItems: Record<string, boolean> = {};
-          for (const row of (myItemLikes as MyItemLoveRow[]) || []) {
-            if (row.item_id) nextLikedItems[row.item_id] = true;
-          }
-          setLikedItemMap(nextLikedItems);
-        } else {
-          setLikedItemMap({});
-        }
-
-        if (eventIds.length > 0) {
-          const { data: myEventLikes } = await supabase
-            .from("post_likes")
-            .select("event_id")
-            .eq("user_id", resolvedAuth.userId)
-            .in("event_id", eventIds);
-
-          const nextLikedEvents: Record<string, boolean> = {};
-          for (const row of (myEventLikes as MyEventLoveRow[]) || []) {
-            if (row.event_id) nextLikedEvents[row.event_id] = true;
-          }
-          setLikedEventMap(nextLikedEvents);
-        } else {
-          setLikedEventMap({});
-        }
-      } else {
-        setLikedItemMap({});
-        setLikedEventMap({});
-      }
-    } catch {
-      setItemLoveCounts({});
-      setEventLoveCounts({});
-      setLikedItemMap({});
-      setLikedEventMap({});
-    }
-  }
-
   async function loadFeedItems(nextAuth: AuthState) {
     setLoadingItems(true);
     setErrItems(null);
@@ -514,13 +451,9 @@ export default function FeedPage() {
       } else {
         setMyInterestMap({});
       }
-
-      await loadLoveStateForFeed(nextAuth, visible, events);
     } catch (e: any) {
       setItems([]);
       setMyInterestMap({});
-      setItemLoveCounts({});
-      setLikedItemMap({});
       setErrItems(e?.message || "Error loading feed.");
     } finally {
       setLoadingItems(false);
@@ -552,16 +485,91 @@ export default function FeedPage() {
       } else {
         setMyAttending({});
       }
-
-      await loadLoveStateForFeed(nextAuth, items, rows);
     } catch (e: any) {
       setEvents([]);
       setMyAttending({});
-      setEventLoveCounts({});
-      setLikedEventMap({});
       setErrEvents(e?.message || "Error loading events.");
     } finally {
       setLoadingEvents(false);
+    }
+  }
+
+  async function loadLoveStateForFeed(nextAuth: AuthState, nextItems: FeedRow[], nextEvents: EventRow[]) {
+    const itemIds = nextItems.map((x) => x.id);
+    const eventIds = nextEvents.map((x) => x.id);
+
+    try {
+      if (itemIds.length > 0) {
+        const { data: itemCountRows } = await supabase
+          .from("v_item_love_counts")
+          .select("item_id,love_count")
+          .in("item_id", itemIds);
+
+        const nextItemCounts: Record<string, number> = {};
+        for (const row of (itemCountRows as ItemLoveCountRow[]) || []) {
+          nextItemCounts[row.item_id] = Number(row.love_count ?? 0);
+        }
+        setItemLoveCounts(nextItemCounts);
+      } else {
+        setItemLoveCounts({});
+      }
+
+      if (eventIds.length > 0) {
+        const { data: eventCountRows } = await supabase
+          .from("v_event_love_counts")
+          .select("event_id,love_count")
+          .in("event_id", eventIds);
+
+        const nextEventCounts: Record<string, number> = {};
+        for (const row of (eventCountRows as EventLoveCountRow[]) || []) {
+          nextEventCounts[row.event_id] = Number(row.love_count ?? 0);
+        }
+        setEventLoveCounts(nextEventCounts);
+      } else {
+        setEventLoveCounts({});
+      }
+
+      if (nextAuth.isLoggedIn && nextAuth.userId) {
+        if (itemIds.length > 0) {
+          const { data: myItemLikes } = await supabase
+            .from("post_likes")
+            .select("item_id")
+            .eq("user_id", nextAuth.userId)
+            .in("item_id", itemIds);
+
+          const nextLikedItems: Record<string, boolean> = {};
+          for (const row of (myItemLikes as MyItemLoveRow[]) || []) {
+            if (row.item_id) nextLikedItems[row.item_id] = true;
+          }
+          setLikedItemMap(nextLikedItems);
+        } else {
+          setLikedItemMap({});
+        }
+
+        if (eventIds.length > 0) {
+          const { data: myEventLikes } = await supabase
+            .from("post_likes")
+            .select("event_id")
+            .eq("user_id", nextAuth.userId)
+            .in("event_id", eventIds);
+
+          const nextLikedEvents: Record<string, boolean> = {};
+          for (const row of (myEventLikes as MyEventLoveRow[]) || []) {
+            if (row.event_id) nextLikedEvents[row.event_id] = true;
+          }
+          setLikedEventMap(nextLikedEvents);
+        } else {
+          setLikedEventMap({});
+        }
+      } else {
+        setLikedItemMap({});
+        setLikedEventMap({});
+      }
+    } catch {
+      setItemLoveCounts({});
+      setEventLoveCounts({});
+      setLikedItemMap({});
+      setLikedEventMap({});
     }
   }
 
@@ -751,22 +759,26 @@ export default function FeedPage() {
     }
   }
 
+  function handleTabChange(nextTab: "items" | "requests" | "events") {
+    setTab(nextTab);
+    setQuery("");
+    setCategoryFilter("all");
+    setFiltersOpen(false);
+
+    if (nextTab === "events") {
+      setSort("newest");
+    }
+
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    void refreshAll();
+  }
+
   useEffect(() => {
     if (!query) return;
     setSearchPulse(true);
     const t = setTimeout(() => setSearchPulse(false), 220);
     return () => clearTimeout(t);
   }, [query]);
-
-  useEffect(() => {
-    setQuery("");
-    setCategoryFilter("all");
-    setFiltersOpen(false);
-
-    if (tab === "events") {
-      setSort("newest");
-    }
-  }, [tab]);
 
   useEffect(() => {
     refreshAll();
@@ -793,6 +805,10 @@ export default function FeedPage() {
       if (burstTimerRef.current) clearTimeout(burstTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    void loadLoveStateForFeed(auth, items, events);
+  }, [auth.userId, auth.isLoggedIn, items, events]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -1001,21 +1017,21 @@ export default function FeedPage() {
           <div className="seg3" role="tablist" aria-label="Feed tabs">
             <button
               className={`segBtn ${tab === "items" ? "active" : ""}`}
-              onClick={() => setTab("items")}
+              onClick={() => handleTabChange("items")}
               type="button"
             >
               Items
             </button>
             <button
               className={`segBtn ${tab === "requests" ? "active" : ""}`}
-              onClick={() => setTab("requests")}
+              onClick={() => handleTabChange("requests")}
               type="button"
             >
               Requests
             </button>
             <button
               className={`segBtn ${tab === "events" ? "active" : ""}`}
-              onClick={() => setTab("events")}
+              onClick={() => handleTabChange("events")}
               type="button"
             >
               Events
@@ -1171,7 +1187,7 @@ export default function FeedPage() {
                     type="button"
                     data-no-card-doubletap="true"
                   >
-                    💗 Most loved
+                    ♥ Popular
                   </button>
                 </div>
               </div>
@@ -1258,20 +1274,6 @@ export default function FeedPage() {
                   <div className="media">
                     <div className="badge badgeEvent">EVENT</div>
 
-                    <button
-                      className={`loveFab ${loved ? "active" : ""}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void toggleEventLove(ev.id);
-                      }}
-                      type="button"
-                      aria-label={loved ? "Unlove event" : "Love event"}
-                      data-no-card-doubletap="true"
-                    >
-                      <span className="loveGlyph">{loved ? "♥" : "♡"}</span>
-                      <span className="loveFabCount">{loveCount}</span>
-                    </button>
-
                     {ev.photo_url ? (
                       <button
                         className="mediaBtn"
@@ -1290,8 +1292,6 @@ export default function FeedPage() {
                     ) : (
                       <div className="noPhoto">No flyer</div>
                     )}
-
-                    {loveBusy ? <div className="miniSaving">Saving…</div> : null}
                   </div>
 
                   <div className="body">
@@ -1309,12 +1309,18 @@ export default function FeedPage() {
 
                     <div className="desc clamp2">{ev.description}</div>
 
-                    <div className="footerRow">
-                      <span className={`loveText ${loved ? "active" : ""}`}>
-                        {loved ? "♥" : "♡"} {loveCountText(loveCount)}
-                      </span>
-                      <span className="small">{ev.link_url ? "Link included" : "No link"}</span>
-                      <span className="small">Starts: {formatShortDate(ev.starts_at)}</span>
+                    <div className="socialRow">
+                      <LoveButton
+                        active={loved}
+                        count={loveCount}
+                        disabled={loveBusy}
+                        onClick={() => void toggleEventLove(ev.id)}
+                      />
+
+                      <div className="metaRight">
+                        <span className="small">{ev.link_url ? "Link included" : "No link"}</span>
+                        <span className="small">Starts: {formatShortDate(ev.starts_at)}</span>
+                      </div>
                     </div>
 
                     <div className="actions">
@@ -1385,48 +1391,18 @@ export default function FeedPage() {
                     <div className="reqHero">
                       <div className="badge badgeRequest">{itemBadgeLabel(item)}</div>
 
-                      <button
-                        className={`loveFab ${loved ? "active" : ""}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void toggleItemLove(item.id);
-                        }}
-                        type="button"
-                        aria-label={loved ? "Unlove request" : "Love request"}
-                        data-no-card-doubletap="true"
-                      >
-                        <span className="loveGlyph">{loved ? "♥" : "♡"}</span>
-                        <span className="loveFabCount">{loveCount}</span>
-                      </button>
-
                       <div className="reqMeta">
                         {group}
                         {tf ? ` • ${tf}` : ""}
                         {loc ? ` • ${loc}` : ""}
                       </div>
                       <div className="title clamp2">{item.title}</div>
-
-                      {loveBusy ? <div className="miniSaving requestSaving">Saving…</div> : null}
                     </div>
                   ) : (
                     <div className="media">
                       <div className={`badge ${publicState === "in_talks" ? "badgeTalks" : "badgeItem"}`}>
                         {itemBadgeLabel(item)}
                       </div>
-
-                      <button
-                        className={`loveFab ${loved ? "active" : ""}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void toggleItemLove(item.id);
-                        }}
-                        type="button"
-                        aria-label={loved ? "Unlove item" : "Love item"}
-                        data-no-card-doubletap="true"
-                      >
-                        <span className="loveGlyph">{loved ? "♥" : "♡"}</span>
-                        <span className="loveFabCount">{loveCount}</span>
-                      </button>
 
                       {item.photo_url ? (
                         <button
@@ -1446,8 +1422,6 @@ export default function FeedPage() {
                       ) : (
                         <div className="noPhoto">No photo</div>
                       )}
-
-                      {loveBusy ? <div className="miniSaving">Saving…</div> : null}
                     </div>
                   )}
 
@@ -1472,20 +1446,25 @@ export default function FeedPage() {
 
                     <div className="desc clamp2">{item.description || "—"}</div>
 
-                    <div className="footerRow">
-                      <span className={`loveText ${loved ? "active" : ""}`}>
-                        {loved ? "♥" : "♡"} {loveCountText(loveCount)}
-                      </span>
+                    <div className="socialRow">
+                      <LoveButton
+                        active={loved}
+                        count={loveCount}
+                        disabled={loveBusy}
+                        onClick={() => void toggleItemLove(item.id)}
+                      />
 
-                      {postType === "request" ? (
-                        <span className="small">Tap to offer help</span>
-                      ) : (
-                        <span className="small">{item.interest_count || 0} requests</span>
-                      )}
+                      <div className="metaRight">
+                        {postType === "request" ? (
+                          <span className="small">Tap to offer help</span>
+                        ) : (
+                          <span className="small">{item.interest_count || 0} requests</span>
+                        )}
 
-                      {item.expires_at ? (
-                        <span className="small">Ends: {formatShortDate(item.expires_at)}</span>
-                      ) : null}
+                        {item.expires_at ? (
+                          <span className="small">Ends: {formatShortDate(item.expires_at)}</span>
+                        ) : null}
+                      </div>
                     </div>
 
                     <div className="actions">
@@ -2006,7 +1985,7 @@ export default function FeedPage() {
           height: 44px;
           border-radius: 14px;
           border: none;
-          background: ${brandGreen};
+          background: #10b981;
           color: #ffffff;
           font-weight: 950;
           cursor: pointer;
@@ -2132,56 +2111,6 @@ export default function FeedPage() {
           color: #1e3a8a;
         }
 
-        .loveFab {
-          position: absolute;
-          top: 12px;
-          right: 12px;
-          z-index: 3;
-          height: 38px;
-          min-width: 38px;
-          padding: 0 10px;
-          border-radius: 999px;
-          border: 1px solid rgba(255, 255, 255, 0.92);
-          background: rgba(255, 255, 255, 0.92);
-          color: #374151;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          gap: 6px;
-          cursor: pointer;
-          box-shadow: 0 10px 28px rgba(15, 23, 42, 0.14);
-          backdrop-filter: blur(10px);
-          transition: transform 0.14s ease, box-shadow 0.14s ease, background 0.18s ease,
-            color 0.18s ease, border-color 0.18s ease;
-        }
-
-        .loveFab:active {
-          transform: scale(0.96);
-        }
-
-        .loveFab.active {
-          color: #be185d;
-          border-color: rgba(236, 72, 153, 0.28);
-          background: linear-gradient(
-            135deg,
-            rgba(244, 114, 182, 0.18) 0%,
-            rgba(16, 185, 129, 0.14) 100%
-          );
-          box-shadow: 0 12px 28px rgba(236, 72, 153, 0.18);
-        }
-
-        .loveGlyph {
-          font-size: 18px;
-          line-height: 1;
-          transform: translateY(-0.5px);
-        }
-
-        .loveFabCount {
-          font-size: 12px;
-          font-weight: 950;
-          line-height: 1;
-        }
-
         .bigHeartBurst {
           position: absolute;
           inset: 0;
@@ -2190,7 +2119,7 @@ export default function FeedPage() {
           display: flex;
           align-items: center;
           justify-content: center;
-          font-size: 86px;
+          font-size: 88px;
           font-weight: 900;
           color: #ec4899;
           text-shadow: 0 16px 34px rgba(236, 72, 153, 0.26);
@@ -2214,25 +2143,6 @@ export default function FeedPage() {
             opacity: 0;
             transform: scale(1.18);
           }
-        }
-
-        .miniSaving {
-          position: absolute;
-          right: 12px;
-          bottom: 12px;
-          z-index: 3;
-          padding: 7px 10px;
-          border-radius: 999px;
-          background: rgba(15, 23, 42, 0.72);
-          color: #fff;
-          font-size: 11px;
-          font-weight: 900;
-          backdrop-filter: blur(8px);
-        }
-
-        .requestSaving {
-          right: 16px;
-          bottom: 16px;
         }
 
         .reqMeta {
@@ -2291,28 +2201,73 @@ export default function FeedPage() {
           min-height: 40px;
         }
 
-        .footerRow {
-          margin-top: 10px;
+        .socialRow {
+          margin-top: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        .metaRight {
           display: flex;
           flex-wrap: wrap;
+          justify-content: flex-end;
           gap: 8px 12px;
-          align-items: center;
           color: #6b7280;
           font-weight: 900;
           font-size: 12px;
+          text-align: right;
+        }
+
+        .loveBtn {
+          height: 40px;
+          min-width: 68px;
+          padding: 0 12px;
+          border-radius: 999px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          color: #374151;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          cursor: pointer;
+          box-shadow: 0 6px 16px rgba(15, 23, 42, 0.05);
+          transition: transform 0.14s ease, background 0.18s ease, color 0.18s ease,
+            border-color 0.18s ease, box-shadow 0.18s ease;
+          flex-shrink: 0;
+        }
+
+        .loveBtn:active {
+          transform: scale(0.96);
+        }
+
+        .loveBtn.active {
+          color: #be185d;
+          border-color: rgba(236, 72, 153, 0.28);
+          background: linear-gradient(
+            135deg,
+            rgba(244, 114, 182, 0.18) 0%,
+            rgba(16, 185, 129, 0.14) 100%
+          );
+          box-shadow: 0 10px 22px rgba(236, 72, 153, 0.14);
+        }
+
+        .loveBtnGlyph {
+          font-size: 19px;
+          line-height: 1;
+          transform: translateY(-0.5px);
+        }
+
+        .loveBtnCount {
+          font-size: 13px;
+          font-weight: 950;
+          line-height: 1;
         }
 
         .small {
           font-size: 12px;
-        }
-
-        .loveText {
-          color: #6b7280;
-          font-weight: 950;
-        }
-
-        .loveText.active {
-          color: #be185d;
         }
 
         .actions {
@@ -2344,7 +2299,7 @@ export default function FeedPage() {
 
         .btnPrimary {
           border: none;
-          background: ${brandGreen};
+          background: #10b981;
           color: #ffffff;
           box-shadow: 0 14px 30px rgba(16, 185, 129, 0.2);
         }
@@ -2433,13 +2388,18 @@ export default function FeedPage() {
             grid-template-columns: 1fr 1fr;
           }
 
-          .loveFab {
-            top: 10px;
-            right: 10px;
+          .socialRow {
+            align-items: flex-start;
+            flex-direction: column;
+          }
+
+          .metaRight {
+            justify-content: flex-start;
+            text-align: left;
           }
 
           .bigHeartBurst {
-            font-size: 76px;
+            font-size: 78px;
           }
         }
       `}</style>
