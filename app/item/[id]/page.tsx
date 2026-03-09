@@ -444,7 +444,7 @@ export default function ItemDetailPage() {
                         type="button"
                         onClick={() => {
                           setMenuOpen(false);
-                          router.push(`/edit/${item.id}`);
+                          router.push(`/edit/${item.id}/edit`);
                         }}
                       >
                         Edit post
