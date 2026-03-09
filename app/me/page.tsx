@@ -280,8 +280,15 @@ function normStatus(s: string | null | undefined) {
   return (s ?? "").trim().toLowerCase();
 }
 
-function isArchivedStatus(s: string | null | undefined) {
-  return ["claimed", "completed"].includes(normStatus(s));
+function isArchivedItem(item: MyItemRow) {
+  const status = normStatus(item.status);
+  const type = item.post_type ?? "give";
+
+  if (type === "event") {
+    return status === "completed";
+  }
+
+  return status === "claimed" || status === "completed";
 }
 
 function fmtWhen(ts: string | null | undefined) {
@@ -413,18 +420,18 @@ export default function AccountPage() {
   const itemsEvent = useMemo(() => myItems.filter((x) => matchesTab(x, "event")), [myItems]);
 
   const currentTabItems = useMemo(() => {
-  if (mediaTab === "give") return itemsGive;
-  if (mediaTab === "request") return itemsRequest;
-  return itemsEvent;
-}, [mediaTab, itemsGive, itemsRequest, itemsEvent]);
+    if (mediaTab === "give") return itemsGive;
+    if (mediaTab === "request") return itemsRequest;
+    return itemsEvent;
+  }, [mediaTab, itemsGive, itemsRequest, itemsEvent]);
 
-const activeListingsCount = useMemo(() => {
-  return currentTabItems.filter((x) => !isArchivedStatus(x.status)).length;
-}, [currentTabItems]);
+  const activeListingsCount = useMemo(() => {
+    return currentTabItems.filter((x) => !isArchivedItem(x)).length;
+  }, [currentTabItems]);
 
-const archivedListingsCount = useMemo(() => {
-  return currentTabItems.filter((x) => isArchivedStatus(x.status)).length;
-}, [currentTabItems]);
+  const archivedListingsCount = useMemo(() => {
+    return currentTabItems.filter((x) => isArchivedItem(x)).length;
+  }, [currentTabItems]);
 
   const unseenNotificationCount = useMemo(() => notifications.filter((n) => !n.seen_at).length, [notifications]);
 
@@ -438,7 +445,7 @@ const archivedListingsCount = useMemo(() => {
 
   const gridSource = useMemo(() => {
     const source = mediaTab === "give" ? itemsGive : mediaTab === "request" ? itemsRequest : itemsEvent;
-    return source.filter((x) => (gridMode === "active" ? !isArchivedStatus(x.status) : isArchivedStatus(x.status)));
+    return source.filter((x) => (gridMode === "active" ? !isArchivedItem(x) : isArchivedItem(x)));
   }, [gridMode, itemsEvent, itemsGive, itemsRequest, mediaTab]);
 
   const gridTotalForTab = useMemo(() => {
@@ -492,61 +499,61 @@ const archivedListingsCount = useMemo(() => {
   }
 
   async function loadMyListings(uid: string) {
-  const [itemsRes, eventsRes] = await Promise.all([
-    supabase
-      .from("items")
-      .select("id,title,description,status,created_at,photo_url,post_type")
-      .eq("owner_id", uid),
+    const [itemsRes, eventsRes] = await Promise.all([
+      supabase
+        .from("items")
+        .select("id,title,description,status,created_at,photo_url,post_type")
+        .eq("owner_id", uid),
 
-    supabase
-      .from("events")
-      .select("id,title,description,created_at,photo_url,starts_at,ends_at")
-      .eq("created_by", uid),
-  ]);
+      supabase
+        .from("events")
+        .select("id,title,description,created_at,photo_url,starts_at,ends_at")
+        .eq("created_by", uid),
+    ]);
 
-  if (!mountedRef.current) return [] as MyItemRow[];
+    if (!mountedRef.current) return [] as MyItemRow[];
 
-  if (itemsRes.error || eventsRes.error) {
-    setMyItems([]);
-    return [];
+    if (itemsRes.error || eventsRes.error) {
+      setMyItems([]);
+      return [];
+    }
+
+    const itemRows = ((itemsRes.data ?? []) as MyItemRow[]).filter(Boolean);
+
+    const now = Date.now();
+
+    const eventRows: MyItemRow[] = (
+      (eventsRes.data ?? []) as Array<{
+        id: string;
+        title: string;
+        description: string | null;
+        created_at: string;
+        photo_url: string | null;
+        starts_at: string;
+        ends_at: string | null;
+      }>
+    ).map((event) => {
+      const endTime = event.ends_at ?? event.starts_at;
+      const isPast = new Date(endTime).getTime() < now;
+
+      return {
+        id: event.id,
+        title: event.title,
+        description: event.description ?? null,
+        status: isPast ? "completed" : "available",
+        created_at: event.created_at,
+        photo_url: event.photo_url ?? null,
+        post_type: "event",
+      };
+    });
+
+    const rows = [...itemRows, ...eventRows].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+
+    setMyItems(rows);
+    return rows;
   }
-
-  const itemRows = ((itemsRes.data ?? []) as MyItemRow[]).filter(Boolean);
-
-  const now = Date.now();
-
-  const eventRows: MyItemRow[] = (
-    (eventsRes.data ?? []) as Array<{
-      id: string;
-      title: string;
-      description: string | null;
-      created_at: string;
-      photo_url: string | null;
-      starts_at: string;
-      ends_at: string | null;
-    }>
-  ).map((event) => {
-    const endTime = event.ends_at ?? event.starts_at;
-    const isPast = new Date(endTime).getTime() < now;
-
-    return {
-      id: event.id,
-      title: event.title,
-      description: event.description ?? null,
-      status: isPast ? "completed" : "available",
-      created_at: event.created_at,
-      photo_url: event.photo_url ?? null,
-      post_type: "event",
-    };
-  });
-
-  const rows = [...itemRows, ...eventRows].sort(
-    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-  );
-
-  setMyItems(rows);
-  return rows;
-}
 
   async function loadMyRequests(uid: string) {
     const { data, error } = await supabase
@@ -1044,10 +1051,6 @@ const archivedListingsCount = useMemo(() => {
     };
   }, [clearAll, loadAllFor]);
 
-  /* ==============================
-     LOADING
-  ============================== */
-
   if (loading) {
     return (
       <div className="account-page">
@@ -1063,10 +1066,6 @@ const archivedListingsCount = useMemo(() => {
       </div>
     );
   }
-
-  /* ==============================
-     AUTH
-  ============================== */
 
   if (!isLoggedIn) {
     return (
@@ -1126,10 +1125,6 @@ const archivedListingsCount = useMemo(() => {
       </div>
     );
   }
-
-  /* ==============================
-     MAIN
-  ============================== */
 
   return (
     <div className="account-page">
@@ -1254,14 +1249,14 @@ const archivedListingsCount = useMemo(() => {
 
               <div className="listing-grid">
                 {gridSource.map((item) => (
-  <ProfileMediaCard
-    key={item.id}
-    item={item}
-    onClick={() =>
-      router.push(item.post_type === "event" ? `/event/${item.id}` : `/manage/${item.id}`)
-    }
-  />
-))}
+                  <ProfileMediaCard
+                    key={item.id}
+                    item={item}
+                    onClick={() =>
+                      router.push(item.post_type === "event" ? `/event/${item.id}` : `/manage/${item.id}`)
+                    }
+                  />
+                ))}
               </div>
             </>
           )}
