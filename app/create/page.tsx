@@ -37,12 +37,7 @@ type PickupLocation =
   | "Library"
   | "Student Center";
 
-type RequestGroup =
-  | "logistics"
-  | "services"
-  | "urgent"
-  | "collaboration"
-  | "lost & found";
+type RequestGroup = "logistics" | "services" | "urgent" | "collaboration";
 
 type RequestTimeframe = "today" | "this_week" | "flexible";
 
@@ -110,7 +105,7 @@ const EVENT_FLYERS_BUCKET = "event-flyers";
 const MAX_ITEM_PHOTO_MB = 6;
 const MAX_EVENT_FLYER_MB = 8;
 
-const DRAFT_KEY = "scholarswap_create_phone_first_v2";
+const DRAFT_KEY = "scholarswap_create_phone_first_v3";
 const SUCCESS_ROUTE = "/feed";
 
 const GIVE_STEPS: StepKey[] = ["media", "write", "details", "review"];
@@ -148,7 +143,6 @@ const REQUEST_GROUP_OPTIONS: RequestGroup[] = [
   "services",
   "urgent",
   "collaboration",
-  "lost & found",
 ];
 
 const REQUEST_TIMEFRAME_OPTIONS: RequestTimeframe[] = [
@@ -299,7 +293,6 @@ function requestGroupLabel(v: RequestGroup) {
   if (v === "services") return "Services";
   if (v === "urgent") return "Urgent";
   if (v === "collaboration") return "Collaboration";
-  if (v === "lost & found") return "Lost & Found";
   return "Request";
 }
 
@@ -969,7 +962,7 @@ export default function CreatePage() {
         itemInsert.request_timeframe = null;
         itemInsert.request_location = null;
       } else {
-        itemInsert.category = draft.requestGroup === "lost & found" ? "lost & found" : "others";
+        itemInsert.category = "others";
         itemInsert.pickup_location = null;
         itemInsert.request_group = draft.requestGroup;
         itemInsert.request_timeframe = draft.requestTimeframe;
@@ -1011,7 +1004,7 @@ export default function CreatePage() {
           contentType: itemFile.type || undefined,
         });
 
-      if (uploadErr) {
+        if (uploadErr) {
         await supabase.from(ITEMS_TABLE).delete().eq("id", itemId);
         throw new Error(`Image upload failed: ${uploadErr.message}`);
       }
