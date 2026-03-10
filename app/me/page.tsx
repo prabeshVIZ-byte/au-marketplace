@@ -358,6 +358,18 @@ function getFriendlyError(e: unknown) {
   return "Something went wrong.";
 }
 
+function getPostHref(item: { id: string; post_type?: "give" | "request" | "event" | null }) {
+  return item.post_type === "event" ? `/event/${item.id}` : `/item/${item.id}`;
+}
+
+function normalizeActionUrl(url: string) {
+  if (!url.startsWith("/")) return url;
+  if (url.startsWith("/manage/")) {
+    return url.replace("/manage/", "/item/");
+  }
+  return url;
+}
+
 /* ==============================
    PAGE
 ============================== */
@@ -444,9 +456,8 @@ export default function AccountPage() {
   }, [myOffers.length, myRequests.length]);
 
   const gridSource = useMemo(() => {
-    const source = mediaTab === "give" ? itemsGive : mediaTab === "request" ? itemsRequest : itemsEvent;
-    return source.filter((x) => (gridMode === "active" ? !isArchivedItem(x) : isArchivedItem(x)));
-  }, [gridMode, itemsEvent, itemsGive, itemsRequest, mediaTab]);
+    return currentTabItems.filter((x) => (gridMode === "active" ? !isArchivedItem(x) : isArchivedItem(x)));
+  }, [currentTabItems, gridMode]);
 
   const gridTotalForTab = useMemo(() => {
     if (mediaTab === "give") return itemsGive.length;
@@ -819,7 +830,7 @@ export default function AccountPage() {
     setDrawerOpen(false);
 
     if (notification.action_url && notification.action_url.startsWith("/")) {
-      router.push(notification.action_url);
+      router.push(normalizeActionUrl(notification.action_url));
       return;
     }
 
@@ -829,12 +840,12 @@ export default function AccountPage() {
     }
 
     if (notification.parent_entity_type === "item" && notification.parent_entity_id) {
-      router.push(`/manage/${notification.parent_entity_id}`);
+      router.push(`/item/${notification.parent_entity_id}`);
       return;
     }
 
     if (notification.entity_type === "item" && notification.entity_id) {
-      router.push(`/manage/${notification.entity_id}`);
+      router.push(`/item/${notification.entity_id}`);
       return;
     }
 
@@ -1116,6 +1127,7 @@ export default function AccountPage() {
             <div className="skel skel-head" />
             <div className="skel skel-pills" />
             <div className="skel skel-tabs" />
+            <div className="skel skel-filter" />
             <div className="skel skel-grid" />
           </div>
         </div>
@@ -1219,17 +1231,21 @@ export default function AccountPage() {
             </button>
           </div>
 
-          <div className="mini-stats">
+          <div className="mini-stats mini-stats-three">
             <button
               type="button"
-              className={`mini-pill ${gridMode === "active" ? "active" : ""}`}
-              onClick={() => setGridMode("active")}
+              className={`mini-pill ${unseenNotificationCount > 0 ? "active" : ""}`}
+              onClick={() => openDrawer("notifications")}
             >
-              <span className="mini-pill-label">Active</span>
-              <span className="mini-pill-value">{activeListingsCount}</span>
+              <span className="mini-pill-label">Notifications</span>
+              <span className="mini-pill-value">{unseenNotificationCount}</span>
             </button>
 
-            <button type="button" className="mini-pill" onClick={() => openDrawer("requests")}>
+            <button
+              type="button"
+              className={`mini-pill ${requestsCount > 0 ? "active" : ""}`}
+              onClick={() => openDrawer("requests")}
+            >
               <span className="mini-pill-label">Requests</span>
               <span className="mini-pill-value">{requestsCount}</span>
             </button>
@@ -1237,15 +1253,6 @@ export default function AccountPage() {
             <button type="button" className="mini-pill" onClick={() => openDrawer("activity")}>
               <span className="mini-pill-label">Activity</span>
               <span className="mini-pill-value">{activityCount}</span>
-            </button>
-
-            <button
-              type="button"
-              className={`mini-pill ${gridMode === "archived" ? "active" : ""}`}
-              onClick={() => setGridMode("archived")}
-            >
-              <span className="mini-pill-label">Archived</span>
-              <span className="mini-pill-value">{archivedListingsCount}</span>
             </button>
           </div>
         </section>
@@ -1275,6 +1282,26 @@ export default function AccountPage() {
             >
               Events
               <span className="media-tab-count">{itemsEvent.length}</span>
+            </button>
+          </div>
+
+          <div className="sub-filter-row" aria-label="Listing visibility filter">
+            <button
+              type="button"
+              className={`sub-filter-pill ${gridMode === "active" ? "active" : ""}`}
+              onClick={() => setGridMode("active")}
+            >
+              Active
+              <span className="sub-filter-count">{activeListingsCount}</span>
+            </button>
+
+            <button
+              type="button"
+              className={`sub-filter-pill ${gridMode === "archived" ? "active" : ""}`}
+              onClick={() => setGridMode("archived")}
+            >
+              Archived
+              <span className="sub-filter-count">{archivedListingsCount}</span>
             </button>
           </div>
         </section>
@@ -1309,9 +1336,7 @@ export default function AccountPage() {
                   <ProfileMediaCard
                     key={item.id}
                     item={item}
-                    onClick={() =>
-                      router.push(item.post_type === "event" ? `/event/${item.id}` : `/manage/${item.id}`)
-                    }
+                    onClick={() => router.push(getPostHref(item))}
                   />
                 ))}
               </div>
@@ -1406,9 +1431,10 @@ export default function AccountPage() {
                           { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
                           { label: r.item?.status ?? "—", tone: toneForStatus(r.item?.status) },
                         ]}
+                        manageLabel="Open post"
                         onManage={() => {
                           setDrawerOpen(false);
-                          router.push(`/manage/${r.item_id}`);
+                          router.push(`/item/${r.item_id}`);
                         }}
                       />
                     ))
@@ -2108,8 +2134,11 @@ function PageStyles() {
       .mini-stats {
         margin-top: 14px;
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 8px;
+      }
+
+      .mini-stats-three {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
       }
 
       .mini-pill {
@@ -2197,6 +2226,48 @@ function PageStyles() {
         align-items: center;
         justify-content: center;
         padding: 0 6px;
+      }
+
+      .sub-filter-row {
+        margin-top: 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 2px;
+      }
+
+      .sub-filter-pill {
+        min-height: 34px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.92);
+        color: #374151;
+        font-size: 12px;
+        font-weight: 900;
+        padding: 0 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .sub-filter-pill.active {
+        border-color: rgba(16, 185, 129, 0.28);
+        background: rgba(16, 185, 129, 0.1);
+        color: #065f46;
+      }
+
+      .sub-filter-count {
+        min-width: 18px;
+        height: 18px;
+        border-radius: 999px;
+        background: rgba(17, 24, 39, 0.08);
+        color: inherit;
+        font-size: 10px;
+        font-weight: 950;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 5px;
       }
 
       .grid-wrap {
@@ -2974,6 +3045,11 @@ function PageStyles() {
         height: 56px;
       }
 
+      .skel-filter {
+        width: 180px;
+        height: 34px;
+      }
+
       .skel-grid {
         width: 100%;
         height: 420px;
@@ -3062,6 +3138,17 @@ function PageStyles() {
           min-width: 18px;
           height: 18px;
           font-size: 10px;
+        }
+
+        .sub-filter-row {
+          margin-top: 8px;
+          gap: 6px;
+        }
+
+        .sub-filter-pill {
+          min-height: 32px;
+          font-size: 11px;
+          padding: 0 10px;
         }
 
         .listing-grid {
