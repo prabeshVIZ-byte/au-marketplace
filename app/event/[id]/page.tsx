@@ -31,16 +31,16 @@ type OwnerProfile = {
   user_role: string | null;
 };
 
-type EventLoveRow = {
-  event_id: string | null;
-};
+type ToastState = {
+  msg: string;
+  kind: "ok" | "err";
+} | null;
 
-type EventAttendeeRow = {
-  id: string;
-  event_id: string;
-  user_id: string;
-  created_at: string | null;
-};
+function eventCategoryLabel(v: string | null) {
+  const raw = (v ?? "").trim();
+  if (!raw) return "Event";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
 
 function formatTimeRange(startsAtISO: string | null, endsAtISO: string | null) {
   if (!startsAtISO) return "Time not set";
@@ -49,19 +49,27 @@ function formatTimeRange(startsAtISO: string | null, endsAtISO: string | null) {
   if (Number.isNaN(s.getTime())) return "Time not set";
 
   const sameDay = endsAtISO ? new Date(endsAtISO).toDateString() === s.toDateString() : true;
+
   const day = s.toLocaleDateString(undefined, {
     weekday: "short",
     month: "short",
     day: "numeric",
   });
-  const st = s.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+
+  const st = s.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 
   if (!endsAtISO) return `${day} • ${st}`;
 
   const e = new Date(endsAtISO);
   if (Number.isNaN(e.getTime())) return `${day} • ${st}`;
 
-  const et = e.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const et = e.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 
   if (sameDay) return `${day} • ${st}–${et}`;
 
@@ -72,6 +80,19 @@ function formatTimeRange(startsAtISO: string | null, endsAtISO: string | null) {
   });
 
   return `${day} ${st} → ${endDay} ${et}`;
+}
+
+function formatDateTime(iso: string | null) {
+  if (!iso) return "Not set";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "Not set";
+  return d.toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function formatShortDate(iso: string | null) {
@@ -99,16 +120,6 @@ function initials(name: string) {
   return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
 }
 
-function norm(v: string | null | undefined) {
-  return (v ?? "").trim().toLowerCase();
-}
-
-function eventCategoryLabel(v: string | null) {
-  const raw = (v ?? "").trim();
-  if (!raw) return "Event";
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
-}
-
 function isEventEnded(event: EventRow | null) {
   if (!event) return false;
   const endIso = event.ends_at ?? event.starts_at;
@@ -120,6 +131,7 @@ function isEventEnded(event: EventRow | null) {
 
 function isEventLive(event: EventRow | null) {
   if (!event?.starts_at) return false;
+
   const startTs = new Date(event.starts_at).getTime();
   if (Number.isNaN(startTs)) return false;
 
@@ -163,9 +175,8 @@ export default function EventDetailPage() {
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [openImg, setOpenImg] = useState<string | null>(null);
-
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
+  const [toast, setToast] = useState<ToastState>(null);
 
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -173,99 +184,111 @@ export default function EventDetailPage() {
     return event?.owner_id ?? event?.created_by ?? null;
   }, [event?.owner_id, event?.created_by]);
 
-  const isAshland = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-
   const isOwner = useMemo(() => {
     return !!userId && !!organizerId && userId === organizerId;
   }, [userId, organizerId]);
 
+  const isAshland = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+
   const ownerLabel = useMemo(() => ownerNameLabel(event, owner), [event, owner]);
   const chip = useMemo(() => eventStateChip(event), [event]);
 
-  const subtitle = useMemo(() => {
+  const heroMeta = useMemo(() => {
     if (!event) return "";
-    return [
-      event.host_org?.trim() ? event.host_org.trim() : "",
-      event.category?.trim() ? eventCategoryLabel(event.category) : "",
-      event.location?.trim() ? event.location.trim() : "",
-    ]
+    return [event.host_org?.trim() || "", eventCategoryLabel(event.category)]
       .filter(Boolean)
       .join(" • ");
   }, [event]);
 
-  const flow = useMemo(() => {
-    if (!event) return null;
-
-    if (isOwner) {
-      return {
-        kind: "owner" as const,
-        title: "You created this event.",
-        body: "Edit details, update the flyer, or remove the event.",
-        primary: "Edit event",
-        secondary: "Delete event",
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
+  const actionCard = useMemo(() => {
+    if (!event || isOwner) return null;
 
     if (!isAshland) {
       return {
-        kind: "login" as const,
-        title: "Log in to attend.",
-        body: "Only Ashland users can join events.",
-        primary: "Log in",
-        secondary: null,
+        title: userId ? "Use your Ashland account to attend." : "Log in to attend.",
+        body: "Only Ashland users can join campus events.",
+        primary: userId ? "Open profile" : "Log in",
+        secondary: event.link_url ? "Open link" : null,
         primaryDisabled: false,
         secondaryDisabled: false,
+        kind: "login" as const,
       };
     }
 
     if (event.is_cancelled) {
       return {
-        kind: "cancelled" as const,
         title: "This event has been cancelled.",
         body: "Attendance is closed.",
         primary: "Cancelled",
-        secondary: null,
+        secondary: event.link_url ? "Open link" : null,
         primaryDisabled: true,
-        secondaryDisabled: true,
+        secondaryDisabled: false,
+        kind: "cancelled" as const,
       };
     }
 
     if (isEventEnded(event)) {
       return {
-        kind: "ended" as const,
         title: "This event has already ended.",
         body: "Attendance is closed.",
         primary: "Ended",
-        secondary: null,
+        secondary: event.link_url ? "Open link" : null,
         primaryDisabled: true,
-        secondaryDisabled: true,
+        secondaryDisabled: false,
+        kind: "ended" as const,
       };
     }
 
     if (myAttending) {
       return {
-        kind: "attending" as const,
-        title: "You’re attending this event.",
-        body: "You can leave if your plans changed.",
+        title: "You’re going to this event.",
+        body: "Need to change plans? You can leave anytime.",
         primary: "Attending",
         secondary: "Leave",
+        tertiary: event.link_url ? "Open link" : null,
         primaryDisabled: true,
         secondaryDisabled: false,
+        tertiaryDisabled: false,
+        kind: "attending" as const,
       };
     }
 
     return {
-      kind: "open" as const,
-      title: "You can attend this event.",
-      body: "Join now so the organizer knows you’re coming.",
+      title: "Join this event.",
+      body: "Let the organizer know you’re coming.",
       primary: "Attend",
       secondary: event.link_url ? "Open link" : null,
       primaryDisabled: false,
       secondaryDisabled: false,
+      kind: "open" as const,
     };
-  }, [event, isOwner, isAshland, myAttending]);
+  }, [event, isOwner, isAshland, myAttending, userId]);
+
+  const detailRows = useMemo(() => {
+    if (!event) return [];
+    return [
+      {
+        label: "Organizer",
+        value: ownerLabel,
+      },
+      {
+        label: "When",
+        value: formatTimeRange(event.starts_at, event.ends_at),
+      },
+      {
+        label: "Location",
+        value: event.location?.trim() || "Location not set",
+      },
+      {
+        label: "Host",
+        value: event.host_org?.trim() || "Host not set",
+      },
+      {
+        label: "Category",
+        value: eventCategoryLabel(event.category),
+      },
+    ];
+  }, [event, ownerLabel]);
 
   function showToast(msg: string, kind: "ok" | "err" = "ok") {
     setToast({ msg, kind });
@@ -286,67 +309,76 @@ export default function EventDetailPage() {
           "id,title,description,host_org,category,location,starts_at,ends_at,link_url,photo_url,is_anonymous,is_cancelled,created_by,owner_id"
         )
         .eq("id", eventId)
-        .single();
+        .maybeSingle();
 
       if (eventErr) throw new Error(eventErr.message);
+      if (!ev) {
+        setEvent(null);
+        setOwner(null);
+        setLoveCount(0);
+        setMyLoved(false);
+        setAttendeeCount(0);
+        setMyAttending(false);
+        setUserId(uid);
+        setUserEmail(email);
+        return;
+      }
 
       const loaded = ev as EventRow;
       setEvent(loaded);
 
       const resolvedOwnerId = loaded.owner_id ?? loaded.created_by ?? null;
 
-      if (!loaded.is_anonymous && resolvedOwnerId) {
-        const { data: prof } = await supabase
-          .from("profiles")
-          .select("full_name,user_role")
-          .eq("id", resolvedOwnerId)
-          .maybeSingle();
+      const ownerPromise =
+        !loaded.is_anonymous && resolvedOwnerId
+          ? supabase
+              .from("profiles")
+              .select("full_name,user_role")
+              .eq("id", resolvedOwnerId)
+              .maybeSingle()
+          : Promise.resolve({ data: null, error: null });
 
-        setOwner((prof as OwnerProfile) ?? null);
-      } else {
-        setOwner(null);
-      }
-
-      const { count: lovesCount, error: loveCountErr } = await supabase
+      const loveCountPromise = supabase
         .from(LOVES_TABLE)
         .select("*", { count: "exact", head: true })
         .eq("event_id", eventId);
 
-      if (!loveCountErr) setLoveCount(lovesCount ?? 0);
-      else setLoveCount(0);
+      const myLovePromise = uid
+        ? supabase
+            .from(LOVES_TABLE)
+            .select("event_id")
+            .eq("event_id", eventId)
+            .eq("user_id", uid)
+            .maybeSingle()
+        : Promise.resolve({ data: null, error: null });
 
-      if (uid) {
-        const { data: mineLove, error: mineLoveErr } = await supabase
-          .from(LOVES_TABLE)
-          .select("event_id")
-          .eq("event_id", eventId)
-          .eq("user_id", uid)
-          .maybeSingle();
-
-        if (!mineLoveErr) setMyLoved(!!mineLove);
-        else setMyLoved(false);
-      } else {
-        setMyLoved(false);
-      }
-
-      const { data: attendeeRows, count: attendeeCountExact, error: attendeeErr } = await supabase
+      const attendeeCountPromise = supabase
         .from(ATTENDEES_TABLE)
-        .select("id,event_id,user_id,created_at", { count: "exact" })
+        .select("*", { count: "exact", head: true })
         .eq("event_id", eventId);
 
-      if (!attendeeErr) {
-        const rows = (attendeeRows as EventAttendeeRow[]) || [];
-        setAttendeeCount(attendeeCountExact ?? rows.length);
+      const myAttendingPromise = uid
+        ? supabase
+            .from(ATTENDEES_TABLE)
+            .select("id")
+            .eq("event_id", eventId)
+            .eq("user_id", uid)
+            .maybeSingle()
+        : Promise.resolve({ data: null, error: null });
 
-        if (uid) {
-          setMyAttending(rows.some((row) => row.user_id === uid));
-        } else {
-          setMyAttending(false);
-        }
-      } else {
-        setAttendeeCount(0);
-        setMyAttending(false);
-      }
+      const [ownerRes, loveCountRes, myLoveRes, attendeeCountRes, myAttendingRes] = await Promise.all([
+        ownerPromise,
+        loveCountPromise,
+        myLovePromise,
+        attendeeCountPromise,
+        myAttendingPromise,
+      ]);
+
+      setOwner((ownerRes?.data as OwnerProfile) ?? null);
+      setLoveCount(loveCountRes.count ?? 0);
+      setMyLoved(!!myLoveRes.data);
+      setAttendeeCount(attendeeCountRes.count ?? 0);
+      setMyAttending(!!myAttendingRes.data);
 
       setUserId(uid);
       setUserEmail(email);
@@ -481,7 +513,7 @@ export default function EventDetailPage() {
   }
 
   async function deleteEvent() {
-    if (!event || !isOwner || !userId) return;
+    if (!event || !isOwner) return;
 
     setBusy(true);
 
@@ -489,11 +521,7 @@ export default function EventDetailPage() {
       await supabase.from(ATTENDEES_TABLE).delete().eq("event_id", event.id);
       await supabase.from(LOVES_TABLE).delete().eq("event_id", event.id);
 
-      const { error } = await supabase
-        .from("events")
-        .delete()
-        .eq("id", event.id)
-        .eq("created_by", userId);
+      const { error } = await supabase.from("events").delete().eq("id", event.id);
 
       if (error) throw new Error(error.message);
 
@@ -551,116 +579,95 @@ export default function EventDetailPage() {
             <div className="topSub">scholarswap</div>
           </div>
 
-          <div className="topRightSpace" />
+          <div className="topSpacer" />
         </header>
 
-        {err && <div className="alert err">{err}</div>}
-        {loading && <div className="alert">Loading…</div>}
+        {err && <div className="notice error">{err}</div>}
+        {loading && <div className="notice">Loading…</div>}
+        {!loading && !err && !event && <div className="notice error">Event not found.</div>}
 
-        {!loading && !err && !event && <div className="alert err">Event not found.</div>}
-
-        {!loading && event && (
-          <section className="card">
-            <div className="cardTop">
-              <div className="authorSide">
-                <div className="avatar">{initials(ownerLabel)}</div>
-
-                <div className="authorText">
-                  <div className="authorName">{ownerLabel}</div>
-                  {subtitle ? <div className="authorSub">{subtitle}</div> : null}
+        {!loading && event ? (
+          <section className="eventCard">
+            <div className="hero">
+              {event.photo_url ? (
+                <button className="heroButton" type="button" onClick={() => setOpenImg(event.photo_url!)}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={event.photo_url} alt={event.title} className="heroImage" />
+                </button>
+              ) : (
+                <div className="heroFallback">
+                  <div className="heroFallbackIcon">✦</div>
+                  <div className="heroFallbackText">No flyer uploaded</div>
                 </div>
-              </div>
+              )}
 
-              {isOwner ? (
-                <div className="menuWrap">
-                  {menuOpen ? (
-                    <button
-                      className="menuBackdrop"
-                      aria-label="Close menu"
-                      onClick={() => setMenuOpen(false)}
-                      type="button"
-                    />
-                  ) : null}
+              <div className="heroShade" />
 
-                  <button
-                    className="menuBtn"
-                    type="button"
-                    aria-label="Event options"
-                    onClick={() => setMenuOpen((v) => !v)}
-                  >
-                    ⋯
-                  </button>
+              <div className="heroTop">
+                <span className={`statePill ${chip.tone}`}>{chip.label}</span>
 
-                  {menuOpen ? (
-                    <div className="menuCard">
+                {isOwner ? (
+                  <div className="menuWrap">
+                    {menuOpen ? (
                       <button
-                        className="menuItem"
+                        className="menuBackdrop"
+                        aria-label="Close menu"
+                        onClick={() => setMenuOpen(false)}
                         type="button"
-                        onClick={() => {
-                          setMenuOpen(false);
-                          router.push(`/event/${event.id}/edit`);
-                        }}
-                      >
-                        Edit event
-                      </button>
+                      />
+                    ) : null}
 
-                      {event.link_url ? (
+                    <button
+                      className="heroActionBtn"
+                      type="button"
+                      aria-label="Event options"
+                      onClick={() => setMenuOpen((v) => !v)}
+                    >
+                      ⋯
+                    </button>
+
+                    {menuOpen ? (
+                      <div className="menuCard">
                         <button
                           className="menuItem"
                           type="button"
                           onClick={() => {
                             setMenuOpen(false);
-                            window.open(event.link_url!, "_blank", "noopener,noreferrer");
+                            router.push(`/event/${event.id}/edit`);
                           }}
                         >
-                          Open event link
+                          Edit event
                         </button>
-                      ) : null}
 
-                      <button
-                        className="menuItem danger"
-                        type="button"
-                        onClick={() => {
-                          setMenuOpen(false);
-                          setConfirmDelete(true);
-                        }}
-                      >
-                        Delete event
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-              ) : (
-                <button
-                  className={`loveBtn ${myLoved ? "active" : ""}`}
-                  type="button"
-                  onClick={toggleLove}
-                  disabled={busy}
-                  aria-label="Love event"
-                >
-                  {myLoved ? "♥" : "♡"}
-                </button>
-              )}
-            </div>
+                        {event.link_url ? (
+                          <button
+                            className="menuItem"
+                            type="button"
+                            onClick={() => {
+                              setMenuOpen(false);
+                              window.open(event.link_url!, "_blank", "noopener,noreferrer");
+                            }}
+                          >
+                            Open event link
+                          </button>
+                        ) : null}
 
-            <div className="mediaWrap">
-              {event.photo_url ? (
-                <button className="imgBtn" type="button" onClick={() => setOpenImg(event.photo_url!)}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={event.photo_url} alt={event.title} className="heroImg" />
-                </button>
-              ) : (
-                <div className="noPhoto">No flyer</div>
-              )}
-            </div>
-
-            <div className="body">
-              <div className="titleRow">
-                <h1 className="title">{event.title}</h1>
-
-                {!isOwner ? (
+                        <button
+                          className="menuItem danger"
+                          type="button"
+                          onClick={() => {
+                            setMenuOpen(false);
+                            setConfirmDelete(true);
+                          }}
+                        >
+                          Delete event
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
                   <button
-                    className={`loveBtn small ${myLoved ? "active" : ""}`}
+                    className={`heroActionBtn love ${myLoved ? "active" : ""}`}
                     type="button"
                     onClick={toggleLove}
                     disabled={busy}
@@ -668,117 +675,164 @@ export default function EventDetailPage() {
                   >
                     {myLoved ? "♥" : "♡"}
                   </button>
-                ) : null}
+                )}
               </div>
 
-              <div className="statsRow">
-                <span className="stat">
-                  <span className="statIcon">♥</span> {loveCount}
-                </span>
+              <div className="heroBottom">
+                {heroMeta ? <div className="heroMeta">{heroMeta}</div> : null}
+                <h1 className="heroTitle">{event.title}</h1>
+                <div className="heroSchedule">{formatTimeRange(event.starts_at, event.ends_at)}</div>
+              </div>
+            </div>
 
-                <span className="dot">•</span>
+            <div className="content">
+              <div className="summaryGrid">
+                <div className="summaryTile">
+                  <div className="summaryLabel">Organizer</div>
+                  <div className="summaryValue withAvatar">
+                    <span className="miniAvatar">{initials(ownerLabel)}</span>
+                    <span className="truncate">{ownerLabel}</span>
+                  </div>
+                </div>
 
-                <span className="stat">{attendeeCount} attending</span>
+                <div className="summaryTile">
+                  <div className="summaryLabel">Going</div>
+                  <div className="summaryValue">{attendeeCount}</div>
+                </div>
 
-                <span className="dot">•</span>
+                <div className="summaryTile">
+                  <div className="summaryLabel">Loves</div>
+                  <div className="summaryValue">{loveCount}</div>
+                </div>
 
-                <span className={`statusPill ${chip.tone}`}>{chip.label}</span>
-
-                <span className="dot">•</span>
-
-                <span className="stat">{formatTimeRange(event.starts_at, event.ends_at)}</span>
+                <div className="summaryTile">
+                  <div className="summaryLabel">Location</div>
+                  <div className="summaryValue truncate">{event.location?.trim() || "Not set"}</div>
+                </div>
               </div>
 
-              {flow ? (
-                <div className="flowCard">
-                  <div className="flowTitle">{flow.title}</div>
-                  <div className="flowBody">{flow.body}</div>
+              {actionCard ? (
+                <div className="actionCard">
+                  <div className="actionText">
+                    <div className="actionTitle">{actionCard.title}</div>
+                    <div className="actionBody">{actionCard.body}</div>
+                  </div>
 
-                  <div className="flowActions">
+                  <div className="actionButtons">
                     <button
-                      className="primaryAction"
+                      className="primaryBtn"
                       type="button"
-                      disabled={flow.primaryDisabled || !!actionBusy}
+                      disabled={actionCard.primaryDisabled || !!actionBusy}
                       onClick={() => {
-                        if (flow.kind === "owner") {
-                          router.push(`/event/${event.id}/edit`);
-                          return;
-                        }
-                        if (flow.kind === "login") {
+                        if (actionCard.kind === "login") {
                           router.push("/me");
                           return;
                         }
-                        if (flow.kind === "open") {
+                        if (actionCard.kind === "open") {
                           void attendEvent();
                         }
                       }}
                     >
-                      {actionBusy === "attend" ? "Saving…" : flow.primary}
+                      {actionBusy === "attend" ? "Saving..." : actionCard.primary}
                     </button>
 
-                    {flow.secondary ? (
+                    {actionCard.secondary ? (
                       <button
-                        className="secondaryAction"
+                        className="secondaryBtn"
                         type="button"
-                        disabled={flow.secondaryDisabled || !!actionBusy}
+                        disabled={actionCard.secondaryDisabled || !!actionBusy}
                         onClick={() => {
-                          if (flow.kind === "owner") {
-                            setConfirmDelete(true);
-                            return;
-                          }
-                          if (flow.kind === "attending") {
+                          if (actionCard.kind === "attending") {
                             void leaveEvent();
                             return;
                           }
-                          if (flow.kind === "open" && event.link_url) {
+                          if (event.link_url) {
                             window.open(event.link_url, "_blank", "noopener,noreferrer");
                           }
                         }}
                       >
-                        {actionBusy === "leave" ? "Working…" : flow.secondary}
+                        {actionBusy === "leave" ? "Working..." : actionCard.secondary}
+                      </button>
+                    ) : null}
+
+                    {"tertiary" in actionCard && actionCard.tertiary ? (
+                      <button
+                        className="secondaryBtn"
+                        type="button"
+                        disabled={actionCard.tertiaryDisabled || !!actionBusy}
+                        onClick={() => {
+                          if (event.link_url) {
+                            window.open(event.link_url, "_blank", "noopener,noreferrer");
+                          }
+                        }}
+                      >
+                        {actionCard.tertiary}
                       </button>
                     ) : null}
                   </div>
                 </div>
               ) : null}
 
-              <div className="eventInfo">
-                <span className="infoPill">📍 {event.location?.trim() || "Location not set"}</span>
-                <span className="infoPill">🕒 {formatTimeRange(event.starts_at, event.ends_at)}</span>
-                <span className="infoPill">🏷 {eventCategoryLabel(event.category)}</span>
-                <span className="infoPill">👥 {event.host_org?.trim() || "Host not set"}</span>
-                {event.link_url ? (
-                  <button
-                    className="infoPill linkPill"
-                    type="button"
-                    onClick={() => window.open(event.link_url!, "_blank", "noopener,noreferrer")}
-                  >
-                    🔗 Open link
-                  </button>
-                ) : null}
+              <div className="section">
+                <div className="sectionTitle">Details</div>
+
+                <div className="detailList">
+                  {detailRows.map((row) => (
+                    <div className="detailRow" key={row.label}>
+                      <div className="detailLabel">{row.label}</div>
+                      <div className="detailValue">{row.value}</div>
+                    </div>
+                  ))}
+
+                  <div className="detailRow">
+                    <div className="detailLabel">Starts</div>
+                    <div className="detailValue">{formatDateTime(event.starts_at)}</div>
+                  </div>
+
+                  {event.ends_at ? (
+                    <div className="detailRow">
+                      <div className="detailLabel">Ends</div>
+                      <div className="detailValue">{formatDateTime(event.ends_at)}</div>
+                    </div>
+                  ) : null}
+
+                  {event.link_url ? (
+                    <div className="detailRow">
+                      <div className="detailLabel">Link</div>
+                      <button
+                        className="inlineLink"
+                        type="button"
+                        onClick={() => window.open(event.link_url!, "_blank", "noopener,noreferrer")}
+                      >
+                        Open event link
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
               </div>
 
               {event.description?.trim() ? (
-                <div className="caption">
-                  <span className="captionName">{ownerLabel}</span> {event.description.trim()}
+                <div className="section">
+                  <div className="sectionTitle">About</div>
+                  <div className="description">{event.description.trim()}</div>
                 </div>
               ) : null}
 
-              <div className="metaFoot">
+              <div className="footerMeta">
                 <span>Starts {formatShortDate(event.starts_at)}</span>
                 {event.ends_at ? <span>Ends {formatShortDate(event.ends_at)}</span> : null}
                 {event.is_cancelled ? <span className="dangerText">Cancelled</span> : null}
               </div>
             </div>
           </section>
-        )}
+        ) : null}
       </div>
 
       {confirmDelete ? (
         <div className="modal" onClick={() => setConfirmDelete(false)}>
           <div className="modalCard" onClick={(e) => e.stopPropagation()}>
             <div className="modalTitle">Delete event?</div>
-            <div className="modalText">This permanently removes the event and attendee list.</div>
+            <div className="modalText">This permanently removes the event and all attendee data.</div>
 
             <div className="modalActions">
               <button className="ghostBtn" onClick={() => setConfirmDelete(false)} type="button">
@@ -793,29 +847,31 @@ export default function EventDetailPage() {
       ) : null}
 
       {openImg && event ? (
-        <div className="imgModal" onClick={() => setOpenImg(null)}>
-          <div className="imgCard" onClick={(e) => e.stopPropagation()}>
-            <div className="imgTop">
-              <div className="imgTitle">{event.title}</div>
-              <button className="iconGhost" onClick={() => setOpenImg(null)} type="button">
+        <div className="imageModal" onClick={() => setOpenImg(null)}>
+          <div className="imageCard" onClick={(e) => e.stopPropagation()}>
+            <div className="imageTop">
+              <div className="imageTitle">{event.title}</div>
+              <button className="iconBtn small" onClick={() => setOpenImg(null)} type="button">
                 ✕
               </button>
             </div>
 
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={openImg} alt={event.title} className="imgFull" />
+            <img src={openImg} alt={event.title} className="fullImage" />
           </div>
         </div>
       ) : null}
 
-      {toast ? <div className={`toast ${toast.kind === "err" ? "err" : "ok"}`}>{toast.msg}</div> : null}
+      {toast ? <div className={`toast ${toast.kind}`}>{toast.msg}</div> : null}
 
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background: #f6f7fb;
+          background:
+            radial-gradient(circle at top, rgba(99, 102, 241, 0.06), transparent 32%),
+            linear-gradient(180deg, #f8fafc 0%, #f3f4f6 100%);
           color: #0f172a;
-          padding: 12px 12px 28px;
+          padding: 12px 12px 32px;
         }
 
         .shell {
@@ -826,184 +882,271 @@ export default function EventDetailPage() {
         .topBar {
           position: sticky;
           top: 0;
-          z-index: 20;
+          z-index: 30;
           display: grid;
           grid-template-columns: 42px 1fr 42px;
           align-items: center;
           gap: 10px;
-          padding: 6px 0 12px;
-          background: rgba(246, 247, 251, 0.9);
-          backdrop-filter: blur(12px);
-        }
-
-        .iconBtn,
-        .iconGhost {
-          width: 42px;
-          height: 42px;
-          border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-          font-size: 18px;
-          font-weight: 900;
-          cursor: pointer;
+          padding: 6px 0 14px;
+          background: rgba(248, 250, 252, 0.82);
+          backdrop-filter: blur(14px);
         }
 
         .topCenter {
-          text-align: center;
           min-width: 0;
+          text-align: center;
         }
 
         .topTitle {
           font-size: 16px;
           font-weight: 1000;
           line-height: 1.1;
+          letter-spacing: -0.02em;
         }
 
         .topSub {
           margin-top: 2px;
           font-size: 12px;
+          font-weight: 800;
           color: #64748b;
-          font-weight: 700;
         }
 
-        .topRightSpace {
+        .topSpacer {
           width: 42px;
           height: 42px;
         }
 
-        .alert {
-          margin: 8px 0 0;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          padding: 11px 13px;
-          border-radius: 16px;
-          font-size: 13px;
-          font-weight: 800;
-          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+        .iconBtn {
+          width: 42px;
+          height: 42px;
+          border-radius: 999px;
+          border: 1px solid rgba(226, 232, 240, 0.95);
+          background: rgba(255, 255, 255, 0.92);
+          color: #0f172a;
+          font-size: 18px;
+          font-weight: 900;
+          cursor: pointer;
+          display: grid;
+          place-items: center;
+          box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
         }
 
-        .alert.err {
+        .iconBtn.small {
+          width: 38px;
+          height: 38px;
+          font-size: 16px;
+        }
+
+        .notice {
+          margin-top: 6px;
+          border-radius: 18px;
+          border: 1px solid #e2e8f0;
+          background: rgba(255, 255, 255, 0.92);
+          padding: 12px 14px;
+          font-size: 13px;
+          font-weight: 800;
+          box-shadow: 0 14px 34px rgba(15, 23, 42, 0.05);
+        }
+
+        .notice.error {
           border-color: #fecdd3;
           background: #fff1f2;
           color: #9f1239;
         }
 
-        .card {
+        .eventCard {
           margin-top: 8px;
-          background: #fff;
-          border: 1px solid #e5e7eb;
-          border-radius: 24px;
           overflow: hidden;
-          box-shadow: 0 16px 40px rgba(15, 23, 42, 0.05);
+          border-radius: 30px;
+          border: 1px solid rgba(226, 232, 240, 0.92);
+          background: rgba(255, 255, 255, 0.92);
+          box-shadow: 0 24px 60px rgba(15, 23, 42, 0.08);
         }
 
-        .cardTop {
+        .hero {
+          position: relative;
+          min-height: 350px;
+          background: #e5e7eb;
+          overflow: hidden;
+        }
+
+        .heroButton {
+          display: block;
+          width: 100%;
+          height: 100%;
+          border: 0;
+          padding: 0;
+          background: transparent;
+          cursor: zoom-in;
+        }
+
+        .heroImage {
+          display: block;
+          width: 100%;
+          height: 420px;
+          object-fit: cover;
+        }
+
+        .heroFallback {
+          height: 420px;
           display: flex;
+          flex-direction: column;
           align-items: center;
-          justify-content: space-between;
+          justify-content: center;
           gap: 10px;
-          padding: 12px;
-          border-bottom: 1px solid #eef2f7;
+          background:
+            radial-gradient(circle at top, rgba(99, 102, 241, 0.18), transparent 34%),
+            linear-gradient(135deg, #0f172a 0%, #1e293b 45%, #334155 100%);
+          color: #fff;
         }
 
-        .authorSide {
-          min-width: 0;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-        }
-
-        .avatar {
-          width: 38px;
-          height: 38px;
-          border-radius: 999px;
+        .heroFallbackIcon {
+          width: 62px;
+          height: 62px;
           display: grid;
           place-items: center;
-          border: 1px solid #dbe3f0;
-          background: linear-gradient(135deg, #ede9fe 0%, #dbeafe 100%);
-          font-size: 12px;
-          font-weight: 1000;
-          flex: 0 0 auto;
+          border-radius: 18px;
+          background: rgba(255, 255, 255, 0.12);
+          font-size: 24px;
+          font-weight: 900;
         }
 
-        .authorText {
-          min-width: 0;
-        }
-
-        .authorName {
+        .heroFallbackText {
           font-size: 13px;
-          font-weight: 1000;
-          line-height: 1.1;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
+          font-weight: 800;
+          opacity: 0.88;
         }
 
-        .authorSub {
-          margin-top: 4px;
-          font-size: 11px;
-          color: #64748b;
-          font-weight: 700;
-          line-height: 1.3;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
+        .heroShade {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(
+            180deg,
+            rgba(15, 23, 42, 0.12) 0%,
+            rgba(15, 23, 42, 0.18) 28%,
+            rgba(15, 23, 42, 0.78) 100%
+          );
+          pointer-events: none;
+        }
+
+        .heroTop {
+          position: absolute;
+          top: 14px;
+          left: 14px;
+          right: 14px;
+          z-index: 2;
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 10px;
+        }
+
+        .heroBottom {
+          position: absolute;
+          left: 16px;
+          right: 16px;
+          bottom: 16px;
+          z-index: 2;
+        }
+
+        .heroMeta {
+          margin-bottom: 8px;
+          font-size: 12px;
+          font-weight: 800;
+          color: rgba(255, 255, 255, 0.86);
+        }
+
+        .heroTitle {
+          margin: 0;
+          font-size: 30px;
+          line-height: 1.02;
+          font-weight: 1000;
+          letter-spacing: -0.05em;
+          color: #fff;
+          text-wrap: balance;
+          overflow-wrap: anywhere;
+        }
+
+        .heroSchedule {
+          margin-top: 10px;
+          font-size: 14px;
+          font-weight: 850;
+          color: rgba(255, 255, 255, 0.92);
+        }
+
+        .statePill {
+          min-height: 34px;
+          padding: 0 12px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 999px;
+          backdrop-filter: blur(10px);
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          background: rgba(255, 255, 255, 0.14);
+          color: #fff;
+          font-size: 12px;
+          font-weight: 900;
+          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.15);
+        }
+
+        .statePill.good {
+          background: rgba(34, 197, 94, 0.18);
+          border-color: rgba(187, 247, 208, 0.3);
+        }
+
+        .statePill.closed,
+        .statePill.neutral {
+          background: rgba(15, 23, 42, 0.24);
+          border-color: rgba(255, 255, 255, 0.16);
+        }
+
+        .heroActionBtn {
+          width: 42px;
+          height: 42px;
+          display: grid;
+          place-items: center;
+          border-radius: 999px;
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          background: rgba(255, 255, 255, 0.14);
+          backdrop-filter: blur(10px);
+          color: #fff;
+          font-size: 22px;
+          font-weight: 900;
+          cursor: pointer;
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+        }
+
+        .heroActionBtn.love.active {
+          color: #fecdd3;
+          background: rgba(190, 24, 93, 0.18);
+          border-color: rgba(251, 207, 232, 0.28);
         }
 
         .menuWrap {
           position: relative;
-          flex: 0 0 auto;
-        }
-
-        .menuBtn,
-        .loveBtn {
-          width: 38px;
-          height: 38px;
-          border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-          font-size: 22px;
-          line-height: 1;
-          font-weight: 900;
-          cursor: pointer;
-          display: grid;
-          place-items: center;
-        }
-
-        .loveBtn.active {
-          color: #dc2626;
-          border-color: #fecaca;
-          background: #fff5f5;
-        }
-
-        .loveBtn.small {
-          width: 34px;
-          height: 34px;
-          font-size: 19px;
         }
 
         .menuBackdrop {
           position: fixed;
           inset: 0;
-          background: transparent;
           border: 0;
           padding: 0;
           margin: 0;
+          background: transparent;
         }
 
         .menuCard {
           position: absolute;
           top: calc(100% + 8px);
           right: 0;
-          width: 200px;
-          border: 1px solid #e5e7eb;
-          background: rgba(255, 255, 255, 0.98);
-          border-radius: 16px;
+          width: 210px;
           overflow: hidden;
-          box-shadow: 0 20px 44px rgba(15, 23, 42, 0.14);
-          z-index: 30;
+          border-radius: 18px;
+          border: 1px solid #e2e8f0;
+          background: rgba(255, 255, 255, 0.98);
+          box-shadow: 0 20px 50px rgba(15, 23, 42, 0.16);
+          z-index: 40;
         }
 
         .menuItem {
@@ -1011,9 +1154,9 @@ export default function EventDetailPage() {
           border: 0;
           background: #fff;
           text-align: left;
-          padding: 12px 14px;
+          padding: 13px 14px;
           font-size: 13px;
-          font-weight: 900;
+          font-weight: 850;
           color: #0f172a;
           cursor: pointer;
         }
@@ -1026,139 +1169,263 @@ export default function EventDetailPage() {
           color: #b91c1c;
         }
 
-        .mediaWrap {
-          background: #f8fafc;
+        .content {
+          padding: 16px;
         }
 
-        .imgBtn {
-          display: block;
-          width: 100%;
-          border: 0;
-          padding: 0;
-          background: transparent;
-          cursor: zoom-in;
-        }
-
-        .heroImg {
-          width: 100%;
-          height: 420px;
-          object-fit: cover;
-          display: block;
-        }
-
-        .noPhoto {
-          height: 220px;
+        .summaryGrid {
           display: grid;
-          place-items: center;
-          color: #64748b;
-          font-size: 13px;
-          font-weight: 800;
-        }
-
-        .body {
-          padding: 14px 14px 16px;
-        }
-
-        .titleRow {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 10px;
         }
 
-        .title {
-          margin: 0;
-          font-size: 22px;
-          line-height: 1.08;
+        .summaryTile {
+          min-width: 0;
+          padding: 14px;
+          border-radius: 20px;
+          border: 1px solid #e2e8f0;
+          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+        }
+
+        .summaryLabel {
+          font-size: 11px;
+          font-weight: 900;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          color: #64748b;
+        }
+
+        .summaryValue {
+          margin-top: 8px;
+          font-size: 17px;
+          line-height: 1.25;
           font-weight: 1000;
-          letter-spacing: -0.04em;
+          color: #0f172a;
           overflow-wrap: anywhere;
-          flex: 1;
+        }
+
+        .summaryValue.withAvatar {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .miniAvatar {
+          width: 30px;
+          height: 30px;
+          border-radius: 999px;
+          display: grid;
+          place-items: center;
+          flex: 0 0 auto;
+          background: linear-gradient(135deg, #dbeafe 0%, #ede9fe 100%);
+          border: 1px solid #dbe3f0;
+          font-size: 11px;
+          font-weight: 1000;
+        }
+
+        .truncate {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .actionCard {
+          margin-top: 14px;
+          padding: 16px;
+          border-radius: 22px;
+          border: 1px solid #dbeafe;
+          background: linear-gradient(180deg, rgba(239, 246, 255, 0.96) 0%, rgba(248, 250, 252, 0.96) 100%);
+        }
+
+        .actionText {
           min-width: 0;
         }
 
-        .statsRow {
-          margin-top: 10px;
-          display: flex;
-          align-items: center;
-          flex-wrap: wrap;
-          gap: 8px;
-          color: #475569;
-          font-size: 12px;
-          font-weight: 900;
-          line-height: 1.4;
-        }
-
-        .stat {
-          display: inline-flex;
-          align-items: center;
-          gap: 5px;
-        }
-
-        .statIcon {
-          color: #dc2626;
-        }
-
-        .dot {
-          color: #cbd5e1;
-        }
-
-        .statusPill {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 24px;
-          padding: 0 9px;
-          border-radius: 999px;
-          font-size: 11px;
-          font-weight: 900;
-          border: 1px solid #e5e7eb;
-        }
-
-        .statusPill.good {
-          color: #166534;
-          border-color: #bbf7d0;
-          background: #ecfdf5;
-        }
-
-        .statusPill.closed,
-        .statusPill.neutral {
-          color: #475569;
-          border-color: #e5e7eb;
-          background: #f8fafc;
-        }
-
-        .flowCard {
-          margin-top: 14px;
-          padding: 14px;
-          border-radius: 18px;
-          border: 1px solid #e5e7eb;
-          background: #f8fafc;
-        }
-
-        .flowTitle {
-          font-size: 14px;
+        .actionTitle {
+          font-size: 15px;
           font-weight: 1000;
           color: #0f172a;
         }
 
-        .flowBody {
+        .actionBody {
           margin-top: 5px;
           font-size: 13px;
-          line-height: 1.5;
+          line-height: 1.55;
           color: #475569;
           font-weight: 700;
         }
 
-        .flowActions {
-          margin-top: 12px;
+        .actionButtons {
+          margin-top: 14px;
           display: flex;
           flex-wrap: wrap;
           gap: 10px;
         }
 
-        .primaryAction,
-        .secondaryAction {
+        .primaryBtn,
+        .secondaryBtn {
+          min-height: 44px;
+          padding: 0 15px;
+          border-radius: 14px;
+          font-size: 13px;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .primaryBtn {
+          border: 1px solid rgba(59, 130, 246, 0.22);
+          background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+          color: #fff;
+          box-shadow: 0 14px 28px rgba(37, 99, 235, 0.18);
+        }
+
+        .secondaryBtn {
+          border: 1px solid #e2e8f0;
+          background: rgba(255, 255, 255, 0.86);
+          color: #0f172a;
+        }
+
+        .primaryBtn:disabled,
+        .secondaryBtn:disabled {
+          opacity: 0.58;
+          cursor: not-allowed;
+          box-shadow: none;
+        }
+
+        .section {
+          margin-top: 16px;
+          padding: 16px;
+          border-radius: 22px;
+          border: 1px solid #e2e8f0;
+          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+        }
+
+        .sectionTitle {
+          font-size: 13px;
+          font-weight: 1000;
+          letter-spacing: 0.02em;
+          color: #0f172a;
+        }
+
+        .detailList {
+          margin-top: 10px;
+        }
+
+        .detailRow {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 14px;
+          padding: 11px 0;
+        }
+
+        .detailRow + .detailRow {
+          border-top: 1px solid #eef2f7;
+        }
+
+        .detailLabel {
+          flex: 0 0 88px;
+          font-size: 12px;
+          font-weight: 900;
+          color: #64748b;
+        }
+
+        .detailValue {
+          flex: 1;
+          min-width: 0;
+          text-align: right;
+          font-size: 13px;
+          line-height: 1.5;
+          font-weight: 850;
+          color: #0f172a;
+          overflow-wrap: anywhere;
+        }
+
+        .inlineLink {
+          border: 0;
+          background: transparent;
+          padding: 0;
+          margin: 0;
+          font-size: 13px;
+          font-weight: 900;
+          color: #2563eb;
+          cursor: pointer;
+          text-align: right;
+        }
+
+        .description {
+          margin-top: 10px;
+          font-size: 14px;
+          line-height: 1.72;
+          color: #334155;
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+        }
+
+        .footerMeta {
+          margin-top: 14px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          color: #64748b;
+          font-size: 12px;
+          font-weight: 850;
+        }
+
+        .dangerText {
+          color: #b91c1c;
+        }
+
+        .modal,
+        .imageModal {
+          position: fixed;
+          inset: 0;
+          z-index: 100;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 16px;
+          background: rgba(15, 23, 42, 0.56);
+        }
+
+        .modalCard,
+        .imageCard {
+          width: 100%;
+          max-width: 560px;
+          border-radius: 26px;
+          border: 1px solid #e2e8f0;
+          background: #fff;
+          box-shadow: 0 34px 90px rgba(15, 23, 42, 0.2);
+        }
+
+        .modalCard {
+          padding: 18px;
+        }
+
+        .modalTitle {
+          font-size: 17px;
+          font-weight: 1000;
+          color: #0f172a;
+        }
+
+        .modalText {
+          margin-top: 8px;
+          font-size: 13px;
+          line-height: 1.5;
+          font-weight: 700;
+          color: #475569;
+        }
+
+        .modalActions {
+          margin-top: 16px;
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+        }
+
+        .ghostBtn,
+        .dangerBtn {
           min-height: 42px;
           padding: 0 14px;
           border-radius: 14px;
@@ -1167,133 +1434,8 @@ export default function EventDetailPage() {
           cursor: pointer;
         }
 
-        .primaryAction {
-          border: 1px solid rgba(59, 130, 246, 0.24);
-          background: rgba(59, 130, 246, 0.12);
-          color: #1d4ed8;
-        }
-
-        .secondaryAction {
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-        }
-
-        .primaryAction:disabled,
-        .secondaryAction:disabled {
-          opacity: 0.58;
-          cursor: not-allowed;
-        }
-
-        .eventInfo {
-          margin-top: 12px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .infoPill {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          padding: 7px 10px;
-          border-radius: 999px;
-          border: 1px solid #ddd6fe;
-          background: #f5f3ff;
-          color: #6d28d9;
-          font-size: 11px;
-          font-weight: 900;
-        }
-
-        .linkPill {
-          cursor: pointer;
-        }
-
-        .caption {
-          margin-top: 12px;
-          font-size: 13px;
-          line-height: 1.58;
-          color: #334155;
-          white-space: pre-wrap;
-        }
-
-        .captionName {
-          color: #0f172a;
-          font-weight: 1000;
-        }
-
-        .metaFoot {
-          margin-top: 12px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 10px;
-          color: #64748b;
-          font-size: 12px;
-          font-weight: 800;
-        }
-
-        .dangerText {
-          color: #b91c1c;
-        }
-
-        .modal,
-        .imgModal {
-          position: fixed;
-          inset: 0;
-          z-index: 100;
-          background: rgba(15, 23, 42, 0.5);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 16px;
-        }
-
-        .modalCard,
-        .imgCard {
-          width: 100%;
-          max-width: 520px;
-          border-radius: 22px;
-          background: #fff;
-          border: 1px solid #e5e7eb;
-          box-shadow: 0 30px 80px rgba(15, 23, 42, 0.18);
-        }
-
-        .modalCard {
-          padding: 16px;
-        }
-
-        .modalTitle {
-          font-size: 16px;
-          font-weight: 1000;
-          color: #0f172a;
-        }
-
-        .modalText {
-          margin-top: 8px;
-          font-size: 13px;
-          color: #475569;
-          font-weight: 700;
-          line-height: 1.45;
-        }
-
-        .modalActions {
-          margin-top: 14px;
-          display: flex;
-          justify-content: flex-end;
-          gap: 10px;
-        }
-
-        .ghostBtn,
-        .dangerBtn {
-          border-radius: 14px;
-          padding: 10px 13px;
-          font-size: 13px;
-          font-weight: 900;
-          cursor: pointer;
-        }
-
         .ghostBtn {
-          border: 1px solid #e5e7eb;
+          border: 1px solid #e2e8f0;
           background: #fff;
           color: #0f172a;
         }
@@ -1304,16 +1446,17 @@ export default function EventDetailPage() {
           color: #b91c1c;
         }
 
-        .imgTop {
+        .imageTop {
           display: flex;
           align-items: center;
           justify-content: space-between;
           gap: 10px;
-          padding: 12px 14px;
+          padding: 14px;
           border-bottom: 1px solid #eef2f7;
         }
 
-        .imgTitle {
+        .imageTitle {
+          min-width: 0;
           font-size: 13px;
           font-weight: 1000;
           overflow: hidden;
@@ -1321,28 +1464,29 @@ export default function EventDetailPage() {
           white-space: nowrap;
         }
 
-        .imgFull {
+        .fullImage {
           display: block;
           width: 100%;
           max-height: 80vh;
           object-fit: contain;
-          background: #111827;
+          background: #0f172a;
         }
 
         .toast {
           position: fixed;
-          top: 16px;
           left: 50%;
+          bottom: 18px;
           transform: translateX(-50%);
           z-index: 120;
           max-width: calc(100vw - 24px);
-          padding: 10px 13px;
-          border-radius: 14px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
+          padding: 11px 14px;
+          border-radius: 16px;
+          border: 1px solid #e2e8f0;
+          background: rgba(255, 255, 255, 0.96);
+          backdrop-filter: blur(10px);
           font-size: 13px;
           font-weight: 900;
-          box-shadow: 0 16px 42px rgba(15, 23, 42, 0.14);
+          box-shadow: 0 18px 40px rgba(15, 23, 42, 0.14);
         }
 
         .toast.ok {
@@ -1353,38 +1497,53 @@ export default function EventDetailPage() {
           border-color: #fecdd3;
         }
 
-        @media (max-width: 560px) {
-          .heroImg {
+        @media (max-width: 640px) {
+          .hero,
+          .heroImage,
+          .heroFallback {
+            min-height: 320px;
             height: 320px;
           }
 
-          .title {
-            font-size: 20px;
+          .heroTitle {
+            font-size: 24px;
           }
 
-          .authorSub {
-            white-space: normal;
+          .content {
+            padding: 14px;
           }
 
-          .statsRow {
-            gap: 6px;
+          .summaryGrid {
+            gap: 8px;
           }
 
-          .dot {
-            display: none;
+          .summaryTile,
+          .section,
+          .actionCard {
+            border-radius: 20px;
           }
 
-          .stat {
-            width: 100%;
+          .detailRow {
+            flex-direction: column;
+            gap: 4px;
           }
 
-          .flowActions {
+          .detailLabel {
+            flex: 0 0 auto;
+          }
+
+          .detailValue,
+          .inlineLink {
+            text-align: left;
+          }
+
+          .actionButtons {
             display: grid;
             grid-template-columns: 1fr;
           }
 
-          .primaryAction,
-          .secondaryAction {
+          .primaryBtn,
+          .secondaryBtn {
             width: 100%;
           }
         }
