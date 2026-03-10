@@ -6,9 +6,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-const LOVES_TABLE = "post_likes";
-const ATTENDEES_TABLE = "event_attendees";
-
 type EventRow = {
   id: string;
   title: string;
@@ -26,81 +23,53 @@ type EventRow = {
   owner_id: string | null;
 };
 
-type OwnerProfile = {
-  full_name: string | null;
-  user_role: string | null;
-};
+type StepKey = "write" | "details" | "review";
 
-type EventLoveRow = {
-  event_id: string | null;
-};
+const APP_NAV_HEIGHT_PX = 86;
+const ACTION_BAR_HEIGHT_PX = 84;
 
-type EventAttendeeRow = {
-  id: string;
-  event_id: string;
-  user_id: string;
-  created_at: string | null;
-};
+const EVENT_CATEGORY_OPTIONS = [
+  "career",
+  "club",
+  "sports",
+  "music",
+  "arts",
+  "volunteering",
+  "academic",
+  "social",
+  "other",
+] as const;
 
-function formatTimeRange(startsAtISO: string | null, endsAtISO: string | null) {
-  if (!startsAtISO) return "Time not set";
+type EventCategory = (typeof EVENT_CATEGORY_OPTIONS)[number];
 
-  const s = new Date(startsAtISO);
-  if (Number.isNaN(s.getTime())) return "Time not set";
-
-  const sameDay = endsAtISO ? new Date(endsAtISO).toDateString() === s.toDateString() : true;
-  const day = s.toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
-  const st = s.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-
-  if (!endsAtISO) return `${day} • ${st}`;
-
-  const e = new Date(endsAtISO);
-  if (Number.isNaN(e.getTime())) return `${day} • ${st}`;
-
-  const et = e.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-
-  if (sameDay) return `${day} • ${st}–${et}`;
-
-  const endDay = e.toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
-
-  return `${day} ${st} → ${endDay} ${et}`;
+function toInputDateTime(iso: string | null) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
 }
 
-function formatShortDate(iso: string | null) {
+function fromInputDateTime(v: string) {
+  if (!v.trim()) return null;
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+function formatDateTime(iso: string | null) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, {
+  return d.toLocaleString(undefined, {
     month: "short",
     day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
   });
-}
-
-function ownerNameLabel(event: EventRow | null, owner: OwnerProfile | null) {
-  if (!event) return "Ashland user";
-  if (event.is_anonymous) return "Anonymous";
-  const name = (owner?.full_name ?? "").trim();
-  return name || "Ashland user";
-}
-
-function initials(name: string) {
-  const clean = name.trim();
-  if (!clean) return "A";
-  const parts = clean.split(/\s+/).filter(Boolean);
-  if (parts.length === 1) return parts[0].slice(0, 1).toUpperCase();
-  return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
-}
-
-function norm(v: string | null | undefined) {
-  return (v ?? "").trim().toLowerCase();
 }
 
 function eventCategoryLabel(v: string | null) {
@@ -109,1286 +78,1151 @@ function eventCategoryLabel(v: string | null) {
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
-function isEventEnded(event: EventRow | null) {
-  if (!event) return false;
-  const endIso = event.ends_at ?? event.starts_at;
+function isValidHttpUrlMaybeEmpty(raw: string) {
+  const v = raw.trim();
+  if (!v) return true;
+  return /^https?:\/\//i.test(v);
+}
+
+function isEnded(startsAt: string | null, endsAt: string | null) {
+  const endIso = endsAt ?? startsAt;
   if (!endIso) return false;
-  const endTs = new Date(endIso).getTime();
-  if (Number.isNaN(endTs)) return false;
-  return endTs < Date.now();
+  const ts = new Date(endIso).getTime();
+  if (Number.isNaN(ts)) return false;
+  return ts < Date.now();
 }
 
-function isEventLive(event: EventRow | null) {
-  if (!event?.starts_at) return false;
-  const startTs = new Date(event.starts_at).getTime();
-  if (Number.isNaN(startTs)) return false;
-
-  const endIso = event.ends_at ?? event.starts_at;
-  const endTs = new Date(endIso).getTime();
-  if (Number.isNaN(endTs)) return false;
-
-  const now = Date.now();
-  return now >= startTs && now <= endTs;
-}
-
-function eventStateChip(event: EventRow | null) {
-  if (!event) return { label: "Loading", tone: "neutral" as const };
-  if (event.is_cancelled) return { label: "Cancelled", tone: "closed" as const };
-  if (isEventEnded(event)) return { label: "Ended", tone: "closed" as const };
-  if (isEventLive(event)) return { label: "Live", tone: "good" as const };
-  return { label: "Upcoming", tone: "good" as const };
-}
-
-export default function EventDetailPage() {
+export default function EditEventPage() {
   const router = useRouter();
   const params = useParams();
-  const eventId = (params?.id as string) || "";
-
-  const [userId, setUserId] = useState<string | null>(null);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const id = (params?.id as string) || "";
+  const topRef = useRef<HTMLDivElement | null>(null);
 
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
   const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState<string | null>(null);
 
+  const [userId, setUserId] = useState<string | null>(null);
   const [event, setEvent] = useState<EventRow | null>(null);
-  const [owner, setOwner] = useState<OwnerProfile | null>(null);
 
-  const [loveCount, setLoveCount] = useState(0);
-  const [myLoved, setMyLoved] = useState(false);
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const steps: StepKey[] = ["write", "details", "review"];
+  const currentStep = steps[currentStepIndex];
 
-  const [attendeeCount, setAttendeeCount] = useState(0);
-  const [myAttending, setMyAttending] = useState(false);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
 
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [openImg, setOpenImg] = useState<string | null>(null);
+  const [hostOrg, setHostOrg] = useState("");
+  const [category, setCategory] = useState<EventCategory>("club");
+  const [location, setLocation] = useState("");
 
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
+  const [startsAtLocal, setStartsAtLocal] = useState("");
+  const [endsAtLocal, setEndsAtLocal] = useState("");
 
-  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [linkUrl, setLinkUrl] = useState("");
+  const [photoUrl, setPhotoUrl] = useState("");
+
+  const [isAnonymous, setIsAnonymous] = useState(false);
+  const [isCancelled, setIsCancelled] = useState(false);
 
   const organizerId = useMemo(() => {
     return event?.owner_id ?? event?.created_by ?? null;
   }, [event?.owner_id, event?.created_by]);
 
-  const isAshland = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
-
   const isOwner = useMemo(() => {
     return !!userId && !!organizerId && userId === organizerId;
   }, [userId, organizerId]);
 
-  const ownerLabel = useMemo(() => ownerNameLabel(event, owner), [event, owner]);
-  const chip = useMemo(() => eventStateChip(event), [event]);
-
-  const subtitle = useMemo(() => {
-    if (!event) return "";
-    return [
-      event.host_org?.trim() ? event.host_org.trim() : "",
-      event.category?.trim() ? eventCategoryLabel(event.category) : "",
-      event.location?.trim() ? event.location.trim() : "",
-    ]
-      .filter(Boolean)
-      .join(" • ");
+  const editingLocked = useMemo(() => {
+    if (!event) return false;
+    return false;
   }, [event]);
 
-  const flow = useMemo(() => {
-    if (!event) return null;
+  const startIso = useMemo(() => fromInputDateTime(startsAtLocal), [startsAtLocal]);
+  const endIso = useMemo(() => fromInputDateTime(endsAtLocal), [endsAtLocal]);
 
-    if (isOwner) {
-      return {
-        kind: "owner" as const,
-        title: "You created this event.",
-        body: "Edit details, update the flyer, or remove the event.",
-        primary: "Edit event",
-        secondary: "Delete event",
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
+  const dirty = useMemo(() => {
+    if (!event) return false;
 
-    if (!isAshland) {
-      return {
-        kind: "login" as const,
-        title: "Log in to attend.",
-        body: "Only Ashland users can join events.",
-        primary: "Log in",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
+    return (
+      title !== (event.title ?? "") ||
+      description !== (event.description ?? "") ||
+      hostOrg !== (event.host_org ?? "") ||
+      category !== ((event.category as EventCategory) ?? "club") ||
+      location !== (event.location ?? "") ||
+      startsAtLocal !== toInputDateTime(event.starts_at ?? null) ||
+      endsAtLocal !== toInputDateTime(event.ends_at ?? null) ||
+      linkUrl !== (event.link_url ?? "") ||
+      photoUrl !== (event.photo_url ?? "") ||
+      isAnonymous !== !!event.is_anonymous ||
+      isCancelled !== !!event.is_cancelled
+    );
+  }, [
+    event,
+    title,
+    description,
+    hostOrg,
+    category,
+    location,
+    startsAtLocal,
+    endsAtLocal,
+    linkUrl,
+    photoUrl,
+    isAnonymous,
+    isCancelled,
+  ]);
 
-    if (event.is_cancelled) {
-      return {
-        kind: "cancelled" as const,
-        title: "This event has been cancelled.",
-        body: "Attendance is closed.",
-        primary: "Cancelled",
-        secondary: null,
-        primaryDisabled: true,
-        secondaryDisabled: true,
-      };
-    }
-
-    if (isEventEnded(event)) {
-      return {
-        kind: "ended" as const,
-        title: "This event has already ended.",
-        body: "Attendance is closed.",
-        primary: "Ended",
-        secondary: null,
-        primaryDisabled: true,
-        secondaryDisabled: true,
-      };
-    }
-
-    if (myAttending) {
-      return {
-        kind: "attending" as const,
-        title: "You’re attending this event.",
-        body: "You can leave if your plans changed.",
-        primary: "Attending",
-        secondary: "Leave",
-        primaryDisabled: true,
-        secondaryDisabled: false,
-      };
-    }
-
-    return {
-      kind: "open" as const,
-      title: "You can attend this event.",
-      body: "Join now so the organizer knows you’re coming.",
-      primary: "Attend",
-      secondary: event.link_url ? "Open link" : null,
-      primaryDisabled: false,
-      secondaryDisabled: false,
-    };
-  }, [event, isOwner, isAshland, myAttending]);
-
-  function showToast(msg: string, kind: "ok" | "err" = "ok") {
-    setToast({ msg, kind });
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 2500);
+  async function syncAuth() {
+    const { data } = await supabase.auth.getSession();
+    setUserId(data.session?.user?.id ?? null);
   }
 
-  async function loadEverything(uid: string | null, email: string | null) {
-    if (!eventId) return;
+  async function loadEvent() {
+    if (!id) return;
 
     setLoading(true);
     setErr(null);
+    setOk(null);
 
     try {
-      const { data: ev, error: eventErr } = await supabase
+      const { data, error } = await supabase
         .from("events")
         .select(
           "id,title,description,host_org,category,location,starts_at,ends_at,link_url,photo_url,is_anonymous,is_cancelled,created_by,owner_id"
         )
-        .eq("id", eventId)
+        .eq("id", id)
         .single();
 
-      if (eventErr) throw new Error(eventErr.message);
+      if (error) throw new Error(error.message);
 
-      const loaded = ev as EventRow;
-      setEvent(loaded);
+      const row = data as EventRow;
 
-      const resolvedOwnerId = loaded.owner_id ?? loaded.created_by ?? null;
+      setEvent(row);
 
-      if (!loaded.is_anonymous && resolvedOwnerId) {
-        const { data: prof } = await supabase
-          .from("profiles")
-          .select("full_name,user_role")
-          .eq("id", resolvedOwnerId)
-          .maybeSingle();
-
-        setOwner((prof as OwnerProfile) ?? null);
-      } else {
-        setOwner(null);
-      }
-
-      const { count: lovesCount, error: loveCountErr } = await supabase
-        .from(LOVES_TABLE)
-        .select("*", { count: "exact", head: true })
-        .eq("event_id", eventId);
-
-      if (!loveCountErr) setLoveCount(lovesCount ?? 0);
-      else setLoveCount(0);
-
-      if (uid) {
-        const { data: mineLove, error: mineLoveErr } = await supabase
-          .from(LOVES_TABLE)
-          .select("event_id")
-          .eq("event_id", eventId)
-          .eq("user_id", uid)
-          .maybeSingle();
-
-        if (!mineLoveErr) setMyLoved(!!mineLove);
-        else setMyLoved(false);
-      } else {
-        setMyLoved(false);
-      }
-
-      const { data: attendeeRows, count: attendeeCountExact, error: attendeeErr } = await supabase
-        .from(ATTENDEES_TABLE)
-        .select("id,event_id,user_id,created_at", { count: "exact" })
-        .eq("event_id", eventId);
-
-      if (!attendeeErr) {
-        const rows = (attendeeRows as EventAttendeeRow[]) || [];
-        setAttendeeCount(attendeeCountExact ?? rows.length);
-
-        if (uid) {
-          setMyAttending(rows.some((row) => row.user_id === uid));
-        } else {
-          setMyAttending(false);
-        }
-      } else {
-        setAttendeeCount(0);
-        setMyAttending(false);
-      }
-
-      setUserId(uid);
-      setUserEmail(email);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load event.");
+      setTitle(row.title ?? "");
+      setDescription(row.description ?? "");
+      setHostOrg(row.host_org ?? "");
+      setCategory(((row.category as EventCategory) ?? "club") as EventCategory);
+      setLocation(row.location ?? "");
+      setStartsAtLocal(toInputDateTime(row.starts_at ?? null));
+      setEndsAtLocal(toInputDateTime(row.ends_at ?? null));
+      setLinkUrl(row.link_url ?? "");
+      setPhotoUrl(row.photo_url ?? "");
+      setIsAnonymous(!!row.is_anonymous);
+      setIsCancelled(!!row.is_cancelled);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to load event.";
+      setErr(message);
       setEvent(null);
-      setOwner(null);
-      setLoveCount(0);
-      setMyLoved(false);
-      setAttendeeCount(0);
-      setMyAttending(false);
     } finally {
       setLoading(false);
     }
   }
 
-  async function syncAuthAndLoad() {
-    const { data } = await supabase.auth.getSession();
-    const uid = data.session?.user?.id ?? null;
-    const email = data.session?.user?.email ?? null;
-    await loadEverything(uid, email);
+  function stepTitle(step: StepKey) {
+    if (step === "write") return "Edit your event";
+    if (step === "details") return "Update event details";
+    return "Review changes";
   }
 
-  async function toggleLove() {
-    if (!event) return;
-
-    if (!userId) {
-      router.push("/me");
-      return;
-    }
-
-    setBusy(true);
-
-    try {
-      if (myLoved) {
-        const { error } = await supabase
-          .from(LOVES_TABLE)
-          .delete()
-          .eq("event_id", event.id)
-          .eq("user_id", userId);
-
-        if (error) throw new Error(error.message);
-
-        setMyLoved(false);
-        setLoveCount((c) => Math.max(0, c - 1));
-      } else {
-        const { error } = await supabase.from(LOVES_TABLE).insert([
-          {
-            event_id: event.id,
-            user_id: userId,
-          },
-        ]);
-
-        if (error) {
-          const msg = error.message.toLowerCase();
-          if (!msg.includes("duplicate") && !msg.includes("unique")) {
-            throw new Error(error.message);
-          }
-        }
-
-        setMyLoved(true);
-        setLoveCount((c) => c + 1);
-      }
-    } catch (e: any) {
-      showToast(e?.message || "Could not update love.", "err");
-    } finally {
-      setBusy(false);
-    }
+  function stepSubtitle(step: StepKey) {
+    if (step === "write") return "Fix the title, description, and flyer link.";
+    if (step === "details") return "Update host, category, location, time, and visibility.";
+    return "Check everything before saving.";
   }
 
-  async function attendEvent() {
-    if (!event) return;
+  function validateStep(step: StepKey) {
+    if (!title.trim()) return "Title is required.";
+    if (step === "write" && description.trim().length < 3) return "Description is required.";
 
-    if (!userId) {
-      router.push("/me");
-      return;
-    }
+    if (step === "details") {
+      if (!hostOrg.trim()) return "Host is required.";
+      if (!category) return "Choose a category.";
+      if (!location.trim()) return "Location is required.";
+      if (!startsAtLocal.trim()) return "Start time is required.";
+      if (!startIso) return "Start time is invalid.";
+      if (!isValidHttpUrlMaybeEmpty(linkUrl)) return "Link must start with http:// or https://";
+      if (!isValidHttpUrlMaybeEmpty(photoUrl)) return "Flyer URL must start with http:// or https://";
 
-    if (isOwner) return;
-    if (event.is_cancelled || isEventEnded(event)) {
-      showToast("This event is not accepting attendance.", "err");
-      return;
-    }
-
-    setActionBusy("attend");
-
-    try {
-      const { error } = await supabase.from(ATTENDEES_TABLE).insert([
-        {
-          event_id: event.id,
-          user_id: userId,
-        },
-      ]);
-
-      if (error) {
-        const msg = error.message.toLowerCase();
-        if (!msg.includes("duplicate") && !msg.includes("unique")) {
-          throw new Error(error.message);
+      if (endsAtLocal.trim() && endIso && startIso) {
+        if (new Date(endIso).getTime() < new Date(startIso).getTime()) {
+          return "End time cannot be before start time.";
         }
       }
+    }
 
-      await loadEverything(userId, userEmail);
-      showToast("You’re attending.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not join event.", "err");
-    } finally {
-      setActionBusy(null);
+    return null;
+  }
+
+  function goNext() {
+    setErr(null);
+    setOk(null);
+
+    const problem = validateStep(currentStep);
+    if (problem) {
+      setErr(problem);
+      return;
+    }
+
+    if (currentStepIndex < steps.length - 1) {
+      setCurrentStepIndex((p) => p + 1);
+      requestAnimationFrame(() => {
+        topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
     }
   }
 
-  async function leaveEvent() {
-    if (!event || !userId) return;
+  function goPrev() {
+    setErr(null);
+    setOk(null);
 
-    setActionBusy("leave");
-
-    try {
-      const { error } = await supabase
-        .from(ATTENDEES_TABLE)
-        .delete()
-        .eq("event_id", event.id)
-        .eq("user_id", userId);
-
-      if (error) throw new Error(error.message);
-
-      await loadEverything(userId, userEmail);
-      showToast("You left the event.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not leave event.", "err");
-    } finally {
-      setActionBusy(null);
+    if (currentStepIndex <= 0) {
+      router.back();
+      return;
     }
+
+    setCurrentStepIndex((p) => Math.max(0, p - 1));
+    requestAnimationFrame(() => {
+      topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   }
 
-  async function deleteEvent() {
-    if (!event || !isOwner || !userId) return;
+  async function save() {
+    if (!event) return;
 
-    setBusy(true);
+    setSaving(true);
+    setErr(null);
+    setOk(null);
 
     try {
-      await supabase.from(ATTENDEES_TABLE).delete().eq("event_id", event.id);
-      await supabase.from(LOVES_TABLE).delete().eq("event_id", event.id);
+      if (!isOwner) throw new Error("You are not allowed to edit this event.");
+      if (editingLocked) throw new Error("Editing is currently locked for this event.");
 
-      const { error } = await supabase
-        .from("events")
-        .delete()
-        .eq("id", event.id)
-        .eq("created_by", userId);
+      const finalProblem =
+        validateStep("write") || validateStep("details") || validateStep("review");
+      if (finalProblem) throw new Error(finalProblem);
 
+      const payload = {
+        title: title.trim(),
+        description: description.trim() ? description.trim() : null,
+        host_org: hostOrg.trim() ? hostOrg.trim() : null,
+        category,
+        location: location.trim() ? location.trim() : null,
+        starts_at: startIso,
+        ends_at: endsAtLocal.trim() ? endIso : null,
+        link_url: linkUrl.trim() ? linkUrl.trim() : null,
+        photo_url: photoUrl.trim() ? photoUrl.trim() : null,
+        is_anonymous: isAnonymous,
+        is_cancelled: isCancelled,
+      };
+
+      const { error } = await supabase.from("events").update(payload).eq("id", event.id);
       if (error) throw new Error(error.message);
 
-      showToast("Event deleted.");
-      router.replace("/feed");
-    } catch (e: any) {
-      showToast(e?.message || "Could not delete event.", "err");
+      setOk("Saved successfully ✅");
+      await loadEvent();
+      setCurrentStepIndex(2);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to save.";
+      setErr(message);
     } finally {
-      setBusy(false);
-      setConfirmDelete(false);
+      setSaving(false);
     }
   }
 
   useEffect(() => {
-    syncAuthAndLoad();
+    syncAuth();
+    loadEvent();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
-      const uid = session?.user?.id ?? null;
-      const email = session?.user?.email ?? null;
-      await loadEverything(uid, email);
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      syncAuth();
+      loadEvent();
     });
 
     return () => sub.subscription.unsubscribe();
-  }, [eventId]);
+  }, [id]);
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        setMenuOpen(false);
-        setOpenImg(null);
-        setConfirmDelete(false);
-      }
-    }
+  const pageBottomPad = `calc(${APP_NAV_HEIGHT_PX}px + ${ACTION_BAR_HEIGHT_PX}px + env(safe-area-inset-bottom) + 22px)`;
+  const bottomOffset = `calc(${APP_NAV_HEIGHT_PX}px + env(safe-area-inset-bottom) + 10px)`;
 
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (toastTimer.current) clearTimeout(toastTimer.current);
-    };
-  }, []);
-
-  return (
-    <div className="page">
-      <div className="shell">
-        <header className="topBar">
-          <button className="iconBtn" onClick={() => router.back()} aria-label="Back" type="button">
-            ←
-          </button>
-
-          <div className="topCenter">
-            <div className="topTitle">Event</div>
-            <div className="topSub">scholarswap</div>
+  if (loading) {
+    return (
+      <div className="page">
+        <div className="shell">
+          <div className="statusCard">
+            <div className="statusTitle">Loading…</div>
+            <div className="statusText">Getting your event ready for editing.</div>
           </div>
 
-          <div className="topRightSpace" />
-        </header>
+          <style jsx>{baseStyles}</style>
+        </div>
+      </div>
+    );
+  }
 
-        {err && <div className="alert err">{err}</div>}
-        {loading && <div className="alert">Loading…</div>}
+  return (
+    <div className="page" style={{ paddingBottom: pageBottomPad as string }}>
+      <div className="shell" ref={topRef}>
+        <div className="topBar">
+          <button className="topBtn" onClick={() => router.push(`/event/${id}`)} type="button">
+            ← View event
+          </button>
 
-        {!loading && !err && !event && <div className="alert err">Event not found.</div>}
+          <div className="topRight">
+            <button className="topBtn" onClick={() => router.push("/me")} type="button">
+              My profile
+            </button>
+          </div>
+        </div>
 
-        {!loading && event && (
-          <section className="card">
-            <div className="cardTop">
-              <div className="authorSide">
-                <div className="avatar">{initials(ownerLabel)}</div>
+        <div className="heroHeader">
+          <div className="eyebrow">EDIT</div>
+          <div className="heroTitle">{stepTitle(currentStep)}</div>
+          <div className="heroSubtitle">{stepSubtitle(currentStep)}</div>
+        </div>
 
-                <div className="authorText">
-                  <div className="authorName">{ownerLabel}</div>
-                  {subtitle ? <div className="authorSub">{subtitle}</div> : null}
+        {!isOwner && (
+          <div className="errorBanner">You are not the owner of this event. Editing is disabled.</div>
+        )}
+
+        {editingLocked && (
+          <div className="warningBanner">
+            Editing is currently locked for this event.
+          </div>
+        )}
+
+        {err && <div className="errorBanner">{err}</div>}
+        {ok && <div className="okBanner">{ok}</div>}
+
+        <div className="stepper">
+          {steps.map((step, index) => {
+            const active = index === currentStepIndex;
+            const done = index < currentStepIndex;
+            const label = step === "write" ? "Write" : step === "details" ? "Details" : "Review";
+
+            return (
+              <div className="stepItem" key={step}>
+                <div className={`stepDot ${active ? "active" : ""} ${done ? "done" : ""}`}>
+                  {done ? "✓" : index + 1}
                 </div>
+                <div className={`stepLabel ${active ? "active" : ""}`}>{label}</div>
               </div>
+            );
+          })}
+        </div>
 
-              {isOwner ? (
-                <div className="menuWrap">
-                  {menuOpen ? (
-                    <button
-                      className="menuBackdrop"
-                      aria-label="Close menu"
-                      onClick={() => setMenuOpen(false)}
-                      type="button"
-                    />
-                  ) : null}
-
-                  <button
-                    className="menuBtn"
-                    type="button"
-                    aria-label="Event options"
-                    onClick={() => setMenuOpen((v) => !v)}
-                  >
-                    ⋯
-                  </button>
-
-                  {menuOpen ? (
-                    <div className="menuCard">
-                      <button
-                        className="menuItem"
-                        type="button"
-                        onClick={() => {
-                          setMenuOpen(false);
-                          router.push(`/event/${event.id}/edit`);
-                        }}
-                      >
-                        Edit event
-                      </button>
-
-                      {event.link_url ? (
-                        <button
-                          className="menuItem"
-                          type="button"
-                          onClick={() => {
-                            setMenuOpen(false);
-                            window.open(event.link_url!, "_blank", "noopener,noreferrer");
-                          }}
-                        >
-                          Open event link
-                        </button>
-                      ) : null}
-
-                      <button
-                        className="menuItem danger"
-                        type="button"
-                        onClick={() => {
-                          setMenuOpen(false);
-                          setConfirmDelete(true);
-                        }}
-                      >
-                        Delete event
-                      </button>
-                    </div>
-                  ) : null}
+        {event && (
+          <>
+            {currentStep === "write" && (
+              <section className="card">
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Title</label>
+                  <input
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    className="titleInput"
+                    placeholder="What’s your event called?"
+                    disabled={!isOwner || saving || editingLocked}
+                    autoFocus
+                  />
                 </div>
-              ) : (
-                <button
-                  className={`loveBtn ${myLoved ? "active" : ""}`}
-                  type="button"
-                  onClick={toggleLove}
-                  disabled={busy}
-                  aria-label="Love event"
-                >
-                  {myLoved ? "♥" : "♡"}
-                </button>
-              )}
-            </div>
 
-            <div className="mediaWrap">
-              {event.photo_url ? (
-                <button className="imgBtn" type="button" onClick={() => setOpenImg(event.photo_url!)}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={event.photo_url} alt={event.title} className="heroImg" />
-                </button>
-              ) : (
-                <div className="noPhoto">No flyer</div>
-              )}
-            </div>
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Description</label>
+                  <textarea
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    className="textArea"
+                    rows={7}
+                    placeholder="Update the event description"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
 
-            <div className="body">
-              <div className="titleRow">
-                <h1 className="title">{event.title}</h1>
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Flyer URL</label>
+                  <input
+                    value={photoUrl}
+                    onChange={(e) => setPhotoUrl(e.target.value)}
+                    className="softInput"
+                    placeholder="https://..."
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
 
-                {!isOwner ? (
-                  <button
-                    className={`loveBtn small ${myLoved ? "active" : ""}`}
-                    type="button"
-                    onClick={toggleLove}
-                    disabled={busy}
-                    aria-label="Love event"
-                  >
-                    {myLoved ? "♥" : "♡"}
-                  </button>
-                ) : null}
-              </div>
+                <div className="previewCard">
+                  <div className="previewMedia">
+                    {photoUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={photoUrl} alt="Preview" className="previewImg" />
+                    ) : (
+                      <div className="previewEmpty">No flyer preview</div>
+                    )}
+                  </div>
 
-              <div className="statsRow">
-                <span className="stat">
-                  <span className="statIcon">♥</span> {loveCount}
-                </span>
-
-                <span className="dot">•</span>
-
-                <span className="stat">{attendeeCount} attending</span>
-
-                <span className="dot">•</span>
-
-                <span className={`statusPill ${chip.tone}`}>{chip.label}</span>
-
-                <span className="dot">•</span>
-
-                <span className="stat">{formatTimeRange(event.starts_at, event.ends_at)}</span>
-              </div>
-
-              {flow ? (
-                <div className="flowCard">
-                  <div className="flowTitle">{flow.title}</div>
-                  <div className="flowBody">{flow.body}</div>
-
-                  <div className="flowActions">
-                    <button
-                      className="primaryAction"
-                      type="button"
-                      disabled={flow.primaryDisabled || !!actionBusy}
-                      onClick={() => {
-                        if (flow.kind === "owner") {
-                          router.push(`/event/${event.id}/edit`);
-                          return;
-                        }
-                        if (flow.kind === "login") {
-                          router.push("/me");
-                          return;
-                        }
-                        if (flow.kind === "open") {
-                          void attendEvent();
-                        }
-                      }}
-                    >
-                      {actionBusy === "attend" ? "Saving…" : flow.primary}
-                    </button>
-
-                    {flow.secondary ? (
-                      <button
-                        className="secondaryAction"
-                        type="button"
-                        disabled={flow.secondaryDisabled || !!actionBusy}
-                        onClick={() => {
-                          if (flow.kind === "owner") {
-                            setConfirmDelete(true);
-                            return;
-                          }
-                          if (flow.kind === "attending") {
-                            void leaveEvent();
-                            return;
-                          }
-                          if (flow.kind === "open" && event.link_url) {
-                            window.open(event.link_url, "_blank", "noopener,noreferrer");
-                          }
-                        }}
-                      >
-                        {actionBusy === "leave" ? "Working…" : flow.secondary}
-                      </button>
-                    ) : null}
+                  <div className="previewBody">
+                    <div className="previewMeta">EVENT</div>
+                    <div className="previewHeadline">{title.trim() || "Untitled event"}</div>
+                    <div className="previewText">{description.trim() || "No description yet."}</div>
                   </div>
                 </div>
-              ) : null}
+              </section>
+            )}
 
-              <div className="eventInfo">
-                <span className="infoPill">📍 {event.location?.trim() || "Location not set"}</span>
-                <span className="infoPill">🕒 {formatTimeRange(event.starts_at, event.ends_at)}</span>
-                <span className="infoPill">🏷 {eventCategoryLabel(event.category)}</span>
-                <span className="infoPill">👥 {event.host_org?.trim() || "Host not set"}</span>
-                {event.link_url ? (
-                  <button
-                    className="infoPill linkPill"
-                    type="button"
-                    onClick={() => window.open(event.link_url!, "_blank", "noopener,noreferrer")}
-                  >
-                    🔗 Open link
-                  </button>
-                ) : null}
-              </div>
-
-              {event.description?.trim() ? (
-                <div className="caption">
-                  <span className="captionName">{ownerLabel}</span> {event.description.trim()}
+            {currentStep === "details" && (
+              <section className="card">
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Host</label>
+                  <input
+                    value={hostOrg}
+                    onChange={(e) => setHostOrg(e.target.value)}
+                    className="softInput"
+                    placeholder="Host club / organization"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
                 </div>
-              ) : null}
 
-              <div className="metaFoot">
-                <span>Starts {formatShortDate(event.starts_at)}</span>
-                {event.ends_at ? <span>Ends {formatShortDate(event.ends_at)}</span> : null}
-                {event.is_cancelled ? <span className="dangerText">Cancelled</span> : null}
-              </div>
-            </div>
-          </section>
+                <div className="fieldBlock">
+                  <div className="fieldLabel">Category</div>
+                  <div className="choiceGrid">
+                    {EVENT_CATEGORY_OPTIONS.map((v) => (
+                      <button
+                        key={v}
+                        type="button"
+                        className={`choice ${category === v ? "selected purple" : ""}`}
+                        onClick={() => setCategory(v)}
+                        disabled={!isOwner || saving || editingLocked}
+                      >
+                        {eventCategoryLabel(v)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Location</label>
+                  <input
+                    value={location}
+                    onChange={(e) => setLocation(e.target.value)}
+                    className="softInput"
+                    placeholder="Where is it happening?"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Start time</label>
+                  <input
+                    type="datetime-local"
+                    value={startsAtLocal}
+                    onChange={(e) => setStartsAtLocal(e.target.value)}
+                    className="softInput"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">End time</label>
+                  <input
+                    type="datetime-local"
+                    value={endsAtLocal}
+                    onChange={(e) => setEndsAtLocal(e.target.value)}
+                    className="softInput"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                  <div className="helperText">Leave blank if no end time is needed.</div>
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Event link</label>
+                  <input
+                    value={linkUrl}
+                    onChange={(e) => setLinkUrl(e.target.value)}
+                    className="softInput"
+                    placeholder="https://..."
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                {!isValidHttpUrlMaybeEmpty(linkUrl) && (
+                  <div className="warningBanner">Link must start with http:// or https://</div>
+                )}
+
+                {!isValidHttpUrlMaybeEmpty(photoUrl) && (
+                  <div className="warningBanner">Flyer URL must start with http:// or https://</div>
+                )}
+
+                {!!startsAtLocal &&
+                  !!endsAtLocal &&
+                  !!startIso &&
+                  !!endIso &&
+                  new Date(endIso).getTime() < new Date(startIso).getTime() && (
+                    <div className="warningBanner">End time cannot be before start time.</div>
+                  )}
+
+                <div className="divider" />
+
+                <div className="fieldBlock">
+                  <div className="fieldLabel">Visibility</div>
+                  <div className="segmentRow two">
+                    <button
+                      type="button"
+                      className={`segment ${!isAnonymous ? "active" : ""}`}
+                      onClick={() => setIsAnonymous(false)}
+                      disabled={!isOwner || saving || editingLocked}
+                    >
+                      Show my name
+                    </button>
+                    <button
+                      type="button"
+                      className={`segment ${isAnonymous ? "active" : ""}`}
+                      onClick={() => setIsAnonymous(true)}
+                      disabled={!isOwner || saving || editingLocked}
+                    >
+                      Anonymous
+                    </button>
+                  </div>
+                </div>
+
+                <div className="fieldBlock">
+                  <div className="fieldLabel">Event status</div>
+                  <div className="segmentRow two">
+                    <button
+                      type="button"
+                      className={`segment ${!isCancelled ? "active" : ""}`}
+                      onClick={() => setIsCancelled(false)}
+                      disabled={!isOwner || saving || editingLocked}
+                    >
+                      Active
+                    </button>
+                    <button
+                      type="button"
+                      className={`segment ${isCancelled ? "active cancel" : "cancel"}`}
+                      onClick={() => setIsCancelled(true)}
+                      disabled={!isOwner || saving || editingLocked}
+                    >
+                      Cancelled
+                    </button>
+                  </div>
+                  <div className="helperText">
+                    Canceling the event will later trigger attendee notifications.
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {currentStep === "review" && (
+              <section className="card">
+                <div className="reviewPreview">
+                  <div className="reviewPreviewMedia">
+                    {photoUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={photoUrl} alt={title || "Preview"} className="reviewPreviewImg" />
+                    ) : (
+                      <div className="previewEmpty">No flyer preview</div>
+                    )}
+                  </div>
+
+                  <div className="reviewPreviewBody">
+                    <div className="previewMeta">EVENT</div>
+                    <div className="previewHeadline">{title.trim() || "Untitled event"}</div>
+                    <div className="previewText">{description.trim() || "No description yet."}</div>
+                  </div>
+                </div>
+
+                <div className="reviewList">
+                  <div className="reviewRow">
+                    <span className="reviewKey">Type</span>
+                    <span className="reviewValue">Event</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Host</span>
+                    <span className="reviewValue">{hostOrg.trim() || "None"}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Category</span>
+                    <span className="reviewValue">{eventCategoryLabel(category)}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Location</span>
+                    <span className="reviewValue">{location.trim() || "None"}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Starts</span>
+                    <span className="reviewValue">{formatDateTime(startIso)}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Ends</span>
+                    <span className="reviewValue">{formatDateTime(endsAtLocal ? endIso : null)}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Link</span>
+                    <span className="reviewValue">{linkUrl.trim() || "None"}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Visibility</span>
+                    <span className="reviewValue">{isAnonymous ? "Anonymous" : "Show my name"}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Status</span>
+                    <span className="reviewValue">
+                      {isCancelled ? "Cancelled" : isEnded(startIso, endIso) ? "Ended / scheduled in past" : "Active"}
+                    </span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Changed</span>
+                    <span className="reviewValue">{dirty ? "Yes" : "No changes yet"}</span>
+                  </div>
+                </div>
+              </section>
+            )}
+          </>
         )}
       </div>
 
-      {confirmDelete ? (
-        <div className="modal" onClick={() => setConfirmDelete(false)}>
-          <div className="modalCard" onClick={(e) => e.stopPropagation()}>
-            <div className="modalTitle">Delete event?</div>
-            <div className="modalText">This permanently removes the event and attendee list.</div>
-
-            <div className="modalActions">
-              <button className="ghostBtn" onClick={() => setConfirmDelete(false)} type="button">
-                Cancel
-              </button>
-              <button className="dangerBtn" onClick={deleteEvent} disabled={busy} type="button">
-                {busy ? "Deleting..." : "Delete"}
-              </button>
+      <div className="stickyBar" style={{ bottom: bottomOffset as string }}>
+        <div className="stickyInner">
+          <div className="stickyText">
+            <div className="stickyMini">Edit flow</div>
+            <div className="stickyMain">
+              {!isOwner
+                ? "Owner access required"
+                : editingLocked
+                ? "Editing locked"
+                : currentStep === "review"
+                ? dirty
+                  ? "Ready to save changes"
+                  : "No changes yet"
+                : `Step ${currentStepIndex + 1} of ${steps.length}`}
             </div>
           </div>
+
+          <button className="secondaryBtn" onClick={goPrev} disabled={saving} type="button">
+            {currentStepIndex === 0 ? "Back" : "Previous"}
+          </button>
+
+          {currentStep !== "review" ? (
+            <button
+              className="primaryBtn"
+              onClick={goNext}
+              disabled={!isOwner || saving || editingLocked}
+              type="button"
+            >
+              Continue
+            </button>
+          ) : (
+            <button
+              className="primaryBtn"
+              onClick={save}
+              disabled={!isOwner || saving || editingLocked || !dirty}
+              type="button"
+            >
+              {saving ? "Saving..." : "Save changes"}
+            </button>
+          )}
         </div>
-      ) : null}
+      </div>
 
-      {openImg && event ? (
-        <div className="imgModal" onClick={() => setOpenImg(null)}>
-          <div className="imgCard" onClick={(e) => e.stopPropagation()}>
-            <div className="imgTop">
-              <div className="imgTitle">{event.title}</div>
-              <button className="iconGhost" onClick={() => setOpenImg(null)} type="button">
-                ✕
-              </button>
-            </div>
-
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={openImg} alt={event.title} className="imgFull" />
-          </div>
-        </div>
-      ) : null}
-
-      {toast ? <div className={`toast ${toast.kind === "err" ? "err" : "ok"}`}>{toast.msg}</div> : null}
-
+      <style jsx>{baseStyles}</style>
       <style jsx>{`
-        .page {
-          min-height: 100vh;
-          background: #f6f7fb;
-          color: #0f172a;
-          padding: 12px 12px 28px;
+        .heroHeader {
+          margin-bottom: 16px;
         }
 
-        .shell {
-          max-width: 760px;
-          margin: 0 auto;
+        .eyebrow {
+          font-size: 12px;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: #64748b;
+          font-weight: 1000;
         }
 
-        .topBar {
-          position: sticky;
-          top: 0;
-          z-index: 20;
+        .heroTitle {
+          margin-top: 6px;
+          font-size: 31px;
+          line-height: 1.04;
+          font-weight: 1000;
+          letter-spacing: -0.045em;
+        }
+
+        .heroSubtitle {
+          margin-top: 8px;
+          font-size: 14px;
+          color: #64748b;
+          font-weight: 600;
+        }
+
+        .stepper {
           display: grid;
-          grid-template-columns: 42px 1fr 42px;
-          align-items: center;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 10px;
-          padding: 6px 0 12px;
-          background: rgba(246, 247, 251, 0.9);
-          backdrop-filter: blur(12px);
+          margin-bottom: 16px;
         }
 
-        .iconBtn,
-        .iconGhost {
-          width: 42px;
-          height: 42px;
+        .stepItem {
+          min-width: 0;
+          text-align: center;
+        }
+
+        .stepDot {
+          width: 30px;
+          height: 30px;
           border-radius: 999px;
+          display: grid;
+          place-items: center;
+          margin: 0 auto;
+          font-size: 12px;
+          font-weight: 1000;
+          background: #fff;
+          color: #64748b;
+          border: 1px solid #e5e7eb;
+        }
+
+        .stepDot.active {
+          background: #ede9fe;
+          color: #6d28d9;
+          border-color: #c4b5fd;
+        }
+
+        .stepDot.done {
+          background: #03133d;
+          color: #fff;
+          border-color: #03133d;
+        }
+
+        .stepLabel {
+          margin-top: 8px;
+          font-size: 12px;
+          color: #64748b;
+          font-weight: 900;
+        }
+
+        .stepLabel.active {
+          color: #0f172a;
+        }
+
+        .card {
+          background: rgba(255, 255, 255, 0.94);
+          border: 1px solid #e5e7eb;
+          border-radius: 28px;
+          padding: 18px;
+          box-shadow: 0 20px 50px rgba(15, 23, 42, 0.05);
+        }
+
+        .fieldBlock {
+          display: grid;
+          gap: 8px;
+          margin-bottom: 18px;
+        }
+
+        .fieldLabel {
+          font-size: 13px;
+          color: #475569;
+          font-weight: 900;
+        }
+
+        .titleInput {
+          width: 100%;
+          border: none;
+          outline: none;
+          background: transparent;
+          padding: 8px 0 12px 0;
+          font-size: 30px;
+          line-height: 1.05;
+          font-weight: 1000;
+          letter-spacing: -0.045em;
+          border-bottom: 1px solid #e5e7eb;
+        }
+
+        .textArea {
+          width: 100%;
+          border: 1px solid #e5e7eb;
+          outline: none;
+          background: #fff;
+          padding: 16px;
+          border-radius: 20px;
+          resize: vertical;
+          font-size: 15px;
+          line-height: 1.65;
+          color: #0f172a;
+        }
+
+        .softInput {
+          width: 100%;
+          padding: 14px 15px;
+          border-radius: 18px;
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          outline: none;
+          font-size: 14px;
+          color: #0f172a;
+        }
+
+        .choiceGrid {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+
+        .choice {
+          padding: 12px 14px;
+          border-radius: 18px;
           border: 1px solid #e5e7eb;
           background: #fff;
           color: #0f172a;
-          font-size: 18px;
+          font-weight: 900;
+          font-size: 14px;
+          cursor: pointer;
+        }
+
+        .choice.selected.purple {
+          background: #ede9fe;
+          border-color: #8b5cf6;
+          color: #6d28d9;
+        }
+
+        .segmentRow {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 10px;
+        }
+
+        .segmentRow.two {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .segment {
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          color: #0f172a;
+          border-radius: 18px;
+          padding: 13px 14px;
           font-weight: 900;
           cursor: pointer;
         }
 
-        .topCenter {
-          text-align: center;
-          min-width: 0;
+        .segment.active {
+          border-color: #03133d;
+          background: #03133d;
+          color: #fff;
         }
 
-        .topTitle {
-          font-size: 16px;
-          font-weight: 1000;
-          line-height: 1.1;
+        .segment.cancel.active {
+          border-color: #b91c1c;
+          background: #b91c1c;
+          color: #fff;
         }
 
-        .topSub {
-          margin-top: 2px;
+        .divider {
+          height: 1px;
+          background: #eef2f7;
+          margin: 6px 0 18px 0;
+        }
+
+        .helperText {
           font-size: 12px;
           color: #64748b;
           font-weight: 700;
+          line-height: 1.4;
         }
 
-        .topRightSpace {
-          width: 42px;
-          height: 42px;
-        }
-
-        .alert {
-          margin: 8px 0 0;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          padding: 11px 13px;
-          border-radius: 16px;
-          font-size: 13px;
-          font-weight: 800;
-          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
-        }
-
-        .alert.err {
-          border-color: #fecdd3;
-          background: #fff1f2;
-          color: #9f1239;
-        }
-
-        .card {
-          margin-top: 8px;
-          background: #fff;
+        .previewCard,
+        .reviewPreview {
+          background: rgba(255, 255, 255, 0.98);
           border: 1px solid #e5e7eb;
           border-radius: 24px;
           overflow: hidden;
           box-shadow: 0 16px 40px rgba(15, 23, 42, 0.05);
         }
 
-        .cardTop {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          padding: 12px;
-          border-bottom: 1px solid #eef2f7;
-        }
-
-        .authorSide {
-          min-width: 0;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-        }
-
-        .avatar {
-          width: 38px;
-          height: 38px;
-          border-radius: 999px;
-          display: grid;
-          place-items: center;
-          border: 1px solid #dbe3f0;
-          background: linear-gradient(135deg, #ede9fe 0%, #dbeafe 100%);
-          font-size: 12px;
-          font-weight: 1000;
-          flex: 0 0 auto;
-        }
-
-        .authorText {
-          min-width: 0;
-        }
-
-        .authorName {
-          font-size: 13px;
-          font-weight: 1000;
-          line-height: 1.1;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .authorSub {
-          margin-top: 4px;
-          font-size: 11px;
-          color: #64748b;
-          font-weight: 700;
-          line-height: 1.3;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .menuWrap {
+        .previewMedia,
+        .reviewPreviewMedia {
           position: relative;
-          flex: 0 0 auto;
-        }
-
-        .menuBtn,
-        .loveBtn {
-          width: 38px;
-          height: 38px;
-          border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-          font-size: 22px;
-          line-height: 1;
-          font-weight: 900;
-          cursor: pointer;
-          display: grid;
-          place-items: center;
-        }
-
-        .loveBtn.active {
-          color: #dc2626;
-          border-color: #fecaca;
-          background: #fff5f5;
-        }
-
-        .loveBtn.small {
-          width: 34px;
-          height: 34px;
-          font-size: 19px;
-        }
-
-        .menuBackdrop {
-          position: fixed;
-          inset: 0;
-          background: transparent;
-          border: 0;
-          padding: 0;
-          margin: 0;
-        }
-
-        .menuCard {
-          position: absolute;
-          top: calc(100% + 8px);
-          right: 0;
-          width: 200px;
-          border: 1px solid #e5e7eb;
-          background: rgba(255, 255, 255, 0.98);
-          border-radius: 16px;
-          overflow: hidden;
-          box-shadow: 0 20px 44px rgba(15, 23, 42, 0.14);
-          z-index: 30;
-        }
-
-        .menuItem {
-          width: 100%;
-          border: 0;
-          background: #fff;
-          text-align: left;
-          padding: 12px 14px;
-          font-size: 13px;
-          font-weight: 900;
-          color: #0f172a;
-          cursor: pointer;
-        }
-
-        .menuItem + .menuItem {
-          border-top: 1px solid #eef2f7;
-        }
-
-        .menuItem.danger {
-          color: #b91c1c;
-        }
-
-        .mediaWrap {
+          height: 220px;
           background: #f8fafc;
+          border-bottom: 1px solid #eef2f7;
+          overflow: hidden;
         }
 
-        .imgBtn {
-          display: block;
+        .previewImg,
+        .reviewPreviewImg {
           width: 100%;
-          border: 0;
-          padding: 0;
-          background: transparent;
-          cursor: zoom-in;
-        }
-
-        .heroImg {
-          width: 100%;
-          height: 420px;
+          height: 100%;
           object-fit: cover;
           display: block;
         }
 
-        .noPhoto {
-          height: 220px;
+        .previewEmpty {
+          width: 100%;
+          height: 100%;
           display: grid;
           place-items: center;
+          text-align: center;
           color: #64748b;
-          font-size: 13px;
           font-weight: 800;
+          padding: 20px;
         }
 
-        .body {
-          padding: 14px 14px 16px;
+        .previewBody,
+        .reviewPreviewBody {
+          padding: 16px;
         }
 
-        .titleRow {
+        .previewMeta {
+          font-size: 12px;
+          color: #64748b;
+          font-weight: 900;
+        }
+
+        .previewHeadline {
+          margin-top: 8px;
+          font-size: 24px;
+          line-height: 1.14;
+          font-weight: 1000;
+          letter-spacing: -0.03em;
+        }
+
+        .previewText {
+          margin-top: 12px;
+          font-size: 14px;
+          color: #334155;
+          line-height: 1.55;
+        }
+
+        .reviewList {
+          margin-top: 18px;
+          display: grid;
+          gap: 0;
+        }
+
+        .reviewRow {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
-          gap: 10px;
-        }
-
-        .title {
-          margin: 0;
-          font-size: 22px;
-          line-height: 1.08;
-          font-weight: 1000;
-          letter-spacing: -0.04em;
-          overflow-wrap: anywhere;
-          flex: 1;
-          min-width: 0;
-        }
-
-        .statsRow {
-          margin-top: 10px;
-          display: flex;
-          align-items: center;
-          flex-wrap: wrap;
-          gap: 8px;
-          color: #475569;
-          font-size: 12px;
-          font-weight: 900;
-          line-height: 1.4;
-        }
-
-        .stat {
-          display: inline-flex;
-          align-items: center;
-          gap: 5px;
-        }
-
-        .statIcon {
-          color: #dc2626;
-        }
-
-        .dot {
-          color: #cbd5e1;
-        }
-
-        .statusPill {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 24px;
-          padding: 0 9px;
-          border-radius: 999px;
-          font-size: 11px;
-          font-weight: 900;
-          border: 1px solid #e5e7eb;
-        }
-
-        .statusPill.good {
-          color: #166534;
-          border-color: #bbf7d0;
-          background: #ecfdf5;
-        }
-
-        .statusPill.closed,
-        .statusPill.neutral {
-          color: #475569;
-          border-color: #e5e7eb;
-          background: #f8fafc;
-        }
-
-        .flowCard {
-          margin-top: 14px;
-          padding: 14px;
-          border-radius: 18px;
-          border: 1px solid #e5e7eb;
-          background: #f8fafc;
-        }
-
-        .flowTitle {
-          font-size: 14px;
-          font-weight: 1000;
-          color: #0f172a;
-        }
-
-        .flowBody {
-          margin-top: 5px;
-          font-size: 13px;
-          line-height: 1.5;
-          color: #475569;
-          font-weight: 700;
-        }
-
-        .flowActions {
-          margin-top: 12px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 10px;
-        }
-
-        .primaryAction,
-        .secondaryAction {
-          min-height: 42px;
-          padding: 0 14px;
-          border-radius: 14px;
-          font-size: 13px;
-          font-weight: 900;
-          cursor: pointer;
-        }
-
-        .primaryAction {
-          border: 1px solid rgba(59, 130, 246, 0.24);
-          background: rgba(59, 130, 246, 0.12);
-          color: #1d4ed8;
-        }
-
-        .secondaryAction {
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-        }
-
-        .primaryAction:disabled,
-        .secondaryAction:disabled {
-          opacity: 0.58;
-          cursor: not-allowed;
-        }
-
-        .eventInfo {
-          margin-top: 12px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .infoPill {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          padding: 7px 10px;
-          border-radius: 999px;
-          border: 1px solid #ddd6fe;
-          background: #f5f3ff;
-          color: #6d28d9;
-          font-size: 11px;
-          font-weight: 900;
-        }
-
-        .linkPill {
-          cursor: pointer;
-        }
-
-        .caption {
-          margin-top: 12px;
-          font-size: 13px;
-          line-height: 1.58;
-          color: #334155;
-          white-space: pre-wrap;
-        }
-
-        .captionName {
-          color: #0f172a;
-          font-weight: 1000;
-        }
-
-        .metaFoot {
-          margin-top: 12px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 10px;
-          color: #64748b;
-          font-size: 12px;
-          font-weight: 800;
-        }
-
-        .dangerText {
-          color: #b91c1c;
-        }
-
-        .modal,
-        .imgModal {
-          position: fixed;
-          inset: 0;
-          z-index: 100;
-          background: rgba(15, 23, 42, 0.5);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 16px;
-        }
-
-        .modalCard,
-        .imgCard {
-          width: 100%;
-          max-width: 520px;
-          border-radius: 22px;
-          background: #fff;
-          border: 1px solid #e5e7eb;
-          box-shadow: 0 30px 80px rgba(15, 23, 42, 0.18);
-        }
-
-        .modalCard {
-          padding: 16px;
-        }
-
-        .modalTitle {
-          font-size: 16px;
-          font-weight: 1000;
-          color: #0f172a;
-        }
-
-        .modalText {
-          margin-top: 8px;
-          font-size: 13px;
-          color: #475569;
-          font-weight: 700;
-          line-height: 1.45;
-        }
-
-        .modalActions {
-          margin-top: 14px;
-          display: flex;
-          justify-content: flex-end;
-          gap: 10px;
-        }
-
-        .ghostBtn,
-        .dangerBtn {
-          border-radius: 14px;
-          padding: 10px 13px;
-          font-size: 13px;
-          font-weight: 900;
-          cursor: pointer;
-        }
-
-        .ghostBtn {
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-        }
-
-        .dangerBtn {
-          border: 1px solid #fecdd3;
-          background: #fff1f2;
-          color: #b91c1c;
-        }
-
-        .imgTop {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          padding: 12px 14px;
+          gap: 12px;
+          padding: 12px 0;
           border-bottom: 1px solid #eef2f7;
         }
 
-        .imgTitle {
+        .reviewKey {
           font-size: 13px;
-          font-weight: 1000;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .imgFull {
-          display: block;
-          width: 100%;
-          max-height: 80vh;
-          object-fit: contain;
-          background: #111827;
-        }
-
-        .toast {
-          position: fixed;
-          top: 16px;
-          left: 50%;
-          transform: translateX(-50%);
-          z-index: 120;
-          max-width: calc(100vw - 24px);
-          padding: 10px 13px;
-          border-radius: 14px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          font-size: 13px;
+          color: #64748b;
           font-weight: 900;
-          box-shadow: 0 16px 42px rgba(15, 23, 42, 0.14);
         }
 
-        .toast.ok {
-          border-color: #bbf7d0;
+        .reviewValue {
+          font-size: 14px;
+          color: #0f172a;
+          font-weight: 900;
+          text-align: right;
+          line-height: 1.45;
         }
 
-        .toast.err {
-          border-color: #fecdd3;
-        }
-
-        @media (max-width: 560px) {
-          .heroImg {
-            height: 320px;
+        @media (max-width: 520px) {
+          .heroTitle {
+            font-size: 27px;
           }
 
-          .title {
-            font-size: 20px;
+          .titleInput {
+            font-size: 27px;
           }
 
-          .authorSub {
-            white-space: normal;
-          }
-
-          .statsRow {
-            gap: 6px;
-          }
-
-          .dot {
-            display: none;
-          }
-
-          .stat {
-            width: 100%;
-          }
-
-          .flowActions {
-            display: grid;
+          .segmentRow {
             grid-template-columns: 1fr;
           }
 
-          .primaryAction,
-          .secondaryAction {
-            width: 100%;
+          .previewMedia,
+          .reviewPreviewMedia {
+            height: 190px;
           }
         }
       `}</style>
     </div>
   );
 }
+
+const baseStyles = `
+  .page {
+    min-height: 100vh;
+    background: linear-gradient(180deg, #f8fafc 0%, #f6f7fb 42%, #f8fafc 100%);
+    color: #0f172a;
+    padding: 16px;
+  }
+
+  .shell {
+    max-width: 980px;
+    margin: 0 auto;
+  }
+
+  .topBar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .topRight {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .topBtn {
+    border: 1px solid #e5e7eb;
+    background: rgba(255,255,255,0.88);
+    color: #0f172a;
+    padding: 10px 14px;
+    border-radius: 999px;
+    font-weight: 900;
+    cursor: pointer;
+    box-shadow: 0 10px 24px rgba(15,23,42,0.04);
+  }
+
+  .statusCard {
+    background: rgba(255,255,255,0.95);
+    border: 1px solid #e5e7eb;
+    border-radius: 26px;
+    padding: 22px;
+    box-shadow: 0 24px 60px rgba(15,23,42,0.06);
+  }
+
+  .statusTitle {
+    font-weight: 1000;
+    font-size: 22px;
+  }
+
+  .statusText {
+    margin-top: 8px;
+    color: #64748b;
+    font-weight: 700;
+  }
+
+  .errorBanner,
+  .warningBanner,
+  .okBanner {
+    margin-bottom: 14px;
+    padding: 14px 16px;
+    border-radius: 18px;
+    font-weight: 900;
+  }
+
+  .errorBanner {
+    background: #fff1f2;
+    border: 1px solid #fecdd3;
+    color: #9f1239;
+  }
+
+  .warningBanner {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #92400e;
+  }
+
+  .okBanner {
+    background: #ecfdf5;
+    border: 1px solid #bbf7d0;
+    color: #166534;
+  }
+
+  .stickyBar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    z-index: 9999;
+    padding: 10px 12px;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+  }
+
+  .stickyInner {
+    width: 100%;
+    max-width: 980px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(255,255,255,0.92);
+    border: 1px solid rgba(226,232,240,0.95);
+    border-radius: 24px;
+    padding: 14px 16px;
+    box-shadow: 0 18px 50px rgba(15,23,42,0.14);
+    backdrop-filter: blur(16px);
+    pointer-events: auto;
+  }
+
+  .stickyText {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .stickyMini {
+    font-size: 12px;
+    color: #64748b;
+    font-weight: 800;
+  }
+
+  .stickyMain {
+    margin-top: 3px;
+    font-size: 14px;
+    color: #0f172a;
+    font-weight: 1000;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .secondaryBtn {
+    border: 1px solid #e5e7eb;
+    background: #fff;
+    color: #0f172a;
+    padding: 12px 15px;
+    border-radius: 16px;
+    cursor: pointer;
+    font-weight: 900;
+    white-space: nowrap;
+  }
+
+  .primaryBtn {
+    border: none;
+    background: #03133d;
+    color: #fff;
+    padding: 13px 18px;
+    border-radius: 18px;
+    cursor: pointer;
+    font-weight: 1000;
+    min-width: 142px;
+    box-shadow: 0 18px 35px rgba(3,19,61,0.22);
+    white-space: nowrap;
+  }
+
+  .primaryBtn:disabled,
+  .secondaryBtn:disabled {
+    opacity: 0.58;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  @media (max-width: 560px) {
+    .stickyInner {
+      flex-wrap: wrap;
+    }
+
+    .secondaryBtn,
+    .primaryBtn {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+`;
