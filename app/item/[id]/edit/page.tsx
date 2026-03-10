@@ -6,27 +6,21 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-type PostType = "give" | "request";
-
-type ItemRow = {
+type EventRow = {
   id: string;
   title: string;
   description: string | null;
-
+  host_org: string | null;
   category: string | null;
-  pickup_location: string | null;
-
-  post_type: PostType | null;
-  request_group: string | null;
-  request_timeframe: string | null;
-  request_location: string | null;
-
-  is_anonymous: boolean | null;
-  expires_at: string | null;
+  location: string | null;
+  starts_at: string | null;
+  ends_at: string | null;
+  link_url: string | null;
   photo_url: string | null;
-  status: string | null;
+  is_anonymous: boolean | null;
+  is_cancelled: boolean | null;
+  created_by: string | null;
   owner_id: string | null;
-  reserved_interest_id?: string | null;
 };
 
 type StepKey = "write" | "details" | "review";
@@ -34,54 +28,23 @@ type StepKey = "write" | "details" | "review";
 const APP_NAV_HEIGHT_PX = 86;
 const ACTION_BAR_HEIGHT_PX = 84;
 
-const GIVE_CATEGORIES = [
-  "books",
-  "notes",
-  "electronics",
-  "furniture",
-  "clothing",
-  "sport equipment",
-  "stationary item",
-  "ride",
-  "art pieces",
-  "health & beauty",
-  "home & kitchen",
-  "jeweleries",
-  "musical instruments",
-  "lost & found",
-  "others",
+const EVENT_CATEGORY_OPTIONS = [
+  "career",
+  "club",
+  "sports",
+  "music",
+  "arts",
+  "volunteering",
+  "academic",
+  "social",
+  "other",
 ] as const;
 
-const PICKUP_OPTIONS = [
-  "College Quad",
-  "Safety Service Office",
-  "Dining Hall",
-  "Library",
-  "Student Center",
-] as const;
+type EventCategory = (typeof EVENT_CATEGORY_OPTIONS)[number];
 
-const REQUEST_GROUP_OPTIONS = [
-  "logistics",
-  "services",
-  "urgent",
-  "collaboration",
-  "lost & found",
-] as const;
-
-const REQUEST_TIMEFRAME_OPTIONS = [
-  "today",
-  "this_week",
-  "flexible",
-] as const;
-
-type GiveCategory = (typeof GIVE_CATEGORIES)[number];
-type PickupLocation = (typeof PICKUP_OPTIONS)[number];
-type RequestGroup = (typeof REQUEST_GROUP_OPTIONS)[number];
-type RequestTimeframe = (typeof REQUEST_TIMEFRAME_OPTIONS)[number];
-
-function toInputDateTime(expiresAt: string | null) {
-  if (!expiresAt) return "";
-  const d = new Date(expiresAt);
+function toInputDateTime(iso: string | null) {
+  if (!iso) return "";
+  const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
@@ -96,10 +59,10 @@ function fromInputDateTime(v: string) {
   return d.toISOString();
 }
 
-function formatExpiry(expiresAt: string | null) {
-  if (!expiresAt) return "Until canceled";
-  const d = new Date(expiresAt);
-  if (Number.isNaN(d.getTime())) return "Until canceled";
+function formatDateTime(iso: string | null) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString(undefined, {
     month: "short",
     day: "numeric",
@@ -109,33 +72,27 @@ function formatExpiry(expiresAt: string | null) {
   });
 }
 
-function giveCategoryLabel(v: string | null) {
-  return (v ?? "")
-    .split(" ")
-    .filter(Boolean)
-    .map((x) => x.charAt(0).toUpperCase() + x.slice(1))
-    .join(" ");
+function eventCategoryLabel(v: string | null) {
+  const raw = (v ?? "").trim();
+  if (!raw) return "Event";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
-function requestGroupLabel(v: string | null) {
-  const k = (v ?? "").toLowerCase();
-  if (k === "logistics") return "Logistics";
-  if (k === "services") return "Services";
-  if (k === "urgent") return "Urgent";
-  if (k === "collaboration") return "Collaboration";
-  if (k === "lost & found") return "Lost & Found";
-  return "Request";
+function isValidHttpUrlMaybeEmpty(raw: string) {
+  const v = raw.trim();
+  if (!v) return true;
+  return /^https?:\/\//i.test(v);
 }
 
-function requestTimeframeLabel(v: string | null) {
-  const k = (v ?? "").toLowerCase();
-  if (k === "today") return "Today";
-  if (k === "this_week") return "This week";
-  if (k === "flexible") return "Flexible";
-  return "—";
+function isEnded(startsAt: string | null, endsAt: string | null) {
+  const endIso = endsAt ?? startsAt;
+  if (!endIso) return false;
+  const ts = new Date(endIso).getTime();
+  if (Number.isNaN(ts)) return false;
+  return ts < Date.now();
 }
 
-export default function EditItemPage() {
+export default function EditEventPage() {
   const router = useRouter();
   const params = useParams();
   const id = (params?.id as string) || "";
@@ -148,7 +105,7 @@ export default function EditItemPage() {
   const [ok, setOk] = useState<string | null>(null);
 
   const [userId, setUserId] = useState<string | null>(null);
-  const [item, setItem] = useState<ItemRow | null>(null);
+  const [event, setEvent] = useState<EventRow | null>(null);
 
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const steps: StepKey[] = ["write", "details", "review"];
@@ -157,56 +114,64 @@ export default function EditItemPage() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
-  const [postType, setPostType] = useState<PostType>("give");
+  const [hostOrg, setHostOrg] = useState("");
+  const [category, setCategory] = useState<EventCategory>("club");
+  const [location, setLocation] = useState("");
 
-  const [category, setCategory] = useState<GiveCategory>("books");
-  const [pickupLocation, setPickupLocation] = useState<PickupLocation>("College Quad");
+  const [startsAtLocal, setStartsAtLocal] = useState("");
+  const [endsAtLocal, setEndsAtLocal] = useState("");
 
-  const [requestGroup, setRequestGroup] = useState<RequestGroup>("logistics");
-  const [requestTimeframe, setRequestTimeframe] = useState<RequestTimeframe>("today");
-  const [requestLocation, setRequestLocation] = useState("");
-
+  const [linkUrl, setLinkUrl] = useState("");
   const [photoUrl, setPhotoUrl] = useState("");
+
   const [isAnonymous, setIsAnonymous] = useState(false);
-  const [expiresAtLocal, setExpiresAtLocal] = useState("");
+  const [isCancelled, setIsCancelled] = useState(false);
+
+  const organizerId = useMemo(() => {
+    return event?.owner_id ?? event?.created_by ?? null;
+  }, [event?.owner_id, event?.created_by]);
 
   const isOwner = useMemo(() => {
-    return !!userId && !!item?.owner_id && userId === item.owner_id;
-  }, [userId, item?.owner_id]);
+    return !!userId && !!organizerId && userId === organizerId;
+  }, [userId, organizerId]);
 
   const editingLocked = useMemo(() => {
-    if (!item) return false;
-    const st = (item.status ?? "").toLowerCase();
-    return st === "reserved" || st === "claimed" || !!item.reserved_interest_id;
-  }, [item]);
+    if (!event) return false;
+    return false;
+  }, [event]);
+
+  const startIso = useMemo(() => fromInputDateTime(startsAtLocal), [startsAtLocal]);
+  const endIso = useMemo(() => fromInputDateTime(endsAtLocal), [endsAtLocal]);
 
   const dirty = useMemo(() => {
-    if (!item) return false;
+    if (!event) return false;
 
     return (
-      title !== (item.title ?? "") ||
-      description !== (item.description ?? "") ||
-      category !== ((item.category as GiveCategory) ?? "books") ||
-      pickupLocation !== ((item.pickup_location as PickupLocation) ?? "College Quad") ||
-      requestGroup !== ((item.request_group as RequestGroup) ?? "logistics") ||
-      requestTimeframe !== ((item.request_timeframe as RequestTimeframe) ?? "today") ||
-      requestLocation !== (item.request_location ?? "") ||
-      photoUrl !== (item.photo_url ?? "") ||
-      isAnonymous !== !!item.is_anonymous ||
-      expiresAtLocal !== toInputDateTime(item.expires_at ?? null)
+      title !== (event.title ?? "") ||
+      description !== (event.description ?? "") ||
+      hostOrg !== (event.host_org ?? "") ||
+      category !== ((event.category as EventCategory) ?? "club") ||
+      location !== (event.location ?? "") ||
+      startsAtLocal !== toInputDateTime(event.starts_at ?? null) ||
+      endsAtLocal !== toInputDateTime(event.ends_at ?? null) ||
+      linkUrl !== (event.link_url ?? "") ||
+      photoUrl !== (event.photo_url ?? "") ||
+      isAnonymous !== !!event.is_anonymous ||
+      isCancelled !== !!event.is_cancelled
     );
   }, [
-    item,
+    event,
     title,
     description,
+    hostOrg,
     category,
-    pickupLocation,
-    requestGroup,
-    requestTimeframe,
-    requestLocation,
+    location,
+    startsAtLocal,
+    endsAtLocal,
+    linkUrl,
     photoUrl,
     isAnonymous,
-    expiresAtLocal,
+    isCancelled,
   ]);
 
   async function syncAuth() {
@@ -214,7 +179,7 @@ export default function EditItemPage() {
     setUserId(data.session?.user?.id ?? null);
   }
 
-  async function loadItem() {
+  async function loadEvent() {
     if (!id) return;
 
     setLoading(true);
@@ -223,53 +188,48 @@ export default function EditItemPage() {
 
     try {
       const { data, error } = await supabase
-        .from("items")
+        .from("events")
         .select(
-          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id,reserved_interest_id"
+          "id,title,description,host_org,category,location,starts_at,ends_at,link_url,photo_url,is_anonymous,is_cancelled,created_by,owner_id"
         )
         .eq("id", id)
         .single();
 
       if (error) throw new Error(error.message);
 
-      const row = data as ItemRow;
-      const type = ((row.post_type ?? "give") as PostType) || "give";
+      const row = data as EventRow;
 
-      setItem(row);
-      setPostType(type);
+      setEvent(row);
 
       setTitle(row.title ?? "");
       setDescription(row.description ?? "");
-      setCategory(((row.category as GiveCategory) ?? "books") as GiveCategory);
-      setPickupLocation(
-        ((row.pickup_location as PickupLocation) ?? "College Quad") as PickupLocation
-      );
-      setRequestGroup(((row.request_group as RequestGroup) ?? "logistics") as RequestGroup);
-      setRequestTimeframe(
-        ((row.request_timeframe as RequestTimeframe) ?? "today") as RequestTimeframe
-      );
-      setRequestLocation(row.request_location ?? "");
+      setHostOrg(row.host_org ?? "");
+      setCategory(((row.category as EventCategory) ?? "club") as EventCategory);
+      setLocation(row.location ?? "");
+      setStartsAtLocal(toInputDateTime(row.starts_at ?? null));
+      setEndsAtLocal(toInputDateTime(row.ends_at ?? null));
+      setLinkUrl(row.link_url ?? "");
       setPhotoUrl(row.photo_url ?? "");
       setIsAnonymous(!!row.is_anonymous);
-      setExpiresAtLocal(toInputDateTime(row.expires_at ?? null));
+      setIsCancelled(!!row.is_cancelled);
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Failed to load item.";
+      const message = e instanceof Error ? e.message : "Failed to load event.";
       setErr(message);
-      setItem(null);
+      setEvent(null);
     } finally {
       setLoading(false);
     }
   }
 
   function stepTitle(step: StepKey) {
-    if (step === "write") return "Edit your post";
-    if (step === "details") return "Update details";
+    if (step === "write") return "Edit your event";
+    if (step === "details") return "Update event details";
     return "Review changes";
   }
 
   function stepSubtitle(step: StepKey) {
-    if (step === "write") return "Fix the title, description, and image link.";
-    if (step === "details") return "Update category, pickup, visibility, and expiry.";
+    if (step === "write") return "Fix the title, description, and flyer link.";
+    if (step === "details") return "Update host, category, location, time, and visibility.";
     return "Check everything before saving.";
   }
 
@@ -278,12 +238,18 @@ export default function EditItemPage() {
     if (step === "write" && description.trim().length < 3) return "Description is required.";
 
     if (step === "details") {
-      if (postType === "give") {
-        if (!category) return "Choose a category.";
-        if (!pickupLocation) return "Choose a pickup location.";
-      } else {
-        if (!requestGroup) return "Choose a request type.";
-        if (!requestTimeframe) return "Choose a timeframe.";
+      if (!hostOrg.trim()) return "Host is required.";
+      if (!category) return "Choose a category.";
+      if (!location.trim()) return "Location is required.";
+      if (!startsAtLocal.trim()) return "Start time is required.";
+      if (!startIso) return "Start time is invalid.";
+      if (!isValidHttpUrlMaybeEmpty(linkUrl)) return "Link must start with http:// or https://";
+      if (!isValidHttpUrlMaybeEmpty(photoUrl)) return "Flyer URL must start with http:// or https://";
+
+      if (endsAtLocal.trim() && endIso && startIso) {
+        if (new Date(endIso).getTime() < new Date(startIso).getTime()) {
+          return "End time cannot be before start time.";
+        }
       }
     }
 
@@ -324,54 +290,39 @@ export default function EditItemPage() {
   }
 
   async function save() {
-    if (!item) return;
+    if (!event) return;
 
     setSaving(true);
     setErr(null);
     setOk(null);
 
     try {
-      if (!isOwner) throw new Error("You are not allowed to edit this item.");
-      if (editingLocked) {
-        throw new Error("Editing is locked because this post is already in an active pickup flow.");
-      }
+      if (!isOwner) throw new Error("You are not allowed to edit this event.");
+      if (editingLocked) throw new Error("Editing is currently locked for this event.");
 
       const finalProblem =
         validateStep("write") || validateStep("details") || validateStep("review");
       if (finalProblem) throw new Error(finalProblem);
 
-      const payload =
-        postType === "give"
-          ? {
-              title: title.trim(),
-              description: description.trim() ? description.trim() : null,
-              category,
-              pickup_location: pickupLocation,
-              request_group: null,
-              request_timeframe: null,
-              request_location: null,
-              photo_url: photoUrl.trim() ? photoUrl.trim() : null,
-              is_anonymous: isAnonymous,
-              expires_at: fromInputDateTime(expiresAtLocal),
-            }
-          : {
-              title: title.trim(),
-              description: description.trim() ? description.trim() : null,
-              category: requestGroup === "lost & found" ? "lost & found" : "others",
-              pickup_location: null,
-              request_group: requestGroup,
-              request_timeframe: requestTimeframe,
-              request_location: requestLocation.trim() ? requestLocation.trim() : null,
-              photo_url: photoUrl.trim() ? photoUrl.trim() : null,
-              is_anonymous: isAnonymous,
-              expires_at: fromInputDateTime(expiresAtLocal),
-            };
+      const payload = {
+        title: title.trim(),
+        description: description.trim() ? description.trim() : null,
+        host_org: hostOrg.trim() ? hostOrg.trim() : null,
+        category,
+        location: location.trim() ? location.trim() : null,
+        starts_at: startIso,
+        ends_at: endsAtLocal.trim() ? endIso : null,
+        link_url: linkUrl.trim() ? linkUrl.trim() : null,
+        photo_url: photoUrl.trim() ? photoUrl.trim() : null,
+        is_anonymous: isAnonymous,
+        is_cancelled: isCancelled,
+      };
 
-      const { error } = await supabase.from("items").update(payload).eq("id", item.id);
+      const { error } = await supabase.from("events").update(payload).eq("id", event.id);
       if (error) throw new Error(error.message);
 
       setOk("Saved successfully ✅");
-      await loadItem();
+      await loadEvent();
       setCurrentStepIndex(2);
     } catch (e) {
       const message = e instanceof Error ? e.message : "Failed to save.";
@@ -383,11 +334,11 @@ export default function EditItemPage() {
 
   useEffect(() => {
     syncAuth();
-    loadItem();
+    loadEvent();
 
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
       syncAuth();
-      loadItem();
+      loadEvent();
     });
 
     return () => sub.subscription.unsubscribe();
@@ -402,7 +353,7 @@ export default function EditItemPage() {
         <div className="shell">
           <div className="statusCard">
             <div className="statusTitle">Loading…</div>
-            <div className="statusText">Getting your post ready for editing.</div>
+            <div className="statusText">Getting your event ready for editing.</div>
           </div>
 
           <style jsx>{baseStyles}</style>
@@ -415,13 +366,13 @@ export default function EditItemPage() {
     <div className="page" style={{ paddingBottom: pageBottomPad as string }}>
       <div className="shell" ref={topRef}>
         <div className="topBar">
-          <button className="topBtn" onClick={() => router.push(`/item/${id}`)} type="button">
-            ← View post
+          <button className="topBtn" onClick={() => router.push(`/event/${id}`)} type="button">
+            ← View event
           </button>
 
           <div className="topRight">
             <button className="topBtn" onClick={() => router.push("/me")} type="button">
-              My posts
+              My profile
             </button>
           </div>
         </div>
@@ -433,12 +384,12 @@ export default function EditItemPage() {
         </div>
 
         {!isOwner && (
-          <div className="errorBanner">You are not the owner of this item. Editing is disabled.</div>
+          <div className="errorBanner">You are not the owner of this event. Editing is disabled.</div>
         )}
 
         {editingLocked && (
           <div className="warningBanner">
-            Editing is locked because this post is already reserved, claimed, or linked to an active pickup flow.
+            Editing is currently locked for this event.
           </div>
         )}
 
@@ -462,7 +413,7 @@ export default function EditItemPage() {
           })}
         </div>
 
-        {item && (
+        {event && (
           <>
             {currentStep === "write" && (
               <section className="card">
@@ -472,7 +423,7 @@ export default function EditItemPage() {
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     className="titleInput"
-                    placeholder="What are you posting?"
+                    placeholder="What’s your event called?"
                     disabled={!isOwner || saving || editingLocked}
                     autoFocus
                   />
@@ -485,13 +436,13 @@ export default function EditItemPage() {
                     onChange={(e) => setDescription(e.target.value)}
                     className="textArea"
                     rows={7}
-                    placeholder="Update the description"
+                    placeholder="Update the event description"
                     disabled={!isOwner || saving || editingLocked}
                   />
                 </div>
 
                 <div className="fieldBlock">
-                  <label className="fieldLabel">Photo URL</label>
+                  <label className="fieldLabel">Flyer URL</label>
                   <input
                     value={photoUrl}
                     onChange={(e) => setPhotoUrl(e.target.value)}
@@ -507,13 +458,13 @@ export default function EditItemPage() {
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={photoUrl} alt="Preview" className="previewImg" />
                     ) : (
-                      <div className="previewEmpty">No image preview</div>
+                      <div className="previewEmpty">No flyer preview</div>
                     )}
                   </div>
 
                   <div className="previewBody">
-                    <div className="previewMeta">{postType === "give" ? "ITEM" : "REQUEST"}</div>
-                    <div className="previewHeadline">{title.trim() || "Untitled post"}</div>
+                    <div className="previewMeta">EVENT</div>
+                    <div className="previewHeadline">{title.trim() || "Untitled event"}</div>
                     <div className="previewText">{description.trim() || "No description yet."}</div>
                   </div>
                 </div>
@@ -522,90 +473,94 @@ export default function EditItemPage() {
 
             {currentStep === "details" && (
               <section className="card">
-                {postType === "give" ? (
-                  <>
-                    <div className="fieldBlock">
-                      <div className="fieldLabel">Category</div>
-                      <div className="choiceGrid">
-                        {GIVE_CATEGORIES.map((v) => (
-                          <button
-                            key={v}
-                            type="button"
-                            className={`choice ${category === v ? "selected warm" : ""}`}
-                            onClick={() => setCategory(v)}
-                            disabled={!isOwner || saving || editingLocked}
-                          >
-                            {giveCategoryLabel(v)}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Host</label>
+                  <input
+                    value={hostOrg}
+                    onChange={(e) => setHostOrg(e.target.value)}
+                    className="softInput"
+                    placeholder="Host club / organization"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
 
-                    <div className="fieldBlock">
-                      <div className="fieldLabel">Pickup location</div>
-                      <div className="choiceGrid">
-                        {PICKUP_OPTIONS.map((v) => (
-                          <button
-                            key={v}
-                            type="button"
-                            className={`choice ${pickupLocation === v ? "selected neutral" : ""}`}
-                            onClick={() => setPickupLocation(v)}
-                            disabled={!isOwner || saving || editingLocked}
-                          >
-                            {v}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="fieldBlock">
-                      <div className="fieldLabel">Request type</div>
-                      <div className="choiceGrid">
-                        {REQUEST_GROUP_OPTIONS.map((v) => (
-                          <button
-                            key={v}
-                            type="button"
-                            className={`choice ${requestGroup === v ? "selected blue" : ""}`}
-                            onClick={() => setRequestGroup(v)}
-                            disabled={!isOwner || saving || editingLocked}
-                          >
-                            {requestGroupLabel(v)}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="fieldBlock">
-                      <div className="fieldLabel">Timeframe</div>
-                      <div className="segmentRow">
-                        {REQUEST_TIMEFRAME_OPTIONS.map((v) => (
-                          <button
-                            key={v}
-                            type="button"
-                            className={`segment ${requestTimeframe === v ? "active" : ""}`}
-                            onClick={() => setRequestTimeframe(v)}
-                            disabled={!isOwner || saving || editingLocked}
-                          >
-                            {requestTimeframeLabel(v)}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="fieldBlock">
-                      <label className="fieldLabel">Location</label>
-                      <input
-                        value={requestLocation}
-                        onChange={(e) => setRequestLocation(e.target.value)}
-                        className="softInput"
-                        placeholder="Optional location"
+                <div className="fieldBlock">
+                  <div className="fieldLabel">Category</div>
+                  <div className="choiceGrid">
+                    {EVENT_CATEGORY_OPTIONS.map((v) => (
+                      <button
+                        key={v}
+                        type="button"
+                        className={`choice ${category === v ? "selected purple" : ""}`}
+                        onClick={() => setCategory(v)}
                         disabled={!isOwner || saving || editingLocked}
-                      />
-                    </div>
-                  </>
+                      >
+                        {eventCategoryLabel(v)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Location</label>
+                  <input
+                    value={location}
+                    onChange={(e) => setLocation(e.target.value)}
+                    className="softInput"
+                    placeholder="Where is it happening?"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Start time</label>
+                  <input
+                    type="datetime-local"
+                    value={startsAtLocal}
+                    onChange={(e) => setStartsAtLocal(e.target.value)}
+                    className="softInput"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">End time</label>
+                  <input
+                    type="datetime-local"
+                    value={endsAtLocal}
+                    onChange={(e) => setEndsAtLocal(e.target.value)}
+                    className="softInput"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                  <div className="helperText">Leave blank if no end time is needed.</div>
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Event link</label>
+                  <input
+                    value={linkUrl}
+                    onChange={(e) => setLinkUrl(e.target.value)}
+                    className="softInput"
+                    placeholder="https://..."
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                {!isValidHttpUrlMaybeEmpty(linkUrl) && (
+                  <div className="warningBanner">Link must start with http:// or https://</div>
                 )}
+
+                {!isValidHttpUrlMaybeEmpty(photoUrl) && (
+                  <div className="warningBanner">Flyer URL must start with http:// or https://</div>
+                )}
+
+                {!!startsAtLocal &&
+                  !!endsAtLocal &&
+                  !!startIso &&
+                  !!endIso &&
+                  new Date(endIso).getTime() < new Date(startIso).getTime() && (
+                    <div className="warningBanner">End time cannot be before start time.</div>
+                  )}
 
                 <div className="divider" />
 
@@ -632,16 +587,27 @@ export default function EditItemPage() {
                 </div>
 
                 <div className="fieldBlock">
-                  <label className="fieldLabel">Expires at</label>
-                  <input
-                    type="datetime-local"
-                    value={expiresAtLocal}
-                    onChange={(e) => setExpiresAtLocal(e.target.value)}
-                    className="softInput"
-                    disabled={!isOwner || saving || editingLocked}
-                  />
+                  <div className="fieldLabel">Event status</div>
+                  <div className="segmentRow two">
+                    <button
+                      type="button"
+                      className={`segment ${!isCancelled ? "active" : ""}`}
+                      onClick={() => setIsCancelled(false)}
+                      disabled={!isOwner || saving || editingLocked}
+                    >
+                      Active
+                    </button>
+                    <button
+                      type="button"
+                      className={`segment ${isCancelled ? "active cancel" : "cancel"}`}
+                      onClick={() => setIsCancelled(true)}
+                      disabled={!isOwner || saving || editingLocked}
+                    >
+                      Cancelled
+                    </button>
+                  </div>
                   <div className="helperText">
-                    Leave blank to keep it open until you cancel it.
+                    Canceling the event will later trigger attendee notifications.
                   </div>
                 </div>
               </section>
@@ -655,13 +621,13 @@ export default function EditItemPage() {
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={photoUrl} alt={title || "Preview"} className="reviewPreviewImg" />
                     ) : (
-                      <div className="previewEmpty">No image preview</div>
+                      <div className="previewEmpty">No flyer preview</div>
                     )}
                   </div>
 
                   <div className="reviewPreviewBody">
-                    <div className="previewMeta">{postType === "give" ? "ITEM" : "REQUEST"}</div>
-                    <div className="previewHeadline">{title.trim() || "Untitled post"}</div>
+                    <div className="previewMeta">EVENT</div>
+                    <div className="previewHeadline">{title.trim() || "Untitled event"}</div>
                     <div className="previewText">{description.trim() || "No description yet."}</div>
                   </div>
                 </div>
@@ -669,36 +635,38 @@ export default function EditItemPage() {
                 <div className="reviewList">
                   <div className="reviewRow">
                     <span className="reviewKey">Type</span>
-                    <span className="reviewValue">{postType === "give" ? "Give" : "Request"}</span>
+                    <span className="reviewValue">Event</span>
                   </div>
 
-                  {postType === "give" ? (
-                    <>
-                      <div className="reviewRow">
-                        <span className="reviewKey">Category</span>
-                        <span className="reviewValue">{giveCategoryLabel(category)}</span>
-                      </div>
-                      <div className="reviewRow">
-                        <span className="reviewKey">Pickup</span>
-                        <span className="reviewValue">{pickupLocation}</span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="reviewRow">
-                        <span className="reviewKey">Request type</span>
-                        <span className="reviewValue">{requestGroupLabel(requestGroup)}</span>
-                      </div>
-                      <div className="reviewRow">
-                        <span className="reviewKey">Timeframe</span>
-                        <span className="reviewValue">{requestTimeframeLabel(requestTimeframe)}</span>
-                      </div>
-                      <div className="reviewRow">
-                        <span className="reviewKey">Location</span>
-                        <span className="reviewValue">{requestLocation.trim() || "None"}</span>
-                      </div>
-                    </>
-                  )}
+                  <div className="reviewRow">
+                    <span className="reviewKey">Host</span>
+                    <span className="reviewValue">{hostOrg.trim() || "None"}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Category</span>
+                    <span className="reviewValue">{eventCategoryLabel(category)}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Location</span>
+                    <span className="reviewValue">{location.trim() || "None"}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Starts</span>
+                    <span className="reviewValue">{formatDateTime(startIso)}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Ends</span>
+                    <span className="reviewValue">{formatDateTime(endsAtLocal ? endIso : null)}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Link</span>
+                    <span className="reviewValue">{linkUrl.trim() || "None"}</span>
+                  </div>
 
                   <div className="reviewRow">
                     <span className="reviewKey">Visibility</span>
@@ -706,18 +674,15 @@ export default function EditItemPage() {
                   </div>
 
                   <div className="reviewRow">
-                    <span className="reviewKey">Expires</span>
-                    <span className="reviewValue">{formatExpiry(fromInputDateTime(expiresAtLocal))}</span>
+                    <span className="reviewKey">Status</span>
+                    <span className="reviewValue">
+                      {isCancelled ? "Cancelled" : isEnded(startIso, endIso) ? "Ended / scheduled in past" : "Active"}
+                    </span>
                   </div>
 
                   <div className="reviewRow">
                     <span className="reviewKey">Changed</span>
                     <span className="reviewValue">{dirty ? "Yes" : "No changes yet"}</span>
-                  </div>
-
-                  <div className="reviewRow">
-                    <span className="reviewKey">Workflow status</span>
-                    <span className="reviewValue">{item.status ?? "available"} (read-only)</span>
                   </div>
                 </div>
               </section>
@@ -825,9 +790,9 @@ export default function EditItemPage() {
         }
 
         .stepDot.active {
-          background: #e0e7ff;
-          color: #312e81;
-          border-color: #a5b4fc;
+          background: #ede9fe;
+          color: #6d28d9;
+          border-color: #c4b5fd;
         }
 
         .stepDot.done {
@@ -921,21 +886,10 @@ export default function EditItemPage() {
           cursor: pointer;
         }
 
-        .choice.selected.warm {
-          background: #ffedd5;
-          border-color: #fb923c;
-          color: #9a3412;
-        }
-
-        .choice.selected.neutral {
-          background: #f1f5f9;
-          border-color: #94a3b8;
-        }
-
-        .choice.selected.blue {
-          background: #dbeafe;
-          border-color: #60a5fa;
-          color: #1d4ed8;
+        .choice.selected.purple {
+          background: #ede9fe;
+          border-color: #8b5cf6;
+          color: #6d28d9;
         }
 
         .segmentRow {
@@ -961,6 +915,12 @@ export default function EditItemPage() {
         .segment.active {
           border-color: #03133d;
           background: #03133d;
+          color: #fff;
+        }
+
+        .segment.cancel.active {
+          border-color: #b91c1c;
+          background: #b91c1c;
           color: #fff;
         }
 
