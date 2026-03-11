@@ -27,14 +27,46 @@ type EventRow = {
 };
 
 type OwnerProfile = {
+  id?: string | null;
   full_name: string | null;
   user_role: string | null;
 };
 
-type ToastState = {
-  msg: string;
-  kind: "ok" | "err";
-} | null;
+type AttendeePreviewRow = {
+  user_id: string | null;
+  profile:
+    | {
+        id?: string | null;
+        full_name: string | null;
+        user_role: string | null;
+      }
+    | {
+        id?: string | null;
+        full_name: string | null;
+        user_role: string | null;
+      }[]
+    | null;
+};
+
+type RelatedEventRow = {
+  id: string;
+  title: string;
+  starts_at: string | null;
+  location: string | null;
+  photo_url: string | null;
+};
+
+type ToastState =
+  | {
+      msg: string;
+      kind: "ok" | "err";
+    }
+  | null;
+
+function singleRelation<T>(value: T | T[] | null | undefined): T | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
 
 function eventCategoryLabel(v: string | null) {
   const raw = (v ?? "").trim();
@@ -107,7 +139,7 @@ function formatShortDate(iso: string | null) {
 
 function ownerNameLabel(event: EventRow | null, owner: OwnerProfile | null) {
   if (!event) return "Ashland user";
-  if (event.is_anonymous) return "Anonymous";
+  if (event.is_anonymous) return "Anonymous host";
   const name = (owner?.full_name ?? "").trim();
   return name || "Ashland user";
 }
@@ -118,6 +150,14 @@ function initials(name: string) {
   const parts = clean.split(/\s+/).filter(Boolean);
   if (parts.length === 1) return parts[0].slice(0, 1).toUpperCase();
   return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
+}
+
+function readableRole(role: string | null | undefined) {
+  const raw = (role ?? "").trim().toLowerCase();
+  if (!raw) return "Ashland member";
+  if (raw === "student") return "Student";
+  if (raw === "faculty") return "Faculty";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
 function isEventEnded(event: EventRow | null) {
@@ -147,7 +187,7 @@ function eventStateChip(event: EventRow | null) {
   if (!event) return { label: "Loading", tone: "neutral" as const };
   if (event.is_cancelled) return { label: "Cancelled", tone: "closed" as const };
   if (isEventEnded(event)) return { label: "Ended", tone: "closed" as const };
-  if (isEventLive(event)) return { label: "Live", tone: "good" as const };
+  if (isEventLive(event)) return { label: "Live now", tone: "good" as const };
   return { label: "Upcoming", tone: "good" as const };
 }
 
@@ -172,6 +212,9 @@ export default function EventDetailPage() {
 
   const [attendeeCount, setAttendeeCount] = useState(0);
   const [myAttending, setMyAttending] = useState(false);
+  const [attendeePreview, setAttendeePreview] = useState<OwnerProfile[]>([]);
+
+  const [relatedEvents, setRelatedEvents] = useState<RelatedEventRow[]>([]);
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [openImg, setOpenImg] = useState<string | null>(null);
@@ -200,12 +243,16 @@ export default function EventDetailPage() {
       .join(" • ");
   }, [event]);
 
+  const eventDateDisplay = useMemo(() => {
+    return formatTimeRange(event?.starts_at ?? null, event?.ends_at ?? null);
+  }, [event?.starts_at, event?.ends_at]);
+
   const actionCard = useMemo(() => {
     if (!event || isOwner) return null;
 
     if (!isAshland) {
       return {
-        title: userId ? "Use your Ashland account to attend." : "Log in to attend.",
+        title: userId ? "Use your Ashland account to attend" : "Log in to attend",
         body: "Only Ashland users can join campus events.",
         primary: userId ? "Open profile" : "Log in",
         secondary: event.link_url ? "Open link" : null,
@@ -217,7 +264,7 @@ export default function EventDetailPage() {
 
     if (event.is_cancelled) {
       return {
-        title: "This event has been cancelled.",
+        title: "This event has been cancelled",
         body: "Attendance is closed.",
         primary: "Cancelled",
         secondary: event.link_url ? "Open link" : null,
@@ -229,7 +276,7 @@ export default function EventDetailPage() {
 
     if (isEventEnded(event)) {
       return {
-        title: "This event has already ended.",
+        title: "This event has ended",
         body: "Attendance is closed.",
         primary: "Ended",
         secondary: event.link_url ? "Open link" : null,
@@ -241,8 +288,8 @@ export default function EventDetailPage() {
 
     if (myAttending) {
       return {
-        title: "You’re going to this event.",
-        body: "Need to change plans? You can leave anytime.",
+        title: "You’re going",
+        body: "You can leave anytime if your plans change.",
         primary: "Attending",
         secondary: "Leave",
         tertiary: event.link_url ? "Open link" : null,
@@ -254,7 +301,7 @@ export default function EventDetailPage() {
     }
 
     return {
-      title: "Join this event.",
+      title: "Join this event",
       body: "Let the organizer know you’re coming.",
       primary: "Attend",
       secondary: event.link_url ? "Open link" : null,
@@ -264,31 +311,27 @@ export default function EventDetailPage() {
     };
   }, [event, isOwner, isAshland, myAttending, userId]);
 
-  const detailRows = useMemo(() => {
+  const essentials = useMemo(() => {
     if (!event) return [];
     return [
       {
-        label: "Organizer",
-        value: ownerLabel,
-      },
-      {
         label: "When",
-        value: formatTimeRange(event.starts_at, event.ends_at),
+        value: eventDateDisplay,
       },
       {
-        label: "Location",
+        label: "Where",
         value: event.location?.trim() || "Location not set",
       },
       {
         label: "Host",
-        value: event.host_org?.trim() || "Host not set",
+        value: event.host_org?.trim() || ownerLabel,
       },
       {
         label: "Category",
         value: eventCategoryLabel(event.category),
       },
     ];
-  }, [event, ownerLabel]);
+  }, [event, ownerLabel, eventDateDisplay]);
 
   function showToast(msg: string, kind: "ok" | "err" = "ok") {
     setToast({ msg, kind });
@@ -312,6 +355,7 @@ export default function EventDetailPage() {
         .maybeSingle();
 
       if (eventErr) throw new Error(eventErr.message);
+
       if (!ev) {
         setEvent(null);
         setOwner(null);
@@ -319,6 +363,8 @@ export default function EventDetailPage() {
         setMyLoved(false);
         setAttendeeCount(0);
         setMyAttending(false);
+        setAttendeePreview([]);
+        setRelatedEvents([]);
         setUserId(uid);
         setUserEmail(email);
         return;
@@ -333,7 +379,7 @@ export default function EventDetailPage() {
         !loaded.is_anonymous && resolvedOwnerId
           ? supabase
               .from("profiles")
-              .select("full_name,user_role")
+              .select("id,full_name,user_role")
               .eq("id", resolvedOwnerId)
               .maybeSingle()
           : Promise.resolve({ data: null, error: null });
@@ -366,12 +412,43 @@ export default function EventDetailPage() {
             .maybeSingle()
         : Promise.resolve({ data: null, error: null });
 
-      const [ownerRes, loveCountRes, myLoveRes, attendeeCountRes, myAttendingRes] = await Promise.all([
+      const attendeePreviewPromise = supabase
+        .from(ATTENDEES_TABLE)
+        .select(
+          "user_id, profile:profiles!event_attendees_user_id_fkey(id,full_name,user_role)"
+        )
+        .eq("event_id", eventId)
+        .limit(6);
+
+      const relatedEventsPromise =
+        resolvedOwnerId && !loaded.is_anonymous
+          ? supabase
+              .from("events")
+              .select("id,title,starts_at,location,photo_url")
+              .or(`owner_id.eq.${resolvedOwnerId},created_by.eq.${resolvedOwnerId}`)
+              .neq("id", eventId)
+              .eq("is_cancelled", false)
+              .gte("starts_at", new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString())
+              .order("starts_at", { ascending: true })
+              .limit(3)
+          : Promise.resolve({ data: [], error: null });
+
+      const [
+        ownerRes,
+        loveCountRes,
+        myLoveRes,
+        attendeeCountRes,
+        myAttendingRes,
+        attendeePreviewRes,
+        relatedEventsRes,
+      ] = await Promise.all([
         ownerPromise,
         loveCountPromise,
         myLovePromise,
         attendeeCountPromise,
         myAttendingPromise,
+        attendeePreviewPromise,
+        relatedEventsPromise,
       ]);
 
       setOwner((ownerRes?.data as OwnerProfile) ?? null);
@@ -379,6 +456,13 @@ export default function EventDetailPage() {
       setMyLoved(!!myLoveRes.data);
       setAttendeeCount(attendeeCountRes.count ?? 0);
       setMyAttending(!!myAttendingRes.data);
+
+      const previewProfiles: OwnerProfile[] = (((attendeePreviewRes.data ?? []) as AttendeePreviewRow[]) || [])
+        .map((row) => singleRelation(row.profile))
+        .filter(Boolean) as OwnerProfile[];
+
+      setAttendeePreview(previewProfiles);
+      setRelatedEvents(((relatedEventsRes.data ?? []) as RelatedEventRow[]) || []);
 
       setUserId(uid);
       setUserEmail(email);
@@ -390,6 +474,8 @@ export default function EventDetailPage() {
       setMyLoved(false);
       setAttendeeCount(0);
       setMyAttending(false);
+      setAttendeePreview([]);
+      setRelatedEvents([]);
     } finally {
       setLoading(false);
     }
@@ -512,6 +598,16 @@ export default function EventDetailPage() {
     }
   }
 
+  async function copyShareLink() {
+    try {
+      if (typeof window === "undefined") return;
+      await navigator.clipboard.writeText(window.location.href);
+      showToast("Event link copied.");
+    } catch {
+      showToast("Could not copy link.", "err");
+    }
+  }
+
   async function deleteEvent() {
     if (!event || !isOwner) return;
 
@@ -536,7 +632,7 @@ export default function EventDetailPage() {
   }
 
   useEffect(() => {
-    syncAuthAndLoad();
+    void syncAuthAndLoad();
 
     const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
       const uid = session?.user?.id ?? null;
@@ -579,7 +675,9 @@ export default function EventDetailPage() {
             <div className="topSub">scholarswap</div>
           </div>
 
-          <div className="topSpacer" />
+          <button className="iconBtn" onClick={() => void copyShareLink()} aria-label="Share" type="button">
+            ↗
+          </button>
         </header>
 
         {err && <div className="notice error">{err}</div>}
@@ -591,7 +689,6 @@ export default function EventDetailPage() {
             <div className="hero">
               {event.photo_url ? (
                 <button className="heroButton" type="button" onClick={() => setOpenImg(event.photo_url!)}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={event.photo_url} alt={event.title} className="heroImage" />
                 </button>
               ) : (
@@ -606,111 +703,116 @@ export default function EventDetailPage() {
               <div className="heroTop">
                 <span className={`statePill ${chip.tone}`}>{chip.label}</span>
 
-                {isOwner ? (
-                  <div className="menuWrap">
-                    {menuOpen ? (
-                      <button
-                        className="menuBackdrop"
-                        aria-label="Close menu"
-                        onClick={() => setMenuOpen(false)}
-                        type="button"
-                      />
-                    ) : null}
-
+                <div className="heroTopRight">
+                  {!isOwner ? (
                     <button
-                      className="heroActionBtn"
+                      className={`heroActionBtn love ${myLoved ? "active" : ""}`}
                       type="button"
-                      aria-label="Event options"
-                      onClick={() => setMenuOpen((v) => !v)}
+                      onClick={toggleLove}
+                      disabled={busy}
+                      aria-label="Love event"
                     >
-                      ⋯
+                      <span>{myLoved ? "♥" : "♡"}</span>
+                      <span className="loveTinyCount">{loveCount}</span>
                     </button>
+                  ) : null}
 
-                    {menuOpen ? (
-                      <div className="menuCard">
+                  {isOwner ? (
+                    <div className="menuWrap">
+                      {menuOpen ? (
                         <button
-                          className="menuItem"
+                          className="menuBackdrop"
+                          aria-label="Close menu"
+                          onClick={() => setMenuOpen(false)}
                           type="button"
-                          onClick={() => {
-                            setMenuOpen(false);
-                            router.push(`/event/${event.id}/edit`);
-                          }}
-                        >
-                          Edit event
-                        </button>
+                        />
+                      ) : null}
 
-                        {event.link_url ? (
+                      <button
+                        className="heroActionBtn"
+                        type="button"
+                        aria-label="Event options"
+                        onClick={() => setMenuOpen((v) => !v)}
+                      >
+                        ⋯
+                      </button>
+
+                      {menuOpen ? (
+                        <div className="menuCard">
                           <button
                             className="menuItem"
                             type="button"
                             onClick={() => {
                               setMenuOpen(false);
-                              window.open(event.link_url!, "_blank", "noopener,noreferrer");
+                              router.push(`/event/${event.id}/edit`);
                             }}
                           >
-                            Open event link
+                            Edit event
                           </button>
-                        ) : null}
 
-                        <button
-                          className="menuItem danger"
-                          type="button"
-                          onClick={() => {
-                            setMenuOpen(false);
-                            setConfirmDelete(true);
-                          }}
-                        >
-                          Delete event
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <button
-                    className={`heroActionBtn love ${myLoved ? "active" : ""}`}
-                    type="button"
-                    onClick={toggleLove}
-                    disabled={busy}
-                    aria-label="Love event"
-                  >
-                    {myLoved ? "♥" : "♡"}
-                  </button>
-                )}
+                          <button
+                            className="menuItem"
+                            type="button"
+                            onClick={() => {
+                              setMenuOpen(false);
+                              void copyShareLink();
+                            }}
+                          >
+                            Copy event link
+                          </button>
+
+                          {event.link_url ? (
+                            <button
+                              className="menuItem"
+                              type="button"
+                              onClick={() => {
+                                setMenuOpen(false);
+                                window.open(event.link_url!, "_blank", "noopener,noreferrer");
+                              }}
+                            >
+                              Open event link
+                            </button>
+                          ) : null}
+
+                          <button
+                            className="menuItem danger"
+                            type="button"
+                            onClick={() => {
+                              setMenuOpen(false);
+                              setConfirmDelete(true);
+                            }}
+                          >
+                            Delete event
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               </div>
 
               <div className="heroBottom">
                 {heroMeta ? <div className="heroMeta">{heroMeta}</div> : null}
                 <h1 className="heroTitle">{event.title}</h1>
-                <div className="heroSchedule">{formatTimeRange(event.starts_at, event.ends_at)}</div>
+                <div className="heroSchedule">{eventDateDisplay}</div>
+
+                <div className="heroSocialRow">
+                  <div className="heroStat">
+                    <span className="heroStatIcon">👥</span>
+                    <span className="heroStatText">
+                      {attendeeCount} going
+                    </span>
+                  </div>
+
+                  <div className="heroStat subtle">
+                    <span className="heroStatIcon">♥</span>
+                    <span className="heroStatText">{loveCount} loves</span>
+                  </div>
+                </div>
               </div>
             </div>
 
             <div className="content">
-              <div className="summaryGrid">
-                <div className="summaryTile">
-                  <div className="summaryLabel">Organizer</div>
-                  <div className="summaryValue withAvatar">
-                    <span className="miniAvatar">{initials(ownerLabel)}</span>
-                    <span className="truncate">{ownerLabel}</span>
-                  </div>
-                </div>
-
-                <div className="summaryTile">
-                  <div className="summaryLabel">Going</div>
-                  <div className="summaryValue">{attendeeCount}</div>
-                </div>
-
-                <div className="summaryTile">
-                  <div className="summaryLabel">Loves</div>
-                  <div className="summaryValue">{loveCount}</div>
-                </div>
-
-                <div className="summaryTile">
-                  <div className="summaryLabel">Location</div>
-                  <div className="summaryValue truncate">{event.location?.trim() || "Not set"}</div>
-                </div>
-              </div>
-
               {actionCard ? (
                 <div className="actionCard">
                   <div className="actionText">
@@ -773,28 +875,91 @@ export default function EventDetailPage() {
                 </div>
               ) : null}
 
+              <div className="summaryGrid">
+                <div className="summaryTile strong">
+                  <div className="summaryLabel">Going</div>
+                  <div className="summaryValue big">{attendeeCount}</div>
+                  <div className="summarySub">People attending</div>
+                </div>
+
+                <div className="summaryTile">
+                  <div className="summaryLabel">When</div>
+                  <div className="summaryValue">{formatDateTime(event.starts_at)}</div>
+                </div>
+
+                <div className="summaryTile">
+                  <div className="summaryLabel">Where</div>
+                  <div className="summaryValue truncate">{event.location?.trim() || "Not set"}</div>
+                </div>
+
+                <div className="summaryTile">
+                  <div className="summaryLabel">Category</div>
+                  <div className="summaryValue">{eventCategoryLabel(event.category)}</div>
+                </div>
+              </div>
+
+              <div className="section hostSection">
+                <div className="sectionHead">
+                  <div className="sectionTitle">Host</div>
+                </div>
+
+                <div className="hostCard">
+                  <div className="hostLeft">
+                    <div className="hostAvatar">{initials(ownerLabel)}</div>
+                    <div className="hostCopy">
+                      <div className="hostName">{ownerLabel}</div>
+                      <div className="hostMeta">
+                        {event.host_org?.trim() || readableRole(owner?.user_role)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="hostRight">
+                    {!event.is_anonymous && relatedEvents.length > 0 ? (
+                      <span className="hostStatPill">
+                        {relatedEvents.length}+ more event{relatedEvents.length === 1 ? "" : "s"}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+
+              {attendeePreview.length > 0 ? (
+                <div className="section">
+                  <div className="sectionHead">
+                    <div className="sectionTitle">People going</div>
+                    <div className="sectionMeta">{attendeeCount} total</div>
+                  </div>
+
+                  <div className="peopleRow">
+                    {attendeePreview.map((person, idx) => {
+                      const name = (person.full_name ?? "").trim() || `Guest ${idx + 1}`;
+                      return (
+                        <div className="personChip" key={`${name}-${idx}`}>
+                          <div className="personAvatar">{initials(name)}</div>
+                          <div className="personCopy">
+                            <div className="personName">{name}</div>
+                            <div className="personRole">{readableRole(person.user_role)}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
               <div className="section">
-                <div className="sectionTitle">Details</div>
+                <div className="sectionHead">
+                  <div className="sectionTitle">Essentials</div>
+                </div>
 
                 <div className="detailList">
-                  {detailRows.map((row) => (
+                  {essentials.map((row) => (
                     <div className="detailRow" key={row.label}>
                       <div className="detailLabel">{row.label}</div>
                       <div className="detailValue">{row.value}</div>
                     </div>
                   ))}
-
-                  <div className="detailRow">
-                    <div className="detailLabel">Starts</div>
-                    <div className="detailValue">{formatDateTime(event.starts_at)}</div>
-                  </div>
-
-                  {event.ends_at ? (
-                    <div className="detailRow">
-                      <div className="detailLabel">Ends</div>
-                      <div className="detailValue">{formatDateTime(event.ends_at)}</div>
-                    </div>
-                  ) : null}
 
                   {event.link_url ? (
                     <div className="detailRow">
@@ -813,8 +978,44 @@ export default function EventDetailPage() {
 
               {event.description?.trim() ? (
                 <div className="section">
-                  <div className="sectionTitle">About</div>
+                  <div className="sectionHead">
+                    <div className="sectionTitle">About</div>
+                  </div>
                   <div className="description">{event.description.trim()}</div>
+                </div>
+              ) : null}
+
+              {relatedEvents.length > 0 ? (
+                <div className="section">
+                  <div className="sectionHead">
+                    <div className="sectionTitle">More from this host</div>
+                  </div>
+
+                  <div className="relatedGrid">
+                    {relatedEvents.map((rel) => (
+                      <button
+                        key={rel.id}
+                        type="button"
+                        className="relatedCard"
+                        onClick={() => router.push(`/event/${rel.id}`)}
+                      >
+                        <div className="relatedMedia">
+                          {rel.photo_url ? (
+                            <img src={rel.photo_url} alt={rel.title} className="relatedImg" />
+                          ) : (
+                            <div className="relatedFallback">EVENT</div>
+                          )}
+                        </div>
+
+                        <div className="relatedBody">
+                          <div className="relatedTitle">{rel.title}</div>
+                          <div className="relatedMeta">
+                            {formatShortDate(rel.starts_at)} • {rel.location?.trim() || "Campus"}
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               ) : null}
 
@@ -856,7 +1057,6 @@ export default function EventDetailPage() {
               </button>
             </div>
 
-            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={openImg} alt={event.title} className="fullImage" />
           </div>
         </div>
@@ -909,11 +1109,6 @@ export default function EventDetailPage() {
           font-size: 12px;
           font-weight: 800;
           color: #64748b;
-        }
-
-        .topSpacer {
-          width: 42px;
-          height: 42px;
         }
 
         .iconBtn {
@@ -1022,9 +1217,9 @@ export default function EventDetailPage() {
           inset: 0;
           background: linear-gradient(
             180deg,
-            rgba(15, 23, 42, 0.12) 0%,
-            rgba(15, 23, 42, 0.18) 28%,
-            rgba(15, 23, 42, 0.78) 100%
+            rgba(15, 23, 42, 0.1) 0%,
+            rgba(15, 23, 42, 0.16) 28%,
+            rgba(15, 23, 42, 0.82) 100%
           );
           pointer-events: none;
         }
@@ -1039,6 +1234,12 @@ export default function EventDetailPage() {
           align-items: flex-start;
           justify-content: space-between;
           gap: 10px;
+        }
+
+        .heroTopRight {
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
         }
 
         .heroBottom {
@@ -1074,6 +1275,39 @@ export default function EventDetailPage() {
           color: rgba(255, 255, 255, 0.92);
         }
 
+        .heroSocialRow {
+          margin-top: 12px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+
+        .heroStat {
+          min-height: 30px;
+          padding: 0 10px;
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.14);
+          border: 1px solid rgba(255, 255, 255, 0.16);
+          color: #fff;
+          backdrop-filter: blur(8px);
+        }
+
+        .heroStat.subtle {
+          opacity: 0.9;
+        }
+
+        .heroStatIcon {
+          font-size: 12px;
+        }
+
+        .heroStatText {
+          font-size: 12px;
+          font-weight: 900;
+        }
+
         .statePill {
           min-height: 34px;
           padding: 0 12px;
@@ -1102,10 +1336,12 @@ export default function EventDetailPage() {
         }
 
         .heroActionBtn {
-          width: 42px;
+          min-width: 42px;
           height: 42px;
-          display: grid;
-          place-items: center;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
           border-radius: 999px;
           border: 1px solid rgba(255, 255, 255, 0.18);
           background: rgba(255, 255, 255, 0.14);
@@ -1115,12 +1351,19 @@ export default function EventDetailPage() {
           font-weight: 900;
           cursor: pointer;
           box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+          padding: 0 12px;
         }
 
         .heroActionBtn.love.active {
           color: #fecdd3;
           background: rgba(190, 24, 93, 0.18);
           border-color: rgba(251, 207, 232, 0.28);
+        }
+
+        .loveTinyCount {
+          font-size: 12px;
+          font-weight: 900;
+          line-height: 1;
         }
 
         .menuWrap {
@@ -1140,7 +1383,7 @@ export default function EventDetailPage() {
           position: absolute;
           top: calc(100% + 8px);
           right: 0;
-          width: 210px;
+          width: 220px;
           overflow: hidden;
           border-radius: 18px;
           border: 1px solid #e2e8f0;
@@ -1173,65 +1416,7 @@ export default function EventDetailPage() {
           padding: 16px;
         }
 
-        .summaryGrid {
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
-        }
-
-        .summaryTile {
-          min-width: 0;
-          padding: 14px;
-          border-radius: 20px;
-          border: 1px solid #e2e8f0;
-          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-        }
-
-        .summaryLabel {
-          font-size: 11px;
-          font-weight: 900;
-          text-transform: uppercase;
-          letter-spacing: 0.08em;
-          color: #64748b;
-        }
-
-        .summaryValue {
-          margin-top: 8px;
-          font-size: 17px;
-          line-height: 1.25;
-          font-weight: 1000;
-          color: #0f172a;
-          overflow-wrap: anywhere;
-        }
-
-        .summaryValue.withAvatar {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-
-        .miniAvatar {
-          width: 30px;
-          height: 30px;
-          border-radius: 999px;
-          display: grid;
-          place-items: center;
-          flex: 0 0 auto;
-          background: linear-gradient(135deg, #dbeafe 0%, #ede9fe 100%);
-          border: 1px solid #dbe3f0;
-          font-size: 11px;
-          font-weight: 1000;
-        }
-
-        .truncate {
-          min-width: 0;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
         .actionCard {
-          margin-top: 14px;
           padding: 16px;
           border-radius: 22px;
           border: 1px solid #dbeafe;
@@ -1263,34 +1448,60 @@ export default function EventDetailPage() {
           gap: 10px;
         }
 
-        .primaryBtn,
-        .secondaryBtn {
-          min-height: 44px;
-          padding: 0 15px;
-          border-radius: 14px;
-          font-size: 13px;
-          font-weight: 900;
-          cursor: pointer;
+        .summaryGrid {
+          margin-top: 14px;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
         }
 
-        .primaryBtn {
-          border: 1px solid rgba(59, 130, 246, 0.22);
-          background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
-          color: #fff;
-          box-shadow: 0 14px 28px rgba(37, 99, 235, 0.18);
-        }
-
-        .secondaryBtn {
+        .summaryTile {
+          min-width: 0;
+          padding: 14px;
+          border-radius: 20px;
           border: 1px solid #e2e8f0;
-          background: rgba(255, 255, 255, 0.86);
-          color: #0f172a;
+          background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
         }
 
-        .primaryBtn:disabled,
-        .secondaryBtn:disabled {
-          opacity: 0.58;
-          cursor: not-allowed;
-          box-shadow: none;
+        .summaryTile.strong {
+          border-color: #dbeafe;
+          background: linear-gradient(180deg, #eff6ff 0%, #f8fafc 100%);
+        }
+
+        .summaryLabel {
+          font-size: 11px;
+          font-weight: 900;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          color: #64748b;
+        }
+
+        .summaryValue {
+          margin-top: 8px;
+          font-size: 17px;
+          line-height: 1.25;
+          font-weight: 1000;
+          color: #0f172a;
+          overflow-wrap: anywhere;
+        }
+
+        .summaryValue.big {
+          font-size: 28px;
+          letter-spacing: -0.03em;
+        }
+
+        .summarySub {
+          margin-top: 5px;
+          font-size: 12px;
+          font-weight: 700;
+          color: #64748b;
+        }
+
+        .truncate {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
 
         .section {
@@ -1301,11 +1512,135 @@ export default function EventDetailPage() {
           background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
         }
 
+        .sectionHead {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 10px;
+        }
+
         .sectionTitle {
           font-size: 13px;
           font-weight: 1000;
           letter-spacing: 0.02em;
           color: #0f172a;
+        }
+
+        .sectionMeta {
+          font-size: 12px;
+          font-weight: 800;
+          color: #64748b;
+        }
+
+        .hostCard {
+          margin-top: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          min-width: 0;
+        }
+
+        .hostLeft {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          min-width: 0;
+          flex: 1;
+        }
+
+        .hostAvatar {
+          width: 48px;
+          height: 48px;
+          border-radius: 999px;
+          display: grid;
+          place-items: center;
+          flex: 0 0 auto;
+          background: linear-gradient(135deg, #dbeafe 0%, #ede9fe 100%);
+          border: 1px solid #dbe3f0;
+          font-size: 14px;
+          font-weight: 1000;
+        }
+
+        .hostCopy {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .hostName {
+          font-size: 15px;
+          font-weight: 1000;
+          color: #0f172a;
+          overflow-wrap: anywhere;
+        }
+
+        .hostMeta {
+          margin-top: 4px;
+          font-size: 13px;
+          color: #64748b;
+          font-weight: 700;
+        }
+
+        .hostStatPill {
+          min-height: 28px;
+          padding: 0 10px;
+          border-radius: 999px;
+          border: 1px solid #e2e8f0;
+          background: #fff;
+          color: #334155;
+          display: inline-flex;
+          align-items: center;
+          font-size: 12px;
+          font-weight: 900;
+          white-space: nowrap;
+        }
+
+        .peopleRow {
+          margin-top: 12px;
+          display: grid;
+          gap: 10px;
+        }
+
+        .personChip {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 10px 12px;
+          border-radius: 16px;
+          background: #fff;
+          border: 1px solid #e9edf3;
+        }
+
+        .personAvatar {
+          width: 36px;
+          height: 36px;
+          border-radius: 999px;
+          display: grid;
+          place-items: center;
+          flex: 0 0 auto;
+          background: linear-gradient(135deg, #eef2ff 0%, #f5f3ff 100%);
+          border: 1px solid #e2e8f0;
+          font-size: 12px;
+          font-weight: 1000;
+        }
+
+        .personCopy {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .personName {
+          font-size: 14px;
+          font-weight: 900;
+          color: #0f172a;
+          overflow-wrap: anywhere;
+        }
+
+        .personRole {
+          margin-top: 2px;
+          font-size: 12px;
+          font-weight: 700;
+          color: #64748b;
         }
 
         .detailList {
@@ -1363,6 +1698,72 @@ export default function EventDetailPage() {
           overflow-wrap: anywhere;
         }
 
+        .relatedGrid {
+          margin-top: 12px;
+          display: grid;
+          gap: 10px;
+        }
+
+        .relatedCard {
+          width: 100%;
+          text-align: left;
+          display: grid;
+          grid-template-columns: 84px 1fr;
+          gap: 12px;
+          padding: 10px;
+          border-radius: 18px;
+          border: 1px solid #e9edf3;
+          background: #fff;
+          cursor: pointer;
+        }
+
+        .relatedMedia {
+          width: 84px;
+          height: 84px;
+          overflow: hidden;
+          border-radius: 14px;
+          background: #eef2f7;
+          border: 1px solid #e2e8f0;
+        }
+
+        .relatedImg {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
+        }
+
+        .relatedFallback {
+          width: 100%;
+          height: 100%;
+          display: grid;
+          place-items: center;
+          font-size: 11px;
+          font-weight: 1000;
+          color: #475569;
+        }
+
+        .relatedBody {
+          min-width: 0;
+          align-self: center;
+        }
+
+        .relatedTitle {
+          font-size: 14px;
+          font-weight: 1000;
+          color: #0f172a;
+          line-height: 1.35;
+          overflow-wrap: anywhere;
+        }
+
+        .relatedMeta {
+          margin-top: 6px;
+          font-size: 12px;
+          font-weight: 700;
+          color: #64748b;
+          line-height: 1.45;
+        }
+
         .footerMeta {
           margin-top: 14px;
           display: flex;
@@ -1371,6 +1772,36 @@ export default function EventDetailPage() {
           color: #64748b;
           font-size: 12px;
           font-weight: 850;
+        }
+
+        .primaryBtn,
+        .secondaryBtn {
+          min-height: 44px;
+          padding: 0 15px;
+          border-radius: 14px;
+          font-size: 13px;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .primaryBtn {
+          border: 1px solid rgba(59, 130, 246, 0.22);
+          background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+          color: #fff;
+          box-shadow: 0 14px 28px rgba(37, 99, 235, 0.18);
+        }
+
+        .secondaryBtn {
+          border: 1px solid #e2e8f0;
+          background: rgba(255, 255, 255, 0.86);
+          color: #0f172a;
+        }
+
+        .primaryBtn:disabled,
+        .secondaryBtn:disabled {
+          opacity: 0.58;
+          cursor: not-allowed;
+          box-shadow: none;
         }
 
         .dangerText {
@@ -1545,6 +1976,15 @@ export default function EventDetailPage() {
           .primaryBtn,
           .secondaryBtn {
             width: 100%;
+          }
+
+          .relatedCard {
+            grid-template-columns: 72px 1fr;
+          }
+
+          .relatedMedia {
+            width: 72px;
+            height: 72px;
           }
         }
       `}</style>
