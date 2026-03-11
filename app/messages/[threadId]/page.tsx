@@ -34,6 +34,7 @@ type ItemRow = {
 type MyInterestRow = {
   id: string;
   status: string | null;
+  requester_confirmed_at: string | null;
 };
 
 type MessageRow = {
@@ -125,7 +126,7 @@ function statusBadge(status?: string | null) {
   if (st.includes("complete") || st === "completed")
     return { label: "Completed", tone: "done" as const };
   if (st.includes("claim") || st === "claimed")
-    return { label: "Claimed", tone: "done" as const };
+    return { label: "Given", tone: "done" as const };
   if (st.includes("reserve") || st === "reserved")
     return { label: "Reserved", tone: "warn" as const };
   if (st.includes("available"))
@@ -190,6 +191,8 @@ export default function ThreadPage() {
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
 
+  const [busyInvitationResponse, setBusyInvitationResponse] = useState<"yes" | "no" | null>(null);
+
   const listRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -219,8 +222,14 @@ export default function ThreadPage() {
   }, [userId, userEmail]);
 
   const myStatus = normStatus(myInterest?.status);
-  const isBuyer = !!userId && !!thread?.requester_id && userId === thread.requester_id;
-  const mustConfirmBeforeChat = isBuyer && myStatus === "accepted";
+  const isRequester = !!userId && !!thread?.requester_id && userId === thread.requester_id;
+  const requesterHasConfirmed = !!myInterest?.requester_confirmed_at;
+
+  const mustRespondBeforeChat =
+    isRequester && myStatus === "accepted" && !requesterHasConfirmed;
+
+  const itemClosed = ["claimed", "completed"].includes(normStatus(item?.status));
+  const chatDisabled = mustRespondBeforeChat || itemClosed;
 
   const otherId = useMemo(() => {
     if (!userId || !thread) return null;
@@ -234,7 +243,9 @@ export default function ThreadPage() {
 
   const COMPOSER_H = 82;
   const BANNER_H = replyTo || editingId ? 66 : 0;
-  const reservedBottom = bottomNavH + COMPOSER_H + BANNER_H + 28;
+  const INVITE_H = mustRespondBeforeChat ? 96 : 0;
+  const CLOSED_H = itemClosed ? 70 : 0;
+  const reservedBottom = bottomNavH + COMPOSER_H + BANNER_H + INVITE_H + CLOSED_H + 28;
 
   function scrollToBottom(force = false) {
     if (!stickToBottom && !force) return;
@@ -250,7 +261,7 @@ export default function ThreadPage() {
 
   async function trackTyping(isTyping: boolean) {
     const ch = channelRef.current as any;
-    if (!ch || !userId || mustConfirmBeforeChat) return;
+    if (!ch || !userId || chatDisabled) return;
     try {
       await ch.track({ user_id: userId, typing: isTyping });
     } catch {}
@@ -263,7 +274,7 @@ export default function ThreadPage() {
 
   function onTextChange(v: string) {
     setText(v);
-    if (!userId || mustConfirmBeforeChat) return;
+    if (!userId || chatDisabled) return;
 
     void trackTyping(true);
 
@@ -355,13 +366,20 @@ export default function ThreadPage() {
 
     const { data } = await supabase
       .from("interests")
-      .select("id,status")
+      .select("id,status,requester_confirmed_at")
       .eq("item_id", itemId)
       .eq("user_id", uid)
       .maybeSingle();
 
-    if (data) setMyInterest({ id: (data as any).id, status: (data as any).status ?? null });
-    else setMyInterest(null);
+    if (data) {
+      setMyInterest({
+        id: (data as any).id,
+        status: (data as any).status ?? null,
+        requester_confirmed_at: (data as any).requester_confirmed_at ?? null,
+      });
+    } else {
+      setMyInterest(null);
+    }
   }
 
   /* ================= MESSAGES ================= */
@@ -439,7 +457,7 @@ export default function ThreadPage() {
   }
 
   async function markSeenNow(uid: string) {
-    if (mustConfirmBeforeChat) return;
+    if (chatDisabled) return;
     const nowIso = new Date().toISOString();
 
     try {
@@ -481,7 +499,7 @@ export default function ThreadPage() {
   }
 
   async function toggleReaction(messageId: string, emoji: string) {
-    if (!userId || mustConfirmBeforeChat) return;
+    if (!userId || chatDisabled) return;
 
     const already = !!myReactions?.[messageId]?.[emoji];
 
@@ -520,7 +538,7 @@ export default function ThreadPage() {
 
   async function sendMessage(payload: { body: string; attachments?: any | null }) {
     if (!isAshland || !userId) return router.push("/me");
-    if (mustConfirmBeforeChat) return;
+    if (chatDisabled) return;
 
     const body = payload.body.trim();
     const hasAttachment = payload.attachments && Object.keys(payload.attachments).length > 0;
@@ -590,7 +608,7 @@ export default function ThreadPage() {
   }
 
   async function startEdit(m: MessageRow) {
-    if (!userId || mustConfirmBeforeChat) return;
+    if (!userId || chatDisabled) return;
     if (m.sender_id !== userId) return;
     if (m.deleted_at) return;
     if (String(m.id).startsWith("temp-")) return;
@@ -601,7 +619,7 @@ export default function ThreadPage() {
   }
 
   async function saveEdit() {
-    if (!userId || !editingId || mustConfirmBeforeChat) return;
+    if (!userId || !editingId || chatDisabled) return;
     const body = editingText.trim();
     if (!body) return;
 
@@ -617,7 +635,7 @@ export default function ThreadPage() {
   }
 
   async function deleteMessage(id: string) {
-    if (!userId || mustConfirmBeforeChat) return;
+    if (!userId || chatDisabled) return;
 
     const m = messages.find((x) => x.id === id);
     if (!m) return;
@@ -710,26 +728,37 @@ export default function ThreadPage() {
     await sendMessage({ body: "", attachments: { type: "image", url } });
   }
 
-  /* ================= PICKUP CONFIRM ================= */
+  /* ================= REQUESTER INVITATION RESPONSE ================= */
 
-  async function confirmPickupFromChat() {
+  async function respondToInvitation(response: "yes" | "no") {
     if (!isAshland || !userId) return router.push("/me");
     if (!thread?.item_id || !myInterest?.id) return;
-    if (!mustConfirmBeforeChat) return;
+    if (!mustRespondBeforeChat) return;
 
     setErr(null);
+    setBusyInvitationResponse(response);
 
     try {
-      const { error: rpcErr } = await supabase.rpc("confirm_pickup", {
+      const { error: rpcErr } = await supabase.rpc("respond_to_interest_invitation", {
         p_interest_id: myInterest.id,
+        p_response: response,
       });
+
       if (rpcErr) throw new Error(rpcErr.message);
 
-      await insertSystemMessage({
-        threadId,
-        senderId: userId,
-        body: "✅ Pickup confirmed. You can start chatting now to coordinate time and place.",
-      });
+      if (response === "yes") {
+        await insertSystemMessage({
+          threadId,
+          senderId: userId,
+          body: "✅ The requester confirmed they are still interested. Conversation unlocked.",
+        });
+      } else {
+        await insertSystemMessage({
+          threadId,
+          senderId: userId,
+          body: "The requester is no longer interested in this item. This conversation is now closed.",
+        });
+      }
 
       await loadMyInterest(userId, thread.item_id);
 
@@ -741,9 +770,16 @@ export default function ThreadPage() {
 
       if (refreshedItem) setItem(refreshedItem as ItemRow);
 
+      if (response === "no") {
+        router.push("/messages");
+        return;
+      }
+
       await markSeenNow(userId);
     } catch (e: any) {
-      setErr(e?.message || "Could not confirm pickup.");
+      setErr(e?.message || "Could not update your response.");
+    } finally {
+      setBusyInvitationResponse(null);
     }
   }
 
@@ -811,7 +847,7 @@ export default function ThreadPage() {
 
             if (row.sender_id && row.sender_id !== userId) {
               setTimeout(() => {
-                if (stickToBottom) void markSeenNow(userId);
+                if (stickToBottom && !chatDisabled) void markSeenNow(userId);
               }, 60);
             }
 
@@ -830,6 +866,27 @@ export default function ThreadPage() {
       .on("postgres_changes", { event: "*", schema: "public", table: "thread_reads", filter: `thread_id=eq.${threadId}` }, () => {
         if (userId) void loadReads(userId);
       })
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "interests" },
+        () => {
+          if (userId && thread?.item_id) void loadMyInterest(userId, thread.item_id);
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "items" },
+        async () => {
+          if (!thread?.item_id) return;
+          const { data: refreshedItem } = await supabase
+            .from("items")
+            .select("id,title,photo_url,status,owner_id")
+            .eq("id", thread.item_id)
+            .single();
+
+          if (refreshedItem) setItem(refreshedItem as ItemRow);
+        }
+      )
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
           channelRef.current = ch;
@@ -847,7 +904,7 @@ export default function ThreadPage() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, userId, stickToBottom, mustConfirmBeforeChat, messages.length]);
+  }, [threadId, userId, stickToBottom, chatDisabled, messages.length, thread?.item_id]);
 
   useEffect(() => {
     if (!threadId) return;
@@ -988,7 +1045,7 @@ export default function ThreadPage() {
 
             <div className="identityText">
               <div className="identityName">{otherName}</div>
-              <div className="identitySub">{otherTyping ? "Typing…" : item?.title || "Conversation"}</div>
+              <div className="identitySub">{otherTyping && !chatDisabled ? "Typing…" : item?.title || "Conversation"}</div>
             </div>
           </button>
 
@@ -1024,7 +1081,7 @@ export default function ThreadPage() {
                 <div className="listingSub">
                   <span className={`statusChip ${st.tone}`}>{st.label}</span>
                   {myInterest?.status ? <span className="tinyDot">•</span> : null}
-                  {myInterest?.status ? <span>Interest: {myInterest.status}</span> : null}
+                  {myInterest?.status ? <span>Request: {myInterest.status}</span> : null}
                 </div>
               </div>
             </button>
@@ -1038,12 +1095,41 @@ export default function ThreadPage() {
 
         {err ? <div className="errorBox">{err}</div> : null}
 
-        {mustConfirmBeforeChat && (
-          <div className="gateBar">
-            <div className="gateText">Seller accepted your request. Confirm pickup to unlock chat.</div>
-            <button className="gateAction" type="button" onClick={confirmPickupFromChat}>
-              Confirm pickup
-            </button>
+        {mustRespondBeforeChat && item && (
+          <div className="gateBar inviteGate">
+            <div className="gateCopy">
+              <div className="gateTitle">Still interested in the {item.title}?</div>
+              <div className="gateText">
+                The lister invited you to continue this conversation. Let them know whether you still want to move forward.
+              </div>
+            </div>
+
+            <div className="gateActions">
+              <button
+                className="gateGhost"
+                type="button"
+                onClick={() => void respondToInvitation("no")}
+                disabled={busyInvitationResponse !== null}
+              >
+                {busyInvitationResponse === "no" ? "Updating…" : "No, not now"}
+              </button>
+
+              <button
+                className="gateAction"
+                type="button"
+                onClick={() => void respondToInvitation("yes")}
+                disabled={busyInvitationResponse !== null}
+              >
+                {busyInvitationResponse === "yes" ? "Unlocking…" : "Yes, still interested"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {itemClosed && (
+          <div className="closedBar">
+            <div className="closedTitle">This item has already been given.</div>
+            <div className="closedText">This conversation is now read-only.</div>
           </div>
         )}
       </header>
@@ -1186,7 +1272,7 @@ export default function ThreadPage() {
                       ) : null}
                     </div>
 
-                    {isSelected && !deleted && (
+                    {isSelected && !deleted && !itemClosed && (
                       <div className={`actionTray ${mine ? "mine" : "theirs"}`}>
                         <div className="quickReactions">
                           {QUICK_REACTIONS.map((emoji) => (
@@ -1209,6 +1295,7 @@ export default function ThreadPage() {
                               setReplyTo(m);
                               setSelectedMessageId(null);
                             }}
+                            disabled={chatDisabled}
                           >
                             Reply
                           </button>
@@ -1226,10 +1313,10 @@ export default function ThreadPage() {
 
                           {mine && !String(m.id).startsWith("temp-") ? (
                             <>
-                              <button className="trayBtn" type="button" onClick={() => startEdit(m)}>
+                              <button className="trayBtn" type="button" onClick={() => startEdit(m)} disabled={chatDisabled}>
                                 Edit
                               </button>
-                              <button className="trayBtn danger" type="button" onClick={() => deleteMessage(m.id)}>
+                              <button className="trayBtn danger" type="button" onClick={() => deleteMessage(m.id)} disabled={chatDisabled}>
                                 Delete
                               </button>
                             </>
@@ -1242,7 +1329,7 @@ export default function ThreadPage() {
               );
             })}
 
-          {otherTyping && !mustConfirmBeforeChat && (
+          {otherTyping && !chatDisabled && (
             <div className="typingRow">
               <div className="avatarSlot">
                 <div className="miniAvatar">{initialsOf(otherName)}</div>
@@ -1265,7 +1352,7 @@ export default function ThreadPage() {
         )}
       </main>
 
-      {replyTo && (
+      {replyTo && !itemClosed && (
         <div className="floatingBanner" style={{ bottom: bottomNavH + COMPOSER_H + 10 }}>
           <div className="floatingInner">
             <div className="floatingLabel">Replying to</div>
@@ -1279,7 +1366,7 @@ export default function ThreadPage() {
         </div>
       )}
 
-      {editingId && (
+      {editingId && !itemClosed && (
         <div className="floatingBanner" style={{ bottom: bottomNavH + COMPOSER_H + 10 }}>
           <div className="floatingInner editMode">
             <input className="editField" value={editingText} onChange={(e) => setEditingText(e.target.value)} />
@@ -1317,13 +1404,13 @@ export default function ThreadPage() {
 
       <div className="composerDock" style={{ bottom: bottomNavH }} onClick={(e) => e.stopPropagation()}>
         <div className="composerShell">
-          <label className={`attachBtn ${uploading || mustConfirmBeforeChat ? "disabled" : ""}`} title="Upload image">
+          <label className={`attachBtn ${uploading || chatDisabled ? "disabled" : ""}`} title="Upload image">
             ＋
             <input
               type="file"
               accept="image/jpeg,image/png,image/webp"
               onChange={onPickImage}
-              disabled={uploading || mustConfirmBeforeChat}
+              disabled={uploading || chatDisabled}
               style={{ display: "none" }}
             />
           </label>
@@ -1342,17 +1429,23 @@ export default function ThreadPage() {
                   void sendMessage({ body: text, attachments: null });
                 }
               }}
-              disabled={mustConfirmBeforeChat}
-              placeholder={mustConfirmBeforeChat ? "Confirm pickup above to start chatting…" : "Message"}
+              disabled={chatDisabled}
+              placeholder={
+                mustRespondBeforeChat
+                  ? "Respond above to unlock chat…"
+                  : itemClosed
+                  ? "This conversation is closed."
+                  : "Message"
+              }
               rows={1}
             />
           </div>
 
           <button
-            className={`sendFab ${!text.trim() || uploading || mustConfirmBeforeChat ? "disabled" : ""}`}
+            className={`sendFab ${!text.trim() || uploading || chatDisabled ? "disabled" : ""}`}
             type="button"
             onClick={() => void sendMessage({ body: text, attachments: null })}
-            disabled={!text.trim() || uploading || mustConfirmBeforeChat}
+            disabled={!text.trim() || uploading || chatDisabled}
             aria-label="Send"
           >
             ↑
@@ -1589,31 +1682,81 @@ export default function ThreadPage() {
           margin-top: 10px;
           border-radius: 18px;
           padding: 12px;
-          background: rgba(16, 185, 129, 0.1);
           border: 1px solid rgba(16, 185, 129, 0.16);
-          display: flex;
-          justify-content: space-between;
-          gap: 10px;
-          align-items: center;
-          flex-wrap: wrap;
+          background: rgba(16, 185, 129, 0.08);
+          display: grid;
+          gap: 12px;
+        }
+
+        .inviteGate {
+          background: linear-gradient(180deg, rgba(236, 253, 245, 0.96), rgba(240, 253, 250, 0.92));
+        }
+
+        .gateCopy {
+          display: grid;
+          gap: 4px;
+        }
+
+        .gateTitle {
+          font-size: 14px;
+          font-weight: 950;
+          color: #065f46;
         }
 
         .gateText {
           font-size: 13px;
-          font-weight: 900;
+          font-weight: 800;
           color: #065f46;
+          line-height: 1.45;
         }
 
-        .gateAction {
-          height: 40px;
+        .gateActions {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .gateAction,
+        .gateGhost {
+          height: 42px;
           padding: 0 14px;
           border-radius: 999px;
-          border: 1px solid rgba(16, 185, 129, 0.22);
-          background: rgba(16, 185, 129, 0.16);
-          color: #065f46;
           font-weight: 950;
           cursor: pointer;
           white-space: nowrap;
+        }
+
+        .gateAction {
+          border: 1px solid rgba(16, 185, 129, 0.22);
+          background: rgba(16, 185, 129, 0.16);
+          color: #065f46;
+        }
+
+        .gateGhost {
+          border: 1px solid rgba(15, 23, 42, 0.1);
+          background: rgba(255, 255, 255, 0.9);
+          color: #0f172a;
+        }
+
+        .closedBar {
+          margin-top: 10px;
+          border-radius: 18px;
+          padding: 12px;
+          background: rgba(15, 23, 42, 0.05);
+          border: 1px solid rgba(15, 23, 42, 0.08);
+        }
+
+        .closedTitle {
+          font-size: 13px;
+          font-weight: 950;
+          color: #0f172a;
+        }
+
+        .closedText {
+          margin-top: 4px;
+          font-size: 12px;
+          font-weight: 800;
+          color: #64748b;
         }
 
         .thread {
@@ -1928,6 +2071,11 @@ export default function ThreadPage() {
           font-size: 12px;
           font-weight: 900;
           cursor: pointer;
+        }
+
+        .trayBtn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
         }
 
         .trayBtn.danger {
