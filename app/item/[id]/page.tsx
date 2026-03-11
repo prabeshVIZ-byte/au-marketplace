@@ -31,6 +31,7 @@ type ItemRow = {
   owner_id: string | null;
   hide_interest_count?: boolean | null;
   reserved_interest_id?: string | null;
+  claimed_at?: string | null;
 };
 
 type OwnerProfile = {
@@ -53,6 +54,45 @@ type MyOfferRow = {
   status: string | null;
   created_at: string | null;
 };
+
+type CompletedInterestQueryRow = {
+  id: string;
+  item_id: string;
+  user_id: string;
+  status: string | null;
+  completed_at: string | null;
+  reserved_at: string | null;
+  accepted_at: string | null;
+  requester:
+    | {
+        full_name: string | null;
+        email: string | null;
+      }
+    | {
+        full_name: string | null;
+        email: string | null;
+      }[]
+    | null;
+};
+
+type CompletedInterestRow = {
+  id: string;
+  item_id: string;
+  user_id: string;
+  status: string | null;
+  completed_at: string | null;
+  reserved_at: string | null;
+  accepted_at: string | null;
+  requester: {
+    full_name: string | null;
+    email: string | null;
+  } | null;
+};
+
+function singleRelation<T>(value: T | T[] | null | undefined): T | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
 
 function requestGroupLabel(v: string | null) {
   const k = (v ?? "").toLowerCase();
@@ -93,11 +133,36 @@ function formatDelist(expiresAt: string | null) {
   });
 }
 
+function formatFullWhen(ts: string | null | undefined) {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "—";
+
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function ownerNameLabel(item: ItemRow | null, owner: OwnerProfile | null) {
   if (!item) return "Ashland user";
   if (item.is_anonymous) return "Anonymous";
   const name = (owner?.full_name ?? "").trim();
   return name || "Ashland user";
+}
+
+function readableName(
+  p: { full_name: string | null; email?: string | null } | null | undefined,
+  fallback = "Ashland user"
+) {
+  const name = (p?.full_name ?? "").trim();
+  if (name) return name;
+  const email = (p?.email ?? "").trim();
+  if (email) return email.split("@")[0];
+  return fallback;
 }
 
 function initials(name: string) {
@@ -135,8 +200,10 @@ function statusChip(item: ItemRow | null) {
   const st = normStatus(item?.status);
 
   if (!item) return { label: "Loading", tone: "neutral" as const };
-  if (isExpired(item.expires_at)) return { label: "Expired", tone: "closed" as const };
-  if (st === "claimed" || st === "completed") return { label: "Closed", tone: "closed" as const };
+  if (isExpired(item.expires_at) && st !== "claimed" && st !== "completed") {
+    return { label: "Expired", tone: "closed" as const };
+  }
+  if (st === "claimed" || st === "completed") return { label: "Given", tone: "closed" as const };
   if (st === "reserved") return { label: "Reserved", tone: "warn" as const };
   return { label: "Available", tone: "good" as const };
 }
@@ -167,6 +234,8 @@ export default function ItemDetailPage() {
   const [myOffer, setMyOffer] = useState<MyOfferRow | null>(null);
   const [hasAcceptedOther, setHasAcceptedOther] = useState(false);
 
+  const [completedInterest, setCompletedInterest] = useState<CompletedInterestRow | null>(null);
+
   const [menuOpen, setMenuOpen] = useState(false);
   const [openImg, setOpenImg] = useState<string | null>(null);
 
@@ -185,6 +254,25 @@ export default function ItemDetailPage() {
   const ownerLabel = useMemo(() => ownerNameLabel(item, owner), [item, owner]);
   const publicActivityHidden = !!item?.hide_interest_count && !isOwner;
   const itemStateChip = useMemo(() => statusChip(item), [item]);
+
+  const isArchivedGiveOwnerView = useMemo(() => {
+    return !!item && postType === "give" && isOwner && isGiveClosed(item);
+  }, [item, postType, isOwner]);
+
+  const soldToLabel = useMemo(() => {
+    return readableName(completedInterest?.requester, "Recipient");
+  }, [completedInterest]);
+
+  const soldAtLabel = useMemo(() => {
+    if (!completedInterest) return "—";
+    return (
+      completedInterest.completed_at ||
+      completedInterest.reserved_at ||
+      completedInterest.accepted_at ||
+      item?.claimed_at ||
+      null
+    );
+  }, [completedInterest, item?.claimed_at]);
 
   const subtitle = useMemo(() => {
     if (!item) return "";
@@ -224,6 +312,8 @@ export default function ItemDetailPage() {
     const mine = normStatus(myInterest?.status);
 
     if (isOwner) {
+      if (isGiveClosed(item)) return null;
+
       return {
         kind: "owner" as const,
         title: "You own this item.",
@@ -379,7 +469,10 @@ export default function ItemDetailPage() {
       return {
         kind: "pending" as const,
         title: "Your offer is active.",
-        body: mine === "hold" ? "The requester placed your offer on hold." : "Waiting for the requester to decide.",
+        body:
+          mine === "hold"
+            ? "The requester placed your offer on hold."
+            : "Waiting for the requester to decide.",
         primary: "Offer sent",
         secondary: "Withdraw",
         primaryDisabled: true,
@@ -426,7 +519,7 @@ export default function ItemDetailPage() {
       const { data: it, error: itemErr } = await supabase
         .from("items")
         .select(
-          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id,hide_interest_count,reserved_interest_id"
+          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id,hide_interest_count,reserved_interest_id,claimed_at"
         )
         .eq("id", itemId)
         .single();
@@ -475,6 +568,7 @@ export default function ItemDetailPage() {
       setHasAcceptedOther(false);
       setInterestCount(0);
       setOfferCount(0);
+      setCompletedInterest(null);
 
       if ((loaded.post_type ?? "give") === "give") {
         const { data: interestRows, error: interestErr } = await supabase
@@ -504,6 +598,54 @@ export default function ItemDetailPage() {
               null;
 
             setMyInterest(mine);
+          }
+        }
+
+        if (isGiveClosed(loaded)) {
+          const { data: completedRows, error: completedErr } = await supabase
+            .from("interests")
+            .select(`
+              id,
+              item_id,
+              user_id,
+              status,
+              completed_at,
+              reserved_at,
+              accepted_at,
+              requester:profiles!interests_user_id_fkey(full_name,email)
+            `)
+            .eq("item_id", itemId)
+            .in("status", ["completed", "reserved", "accepted"]);
+
+          if (!completedErr) {
+            const normalizedCompletedRows: CompletedInterestRow[] = (
+              ((completedRows ?? []) as CompletedInterestQueryRow[])
+            ).map((row) => ({
+              id: row.id,
+              item_id: row.item_id,
+              user_id: row.user_id,
+              status: row.status,
+              completed_at: row.completed_at,
+              reserved_at: row.reserved_at,
+              accepted_at: row.accepted_at,
+              requester: singleRelation(row.requester),
+            }));
+
+            const candidates = normalizedCompletedRows.sort((a, b) => {
+              const aTs = new Date(
+                a.completed_at || a.reserved_at || a.accepted_at || "1970-01-01"
+              ).getTime();
+              const bTs = new Date(
+                b.completed_at || b.reserved_at || b.accepted_at || "1970-01-01"
+              ).getTime();
+              return bTs - aTs;
+            });
+
+            const reservedMatch = loaded.reserved_interest_id
+              ? candidates.find((x) => x.id === loaded.reserved_interest_id) ?? null
+              : null;
+
+            setCompletedInterest(reservedMatch ?? candidates[0] ?? null);
           }
         }
       } else {
@@ -540,6 +682,7 @@ export default function ItemDetailPage() {
       setMyInterest(null);
       setMyOffer(null);
       setHasAcceptedOther(false);
+      setCompletedInterest(null);
     } finally {
       setLoading(false);
     }
@@ -796,7 +939,7 @@ export default function ItemDetailPage() {
   }
 
   async function toggleCountVisibility() {
-    if (!item || !isOwner || !userId) return;
+    if (!item || !isOwner || !userId || isArchivedGiveOwnerView) return;
 
     const nextValue = !item.hide_interest_count;
     setBusy(true);
@@ -853,7 +996,7 @@ export default function ItemDetailPage() {
   }
 
   useEffect(() => {
-    syncAuthAndLoad();
+    void syncAuthAndLoad();
 
     const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
       const uid = session?.user?.id ?? null;
@@ -901,7 +1044,6 @@ export default function ItemDetailPage() {
 
         {err && <div className="alert err">{err}</div>}
         {loading && <div className="alert">Loading…</div>}
-
         {!loading && !err && !item && <div className="alert err">Post not found.</div>}
 
         {!loading && item && (
@@ -938,31 +1080,35 @@ export default function ItemDetailPage() {
 
                   {menuOpen ? (
                     <div className="menuCard">
-                      <button
-                        className="menuItem"
-                        type="button"
-                        onClick={() => {
-                          setMenuOpen(false);
-                          router.push(`/manage/${item.id}`);
-                        }}
-                      >
-                        Manage post
-                      </button>
+                      {!isArchivedGiveOwnerView ? (
+                        <>
+                          <button
+                            className="menuItem"
+                            type="button"
+                            onClick={() => {
+                              setMenuOpen(false);
+                              router.push(`/manage/${item.id}`);
+                            }}
+                          >
+                            Manage post
+                          </button>
 
-                      <button
-                        className="menuItem"
-                        type="button"
-                        onClick={() => {
-                          setMenuOpen(false);
-                          router.push(`/item/${item.id}/edit`);
-                        }}
-                      >
-                        Edit post
-                      </button>
+                          <button
+                            className="menuItem"
+                            type="button"
+                            onClick={() => {
+                              setMenuOpen(false);
+                              router.push(`/item/${item.id}/edit`);
+                            }}
+                          >
+                            Edit post
+                          </button>
 
-                      <button className="menuItem" type="button" onClick={toggleCountVisibility}>
-                        {item.hide_interest_count ? "Show count" : "Hide count"}
-                      </button>
+                          <button className="menuItem" type="button" onClick={toggleCountVisibility}>
+                            {item.hide_interest_count ? "Show count" : "Hide count"}
+                          </button>
+                        </>
+                      ) : null}
 
                       <button
                         className="menuItem danger"
@@ -992,7 +1138,7 @@ export default function ItemDetailPage() {
 
             <div className="mediaWrap">
               {item.photo_url ? (
-                <button className="imgBtn" type="button" onClick={() => setOpenImg(item.photo_url!)}>
+                <button className="imgBtn" type="button" onClick={() => setOpenImg(item.photo_url)}>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={item.photo_url} alt={item.title} className="heroImg" />
                 </button>
@@ -1036,7 +1182,26 @@ export default function ItemDetailPage() {
                 <span className="stat">Delists {formatDelist(item.expires_at)}</span>
               </div>
 
-              {(postType === "give" && giveFlow) || (postType === "request" && requestFlow) ? (
+              {isArchivedGiveOwnerView ? (
+                <div className="archivedCard">
+                  <div className="archivedTitle">Archived handoff</div>
+                  <div className="archivedBody">
+                    This item has already been given away. Editing and management are disabled.
+                  </div>
+
+                  <div className="archivedMetaGrid">
+                    <div className="archivedMetaBox">
+                      <div className="archivedMetaLabel">Given to</div>
+                      <div className="archivedMetaValue">{soldToLabel}</div>
+                    </div>
+
+                    <div className="archivedMetaBox">
+                      <div className="archivedMetaLabel">Given on</div>
+                      <div className="archivedMetaValue">{formatFullWhen(soldAtLabel)}</div>
+                    </div>
+                  </div>
+                </div>
+              ) : (postType === "give" && giveFlow) || (postType === "request" && requestFlow) ? (
                 <div className="flowCard">
                   <div className="flowTitle">
                     {postType === "give" ? giveFlow?.title : requestFlow?.title}
@@ -1534,7 +1699,8 @@ export default function ItemDetailPage() {
           background: #f8fafc;
         }
 
-        .flowCard {
+        .flowCard,
+        .archivedCard {
           margin-top: 14px;
           padding: 14px;
           border-radius: 18px;
@@ -1542,18 +1708,56 @@ export default function ItemDetailPage() {
           background: #f8fafc;
         }
 
-        .flowTitle {
+        .archivedCard {
+          border-color: #dbe4ee;
+          background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+        }
+
+        .flowTitle,
+        .archivedTitle {
           font-size: 14px;
           font-weight: 1000;
           color: #0f172a;
         }
 
-        .flowBody {
+        .flowBody,
+        .archivedBody {
           margin-top: 5px;
           font-size: 13px;
           line-height: 1.5;
           color: #475569;
           font-weight: 700;
+        }
+
+        .archivedMetaGrid {
+          margin-top: 12px;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+        }
+
+        .archivedMetaBox {
+          border-radius: 14px;
+          border: 1px solid #e2e8f0;
+          background: #ffffff;
+          padding: 12px;
+        }
+
+        .archivedMetaLabel {
+          font-size: 11px;
+          font-weight: 900;
+          color: #64748b;
+          text-transform: uppercase;
+          letter-spacing: 0.03em;
+        }
+
+        .archivedMetaValue {
+          margin-top: 6px;
+          font-size: 14px;
+          line-height: 1.4;
+          font-weight: 900;
+          color: #0f172a;
+          overflow-wrap: anywhere;
         }
 
         .flowActions {
@@ -1774,6 +1978,10 @@ export default function ItemDetailPage() {
           .primaryAction,
           .secondaryAction {
             width: 100%;
+          }
+
+          .archivedMetaGrid {
+            grid-template-columns: 1fr;
           }
         }
       `}</style>
