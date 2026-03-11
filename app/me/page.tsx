@@ -41,6 +41,9 @@ type MyItemRow = {
   status: string | null;
   created_at: string;
   photo_url: string | null;
+  expires_at?: string | null;
+  starts_at?: string | null;
+  ends_at?: string | null;
   post_type?: "give" | "request" | "event" | null;
 };
 
@@ -277,15 +280,49 @@ function normStatus(s: string | null | undefined) {
   return (s ?? "").trim().toLowerCase();
 }
 
+function safeTime(ts: string | null | undefined) {
+  if (!ts) return null;
+  const ms = new Date(ts).getTime();
+  if (Number.isNaN(ms)) return null;
+  return ms;
+}
+
+function isPast(ts: string | null | undefined) {
+  const ms = safeTime(ts);
+  if (ms === null) return false;
+  return ms < Date.now();
+}
+
+function getEffectiveItemStatus(item: Pick<MyItemRow, "status" | "post_type" | "expires_at" | "starts_at" | "ends_at">) {
+  const raw = normStatus(item.status);
+  const type = item.post_type ?? "give";
+
+  if (type === "event") {
+    const eventEnd = item.ends_at ?? item.starts_at ?? null;
+    if (eventEnd && isPast(eventEnd)) return "completed";
+    return raw || "available";
+  }
+
+  if (raw === "claimed" || raw === "completed" || raw === "expired" || raw === "reserved") {
+    return raw;
+  }
+
+  if (item.expires_at && isPast(item.expires_at)) {
+    return "expired";
+  }
+
+  return raw || "available";
+}
+
 function isArchivedItem(item: MyItemRow) {
-  const status = normStatus(item.status);
+  const status = getEffectiveItemStatus(item);
   const type = item.post_type ?? "give";
 
   if (type === "event") {
     return status === "completed";
   }
 
-  return status === "claimed" || status === "completed";
+  return ["claimed", "completed", "expired"].includes(status);
 }
 
 function fmtWhen(ts: string | null | undefined) {
@@ -328,7 +365,7 @@ function readableName(
 function toneForStatus(status: string | null | undefined): "green" | "amber" | "red" | "gray" {
   const s = normStatus(status);
   if (["accepted", "reserved", "claimed", "completed"].includes(s)) return "green";
-  if (["pending", "hold"].includes(s)) return "amber";
+  if (["pending", "hold", "available"].includes(s)) return "amber";
   if (["declined", "expired"].includes(s)) return "red";
   return "gray";
 }
@@ -513,7 +550,7 @@ export default function AccountPage() {
     const [itemsRes, eventsRes] = await Promise.all([
       supabase
         .from("items")
-        .select("id,title,description,status,created_at,photo_url,post_type")
+        .select("id,title,description,status,created_at,photo_url,post_type,expires_at")
         .eq("owner_id", uid),
 
       supabase
@@ -529,9 +566,10 @@ export default function AccountPage() {
       return [];
     }
 
-    const itemRows = ((itemsRes.data ?? []) as MyItemRow[]).filter(Boolean);
-
-    const now = Date.now();
+    const itemRows: MyItemRow[] = ((itemsRes.data ?? []) as MyItemRow[]).map((item) => ({
+      ...item,
+      status: getEffectiveItemStatus(item),
+    }));
 
     const eventRows: MyItemRow[] = (
       (eventsRes.data ?? []) as Array<{
@@ -540,21 +578,25 @@ export default function AccountPage() {
         description: string | null;
         created_at: string;
         photo_url: string | null;
-        starts_at: string;
+        starts_at: string | null;
         ends_at: string | null;
       }>
     ).map((event) => {
-      const endTime = event.ends_at ?? event.starts_at;
-      const isPast = new Date(endTime).getTime() < now;
-
-      return {
+      const row: MyItemRow = {
         id: event.id,
         title: event.title,
         description: event.description ?? null,
-        status: isPast ? "completed" : "available",
+        status: "available",
         created_at: event.created_at,
         photo_url: event.photo_url ?? null,
+        starts_at: event.starts_at ?? null,
+        ends_at: event.ends_at ?? null,
         post_type: "event",
+      };
+
+      return {
+        ...row,
+        status: getEffectiveItemStatus(row),
       };
     });
 
@@ -1556,7 +1598,8 @@ function ProfileMediaCard({
   item: MyItemRow;
   onClick: () => void;
 }) {
-  const statusTone = toneForStatus(item.status);
+  const effectiveStatus = getEffectiveItemStatus(item);
+  const statusTone = toneForStatus(effectiveStatus);
 
   return (
     <button className="profile-media-card" onClick={onClick} type="button">
@@ -1579,7 +1622,7 @@ function ProfileMediaCard({
         <div className="media-bottom">
           <div className="media-title">{item.title}</div>
           <div className="media-meta-row">
-            <span className={`media-status ${statusTone}`}>{item.status ?? "—"}</span>
+            <span className={`media-status ${statusTone}`}>{effectiveStatus}</span>
             <span className="media-date">{fmtShort(item.created_at)}</span>
           </div>
         </div>
@@ -2411,6 +2454,7 @@ function PageStyles() {
         font-weight: 900;
         display: inline-flex;
         align-items: center;
+        text-transform: capitalize;
       }
 
       .media-status.green {
@@ -2857,6 +2901,7 @@ function PageStyles() {
         font-size: 12px;
         font-weight: 900;
         white-space: nowrap;
+        text-transform: capitalize;
       }
 
       .chip.green {
