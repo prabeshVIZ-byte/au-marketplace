@@ -181,10 +181,10 @@ function phaseForInterest(
 }
 
 function phaseLabel(phase: ReturnType<typeof phaseForInterest>) {
-  if (phase === "pending") return "New request";
-  if (phase === "awaiting_reply") return "Invitation sent";
-  if (phase === "talking") return "In conversation";
-  if (phase === "completed") return "Item received";
+  if (phase === "pending") return "New";
+  if (phase === "awaiting_reply") return "Awaiting reply";
+  if (phase === "talking") return "Active";
+  if (phase === "completed") return "Completed";
   return "Closed";
 }
 
@@ -223,25 +223,26 @@ export default function ManageItemPage() {
   const [busyChatId, setBusyChatId] = useState<string | null>(null);
   const [busyRequestClose, setBusyRequestClose] = useState<"completed" | "closed" | null>(null);
 
+  const [showClosedGive, setShowClosedGive] = useState(false);
+  const [showClosedRequests, setShowClosedRequests] = useState(false);
+
   const postType = (item?.post_type ?? "give") as PostType;
   const isGivePost = postType === "give";
   const isRequestPost = postType === "request";
   const itemStatus = normStatus(item?.status) || (isRequestPost ? "open" : "available");
   const itemFinished = ["claimed", "completed"].includes(itemStatus);
-
   const isRequestClosed = isRequestPost && ["completed", "closed", "cancelled"].includes(itemStatus);
 
-  const pendingInterests = useMemo(
-    () => interests.filter((x) => phaseForInterest(x) === "pending"),
+  const incomingInterests = useMemo(
+    () =>
+      interests.filter((x) => {
+        const p = phaseForInterest(x);
+        return p === "pending" || p === "awaiting_reply";
+      }),
     [interests]
   );
 
-  const awaitingReplyInterests = useMemo(
-    () => interests.filter((x) => phaseForInterest(x) === "awaiting_reply"),
-    [interests]
-  );
-
-  const talkingInterests = useMemo(
+  const activeInterests = useMemo(
     () => interests.filter((x) => phaseForInterest(x) === "talking"),
     [interests]
   );
@@ -266,8 +267,12 @@ export default function ManageItemPage() {
     [offers]
   );
 
+  const incomingCount = incomingInterests.length;
+  const activeCount = activeInterests.length;
+  const closedCount = closedInterests.length;
+
   const pendingOfferCount = pendingOffers.length;
-  const activeOfferCount = pendingOffers.length + acceptedOffers.length;
+  const acceptedOfferCount = acceptedOffers.length;
   const closedOfferCount = closedOffers.length;
 
   const loadAll = useCallback(
@@ -466,9 +471,7 @@ export default function ManageItemPage() {
 
     const current = normStatus(interest.status);
     const ok = window.confirm(
-      current === "accepted"
-        ? "End consideration for this requester?"
-        : "Decline this request?"
+      current === "accepted" ? "End consideration for this requester?" : "Decline this request?"
     );
     if (!ok) return;
 
@@ -677,7 +680,7 @@ export default function ManageItemPage() {
   async function openHelperChat(offer: OfferRow) {
     if (!item || !viewerId || !isRequestPost) return;
 
-    if (normStatus(offer.status) !== "accepted") {
+    if (normStatus(offer.status) !== "accepted" && normStatus(offer.status) !== "completed") {
       setErr("Accept this helper first before opening chat.");
       return;
     }
@@ -850,10 +853,10 @@ export default function ManageItemPage() {
       <div className="manage-page">
         <div className="shell">
           <div className="card skeleton">
-            <div className="skel skel-lg" />
-            <div className="skel skel-md" />
-            <div className="skel skel-md" />
-            <div className="skel skel-grid" />
+            <div className="skel skel-hero" />
+            <div className="skel skel-row" />
+            <div className="skel skel-row short" />
+            <div className="skel skel-block" />
           </div>
         </div>
         <PageStyles />
@@ -870,21 +873,19 @@ export default function ManageItemPage() {
           </Link>
 
           <div className="topbar-actions">
-            <button
-              onClick={() => void loadAll(true)}
-              className="ghost-btn"
-              type="button"
-              disabled={refreshing}
-            >
-              {refreshing ? "Refreshing…" : "Refresh"}
+            <button onClick={() => router.push(`/item/${id}`)} className="ghost-btn" type="button">
+              Open post
             </button>
 
             <button
-              onClick={() => router.push(`/item/${id}`)}
-              className="ghost-btn"
+              onClick={() => void loadAll(true)}
+              className="icon-btn"
               type="button"
+              disabled={refreshing}
+              aria-label="Refresh"
+              title="Refresh"
             >
-              View post
+              {refreshing ? "…" : "↻"}
             </button>
           </div>
         </div>
@@ -893,13 +894,13 @@ export default function ManageItemPage() {
 
         {!item ? (
           <div className="card">
-            <h1 className="title">Manage post</h1>
+            <h1 className="title compact">Manage post</h1>
             <p className="muted">We could not load this post.</p>
           </div>
         ) : accessDenied ? (
           <div className="stack">
-            <section className="hero-card">
-              <Hero item={item} />
+            <section className="card">
+              <CompactSummary item={item} />
             </section>
 
             <section className="card">
@@ -926,8 +927,8 @@ export default function ManageItemPage() {
           </div>
         ) : wrongPage ? (
           <div className="stack">
-            <section className="hero-card">
-              <Hero item={item} />
+            <section className="card">
+              <CompactSummary item={item} />
             </section>
 
             <section className="card">
@@ -956,78 +957,59 @@ export default function ManageItemPage() {
           </div>
         ) : (
           <div className="stack">
-            <section className="hero-card">
-              <Hero item={item} />
+            <section className="card">
+              <CompactSummary item={item} />
 
               <div className="summary-grid">
-                <MetricCard
-                  label={isRequestPost ? "Request status" : "Post status"}
-                  value={item.status ?? (isRequestPost ? "open" : "available")}
-                  tone={toneForStatus(item.status)}
-                />
-                <MetricCard label="Posted" value={fmtShort(item.created_at)} tone="gray" />
-
                 {isGivePost ? (
                   <>
-                    <MetricCard
-                      label="New requests"
-                      value={String(pendingInterests.length)}
-                      tone="amber"
-                    />
-                    <MetricCard
-                      label="In conversation"
-                      value={String(talkingInterests.length)}
-                      tone="green"
-                    />
+                    <MetricCard label="Incoming" value={String(incomingCount)} tone={incomingCount ? "amber" : "gray"} />
+                    <MetricCard label="Active" value={String(activeCount)} tone={activeCount ? "green" : "gray"} />
+                    <MetricCard label="Closed" value={String(closedCount)} tone={closedCount ? "gray" : "gray"} />
                   </>
                 ) : (
                   <>
                     <MetricCard
-                      label="Accepted helpers"
-                      value={String(acceptedOffers.length)}
-                      tone={acceptedOffers.length ? "green" : "gray"}
+                      label="Pending offers"
+                      value={String(pendingOfferCount)}
+                      tone={pendingOfferCount ? "amber" : "gray"}
                     />
                     <MetricCard
-                      label="Active offers"
-                      value={String(activeOfferCount)}
-                      tone={activeOfferCount ? "blue" : "gray"}
+                      label="Accepted helpers"
+                      value={String(acceptedOfferCount)}
+                      tone={acceptedOfferCount ? "green" : "gray"}
+                    />
+                    <MetricCard
+                      label="Closed"
+                      value={String(closedOfferCount)}
+                      tone="gray"
                     />
                   </>
                 )}
               </div>
 
               {isGivePost && !itemFinished ? (
-                <div className="status-panel">
-                  <div className="status-panel-copy">
-                    <div className="status-panel-title">Conversation-first marketplace flow</div>
-                    <div className="status-panel-text">
-                      You can invite multiple requesters into conversation. Their “yes” only unlocks chat. The item stays live until you confirm the handoff.
-                    </div>
-                  </div>
+                <div className="guide-banner">
+                  Invite multiple people to chat. The item stays live until you confirm handoff.
                 </div>
               ) : null}
 
               {isGivePost && itemFinished ? (
-                <div className="status-panel done">
-                  <div className="status-panel-copy">
-                    <div className="status-panel-title">Handoff completed</div>
-                    <div className="status-panel-text">
-                      This item has already been marked as given. It should now appear as closed across the feed and your profile.
-                    </div>
-                  </div>
+                <div className="guide-banner done">
+                  This item has already been marked as given. It should now live in archived history.
                 </div>
               ) : null}
 
               {isRequestPost && !isRequestClosed ? (
-                <div className="status-panel">
-                  <div className="status-panel-copy">
-                    <div className="status-panel-title">Request controls</div>
-                    <div className="status-panel-text">
-                      You can accept multiple helpers and talk to multiple people, just like the give flow. When the request is no longer needed, either mark it fulfilled or de-list it.
+                <div className="guide-card">
+                  <div className="guide-copy">
+                    <div className="guide-title">Request lifecycle</div>
+                    <div className="guide-text">
+                      Accept multiple helpers if needed. Mark fulfilled when the help happened, or de-list when you no longer need it.
                     </div>
                   </div>
 
-                  <div className="status-panel-actions">
+                  <div className="guide-actions">
                     <button
                       onClick={() => void closeRequest("completed")}
                       disabled={busyRequestClose !== null}
@@ -1050,15 +1032,10 @@ export default function ManageItemPage() {
               ) : null}
 
               {isRequestPost && isRequestClosed ? (
-                <div className="status-panel done">
-                  <div className="status-panel-copy">
-                    <div className="status-panel-title">
-                      {itemStatus === "completed" ? "Request fulfilled" : "Request de-listed"}
-                    </div>
-                    <div className="status-panel-text">
-                      This request is no longer active. It should appear in archived/history instead of the active request lists.
-                    </div>
-                  </div>
+                <div className="guide-banner done">
+                  {itemStatus === "completed"
+                    ? "This request has been fulfilled and should now live in archived history."
+                    : "This request has been de-listed and is no longer active."}
                 </div>
               ) : null}
             </section>
@@ -1067,112 +1044,70 @@ export default function ManageItemPage() {
               <>
                 <section className="card">
                   <SectionHeader
-                    title="New requests"
-                    body="These people have requested the item but have not been invited into conversation yet."
+                    title="Incoming"
+                    body="New requesters and invited people still waiting to reply."
                     pills={[
                       <Pill
-                        key="pending"
-                        label={`${pendingInterests.length} pending`}
-                        tone={pendingInterests.length ? "amber" : "gray"}
+                        key="incoming"
+                        label={`${incomingInterests.length} incoming`}
+                        tone={incomingInterests.length ? "amber" : "gray"}
                       />,
                     ]}
                   />
 
-                  {pendingInterests.length === 0 ? (
+                  {incomingInterests.length === 0 ? (
                     <EmptyState
-                      title="No new requests"
+                      title="No incoming requests"
                       body="When someone requests this item, they will appear here."
                     />
                   ) : (
                     <div className="request-grid">
-                      {pendingInterests.map((request) => {
+                      {incomingInterests.map((request) => {
                         const profile = profilesById[request.user_id];
                         const name = readableName(profile, request.user_id);
+                        const phase = phaseForInterest(request);
+                        const isPending = phase === "pending";
 
                         return (
-                          <InterestCard
-                            key={request.id}
-                            name={name}
-                            subtitle={`Requested ${timeAgo(request.created_at)}`}
-                            phase={phaseForInterest(request)}
-                            note={request.note}
-                            pickup={request.earliest_pickup}
-                            windowText={request.time_window}
-                            actions={
-                              <>
-                                <button
-                                  onClick={() => void acceptInterest(request.id)}
-                                  disabled={itemFinished || busyAcceptId !== null}
-                                  className="primary-btn"
-                                  type="button"
-                                >
-                                  {busyAcceptId === request.id ? "Inviting…" : "Invite to chat"}
-                                </button>
-
-                                <button
-                                  onClick={() => void declineInterest(request)}
-                                  disabled={itemFinished || busyDeclineId === request.id}
-                                  className="secondary-btn"
-                                  type="button"
-                                >
-                                  {busyDeclineId === request.id ? "Updating…" : "Decline"}
-                                </button>
-                              </>
-                            }
-                          />
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
-
-                <section className="card">
-                  <SectionHeader
-                    title="Awaiting reply"
-                    body="You have invited these requesters into conversation, but they have not yet confirmed they are still interested."
-                    pills={[
-                      <Pill
-                        key="awaiting"
-                        label={`${awaitingReplyInterests.length} awaiting`}
-                        tone={awaitingReplyInterests.length ? "blue" : "gray"}
-                      />,
-                    ]}
-                  />
-
-                  {awaitingReplyInterests.length === 0 ? (
-                    <EmptyState
-                      title="No pending replies"
-                      body="Once you invite someone to chat, they will appear here until they respond."
-                    />
-                  ) : (
-                    <div className="request-grid">
-                      {awaitingReplyInterests.map((request) => {
-                        const profile = profilesById[request.user_id];
-                        const name = readableName(profile, request.user_id);
-
-                        return (
-                          <InterestCard
+                          <ManagePersonCard
                             key={request.id}
                             name={name}
                             subtitle={
-                              request.accepted_at
+                              isPending
+                                ? `Requested ${timeAgo(request.created_at)}`
+                                : request.accepted_at
                                 ? `Invited ${timeAgo(request.accepted_at)}`
                                 : "Invited recently"
                             }
-                            phase={phaseForInterest(request)}
                             note={request.note}
-                            pickup={request.earliest_pickup}
-                            windowText={request.time_window}
+                            detailChips={[
+                              request.earliest_pickup ? `Pickup: ${request.earliest_pickup}` : null,
+                              request.time_window ? `Window: ${request.time_window}` : null,
+                            ]}
+                            tone={phaseTone(phase)}
+                            statusLabel={phaseLabel(phase)}
+                            onCardClick={!isPending ? () => void openInterestChat(request) : undefined}
                             actions={
                               <>
-                                <button
-                                  onClick={() => void openInterestChat(request)}
-                                  disabled={busyChatId === request.id}
-                                  className="secondary-btn"
-                                  type="button"
-                                >
-                                  {busyChatId === request.id ? "Opening…" : "Open chat"}
-                                </button>
+                                {isPending ? (
+                                  <button
+                                    onClick={() => void acceptInterest(request.id)}
+                                    disabled={itemFinished || busyAcceptId !== null}
+                                    className="primary-btn"
+                                    type="button"
+                                  >
+                                    {busyAcceptId === request.id ? "Inviting…" : "Invite to chat"}
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => void openInterestChat(request)}
+                                    disabled={busyChatId === request.id}
+                                    className="secondary-btn"
+                                    type="button"
+                                  >
+                                    {busyChatId === request.id ? "Opening…" : "Open chat"}
+                                  </button>
+                                )}
 
                                 <button
                                   onClick={() => void declineInterest(request)}
@@ -1180,7 +1115,11 @@ export default function ManageItemPage() {
                                   className="ghost-danger-btn"
                                   type="button"
                                 >
-                                  {busyDeclineId === request.id ? "Updating…" : "End consideration"}
+                                  {busyDeclineId === request.id
+                                    ? "Updating…"
+                                    : isPending
+                                    ? "Decline"
+                                    : "End consideration"}
                                 </button>
                               </>
                             }
@@ -1193,42 +1132,46 @@ export default function ManageItemPage() {
 
                 <section className="card">
                   <SectionHeader
-                    title="In conversation"
-                    body="These requesters confirmed they are still interested. Continue in chat, then confirm the handoff when the item has actually been given."
+                    title="Active"
+                    body="These requesters confirmed interest. Continue the chat, then confirm the real handoff."
                     pills={[
                       <Pill
-                        key="talking"
-                        label={`${talkingInterests.length} active`}
-                        tone={talkingInterests.length ? "green" : "gray"}
+                        key="active"
+                        label={`${activeInterests.length} active`}
+                        tone={activeInterests.length ? "green" : "gray"}
                       />,
                     ]}
                   />
 
-                  {talkingInterests.length === 0 ? (
+                  {activeInterests.length === 0 ? (
                     <EmptyState
                       title="No active conversations"
                       body="Once a requester confirms they are still interested, they will appear here."
                     />
                   ) : (
                     <div className="request-grid">
-                      {talkingInterests.map((request) => {
+                      {activeInterests.map((request) => {
                         const profile = profilesById[request.user_id];
                         const name = readableName(profile, request.user_id);
 
                         return (
-                          <InterestCard
+                          <ManagePersonCard
                             key={request.id}
                             name={name}
                             subtitle={
                               request.requester_confirmed_at
-                                ? `Confirmed interest ${timeAgo(request.requester_confirmed_at)}`
-                                : "Confirmed interest"
+                                ? `Confirmed ${timeAgo(request.requester_confirmed_at)}`
+                                : "Confirmed recently"
                             }
-                            phase={phaseForInterest(request)}
                             note={request.note}
-                            pickup={request.earliest_pickup}
-                            windowText={request.time_window}
+                            detailChips={[
+                              request.earliest_pickup ? `Pickup: ${request.earliest_pickup}` : null,
+                              request.time_window ? `Window: ${request.time_window}` : null,
+                            ]}
+                            tone="green"
+                            statusLabel="Active"
                             highlight
+                            onCardClick={() => void openInterestChat(request)}
                             actions={
                               <>
                                 <button
@@ -1252,7 +1195,7 @@ export default function ManageItemPage() {
                                 <button
                                   onClick={() => void confirmHandoff(request)}
                                   disabled={itemFinished || busyHandoffId !== null}
-                                  className="primary-btn strong"
+                                  className="primary-btn strong full-mobile"
                                   type="button"
                                 >
                                   {busyHandoffId === request.id ? "Confirming…" : "Confirm handoff"}
@@ -1267,57 +1210,68 @@ export default function ManageItemPage() {
                 </section>
 
                 <section className="card">
-                  <SectionHeader
-                    title="Closed activity"
-                    body="Requests that were declined, expired, or completed are kept here for reference."
-                    pills={[
-                      <Pill
-                        key="closed"
-                        label={`${closedInterests.length} closed`}
-                        tone="gray"
-                      />,
-                    ]}
-                  />
-
-                  {closedInterests.length === 0 ? (
-                    <EmptyState
-                      title="No closed activity"
-                      body="Once requests are closed out, they will appear here."
-                    />
-                  ) : (
-                    <div className="request-grid">
-                      {closedInterests.map((request) => {
-                        const profile = profilesById[request.user_id];
-                        const name = readableName(profile, request.user_id);
-
-                        return (
-                          <InterestCard
-                            key={request.id}
-                            name={name}
-                            subtitle={
-                              request.completed_at
-                                ? `Completed ${timeAgo(request.completed_at)}`
-                                : `Last updated ${timeAgo(request.accepted_at ?? request.created_at)}`
-                            }
-                            phase={phaseForInterest(request)}
-                            note={request.note}
-                            pickup={request.earliest_pickup}
-                            windowText={request.time_window}
-                            actions={
-                              <button
-                                onClick={() => void openInterestChat(request)}
-                                disabled={busyChatId === request.id}
-                                className="secondary-btn"
-                                type="button"
-                              >
-                                {busyChatId === request.id ? "Opening…" : "Open thread"}
-                              </button>
-                            }
-                          />
-                        );
-                      })}
+                  <div className="section-head">
+                    <div>
+                      <h2 className="section-title">Closed history</h2>
+                      <p className="muted">Declined and completed request activity lives here.</p>
                     </div>
-                  )}
+
+                    <button
+                      type="button"
+                      className="ghost-btn"
+                      onClick={() => setShowClosedGive((v) => !v)}
+                    >
+                      {showClosedGive ? "Hide closed" : `Show closed (${closedInterests.length})`}
+                    </button>
+                  </div>
+
+                  {showClosedGive ? (
+                    closedInterests.length === 0 ? (
+                      <EmptyState
+                        title="No closed activity"
+                        body="Once requests are closed out, they will appear here."
+                      />
+                    ) : (
+                      <div className="request-grid closed-grid">
+                        {closedInterests.map((request) => {
+                          const profile = profilesById[request.user_id];
+                          const name = readableName(profile, request.user_id);
+                          const phase = phaseForInterest(request);
+
+                          return (
+                            <ManagePersonCard
+                              key={request.id}
+                              name={name}
+                              subtitle={
+                                request.completed_at
+                                  ? `Completed ${timeAgo(request.completed_at)}`
+                                  : `Updated ${timeAgo(request.accepted_at ?? request.created_at)}`
+                              }
+                              note={request.note}
+                              detailChips={[
+                                request.earliest_pickup ? `Pickup: ${request.earliest_pickup}` : null,
+                                request.time_window ? `Window: ${request.time_window}` : null,
+                              ]}
+                              tone={phaseTone(phase)}
+                              statusLabel={phaseLabel(phase)}
+                              mutedCard
+                              onCardClick={() => void openInterestChat(request)}
+                              actions={
+                                <button
+                                  onClick={() => void openInterestChat(request)}
+                                  disabled={busyChatId === request.id}
+                                  className="secondary-btn"
+                                  type="button"
+                                >
+                                  {busyChatId === request.id ? "Opening…" : "Open thread"}
+                                </button>
+                              }
+                            />
+                          );
+                        })}
+                      </div>
+                    )
+                  ) : null}
                 </section>
               </>
             ) : null}
@@ -1326,231 +1280,204 @@ export default function ManageItemPage() {
               <>
                 <section className="card">
                   <SectionHeader
-                    title="Accepted helpers"
-                    body="These helpers are currently accepted for this request. You can coordinate with multiple people at the same time."
-                    pills={[
-                      <Pill
-                        key="accepted"
-                        label={`Accepted: ${acceptedOffers.length}`}
-                        tone={acceptedOffers.length ? "green" : "gray"}
-                      />,
-                    ]}
+                    title="Active helper flow"
+                    body="Accepted helpers first, then incoming offers."
                   />
 
-                  {acceptedOffers.length === 0 ? (
-                    <EmptyState
-                      title="No accepted helpers yet"
-                      body="Accept any helper offer below to start coordinating in chat."
-                    />
-                  ) : (
-                    <div className="request-grid">
-                      {acceptedOffers.map((offer) => {
-                        const name = readableName(offer.helper, offer.helper_id);
-                        const busy = busyOfferId === offer.id || busyChatId === offer.id;
-
-                        return (
-                          <div key={offer.id} className="request-card highlight">
-                            <div className="request-card-top">
-                              <div className="identity-block">
-                                <div className="avatar-shell">{initialsOf(name)}</div>
-                                <div>
-                                  <div className="request-title">{name}</div>
-                                  <div className="request-subtitle">
-                                    Accepted helper
-                                    {offer.availability ? ` • Availability: ${offer.availability}` : ""}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <Pill label="accepted" tone="green" />
-                            </div>
-
-                            <div className="note-surface">
-                              {offer.note?.trim() ? offer.note : "No note provided."}
-                            </div>
-
-                            <div className="action-row">
-                              <button
-                                onClick={() => void openHelperChat(offer)}
-                                disabled={busy}
-                                className="primary-btn"
-                                type="button"
-                              >
-                                {busyChatId === offer.id ? "Opening…" : "Open chat"}
-                              </button>
-
-                              <button
-                                onClick={() => void updateOfferStatus(offer, "declined")}
-                                disabled={busy || isRequestClosed}
-                                className="ghost-danger-btn"
-                                type="button"
-                              >
-                                Remove helper
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
+                  <div className="subsection">
+                    <div className="subsection-head">
+                      <h3 className="mini-title">Accepted helpers</h3>
+                      <Pill
+                        label={`${acceptedOfferCount} accepted`}
+                        tone={acceptedOfferCount ? "green" : "gray"}
+                      />
                     </div>
-                  )}
-                </section>
 
-                <section className="card">
-                  <SectionHeader
-                    title="Incoming helper offers"
-                    body="Accept as many helpers as you want. This request stays active until you mark it fulfilled or de-list it."
-                    pills={[
-                      <Pill
-                        key="pending"
-                        label={`Pending: ${pendingOfferCount}`}
-                        tone={pendingOfferCount ? "amber" : "gray"}
-                      />,
-                      <Pill
-                        key="total"
-                        label={`Total: ${offers.length}`}
-                        tone={offers.length ? "blue" : "gray"}
-                      />,
-                    ]}
-                  />
+                    {acceptedOffers.length === 0 ? (
+                      <EmptyState
+                        title="No accepted helpers yet"
+                        body="Accept any helper offer below to start coordinating in chat."
+                      />
+                    ) : (
+                      <div className="request-grid">
+                        {acceptedOffers.map((offer) => {
+                          const name = readableName(offer.helper, offer.helper_id);
+                          const busy = busyOfferId === offer.id || busyChatId === offer.id;
 
-                  {pendingOffers.length === 0 ? (
-                    <EmptyState
-                      title="No pending helper offers"
-                      body="When someone offers help on this request post, they will appear here."
-                    />
-                  ) : (
-                    <div className="request-grid">
-                      {pendingOffers.map((offer) => {
-                        const name = readableName(offer.helper, offer.helper_id);
-                        const status = (offer.status ?? "pending") as OfferStatus;
-                        const busy = busyOfferId === offer.id || busyChatId === offer.id;
+                          return (
+                            <ManagePersonCard
+                              key={offer.id}
+                              name={name}
+                              subtitle={
+                                offer.availability
+                                  ? `Accepted helper • ${offer.availability}`
+                                  : "Accepted helper"
+                              }
+                              note={offer.note}
+                              detailChips={[
+                                offer.created_at ? `Offered ${timeAgo(offer.created_at)}` : null,
+                              ]}
+                              tone="green"
+                              statusLabel="Accepted"
+                              highlight
+                              onCardClick={() => void openHelperChat(offer)}
+                              actions={
+                                <>
+                                  <button
+                                    onClick={() => void openHelperChat(offer)}
+                                    disabled={busy}
+                                    className="primary-btn"
+                                    type="button"
+                                  >
+                                    {busyChatId === offer.id ? "Opening…" : "Open chat"}
+                                  </button>
 
-                        return (
-                          <div key={offer.id} className="request-card">
-                            <div className="request-card-top">
-                              <div className="identity-block">
-                                <div className="avatar-shell">{initialsOf(name)}</div>
-                                <div>
-                                  <div className="request-title">{name}</div>
-                                  <div className="request-subtitle">
-                                    Offered {fmtWhen(offer.created_at)}
-                                    {offer.availability ? ` • Availability: ${offer.availability}` : ""}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <Pill label={status} tone={toneForStatus(status)} />
-                            </div>
-
-                            <div className="note-surface">
-                              {offer.note?.trim() ? offer.note : "No note provided."}
-                            </div>
-
-                            <div className="action-row">
-                              <button
-                                onClick={() => void updateOfferStatus(offer, "accepted")}
-                                disabled={busy || isRequestClosed}
-                                className="primary-btn"
-                                type="button"
-                              >
-                                {busyOfferId === offer.id ? "Working…" : "Accept helper"}
-                              </button>
-
-                              <button
-                                onClick={() => void updateOfferStatus(offer, "declined")}
-                                disabled={busy || isRequestClosed}
-                                className="danger-btn"
-                                type="button"
-                              >
-                                Decline
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
-
-                <section className="card">
-                  <SectionHeader
-                    title="Closed helper activity"
-                    body="Declined or completed helper offers remain here for reference."
-                    pills={[
-                      <Pill
-                        key="closed"
-                        label={`Closed: ${closedOfferCount}`}
-                        tone="gray"
-                      />,
-                    ]}
-                  />
-
-                  {closedOffers.length === 0 ? (
-                    <EmptyState
-                      title="No closed helper activity"
-                      body="Declined and completed offers will show here."
-                    />
-                  ) : (
-                    <div className="request-grid">
-                      {closedOffers.map((offer) => {
-                        const name = readableName(offer.helper, offer.helper_id);
-                        const status = (offer.status ?? "declined") as OfferStatus;
-                        const canOpen = status === "completed";
-
-                        return (
-                          <div key={offer.id} className="request-card">
-                            <div className="request-card-top">
-                              <div className="identity-block">
-                                <div className="avatar-shell">{initialsOf(name)}</div>
-                                <div>
-                                  <div className="request-title">{name}</div>
-                                  <div className="request-subtitle">
-                                    Last updated {fmtWhen(offer.updated_at ?? offer.created_at)}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <Pill label={status} tone={toneForStatus(status)} />
-                            </div>
-
-                            <div className="note-surface">
-                              {offer.note?.trim() ? offer.note : "No note provided."}
-                            </div>
-
-                            {canOpen ? (
-                              <div className="action-row">
-                                <button
-                                  onClick={() => void openHelperChat(offer)}
-                                  disabled={busyChatId === offer.id}
-                                  className="secondary-btn"
-                                  type="button"
-                                >
-                                  {busyChatId === offer.id ? "Opening…" : "Open thread"}
-                                </button>
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
-
-                <section className="card">
-                  <SectionHeader
-                    title="Request guidance"
-                    body="This request flow now mirrors the give flow more closely."
-                  />
-
-                  <div className="note-surface">
-                    <strong>Request lifecycle:</strong> open/available → accept one or more helpers → fulfilled or de-listed.
-                    {"\n\n"}
-                    <strong>Request fulfilled</strong> means the help happened and the request should move to archived.
-                    {"\n"}
-                    <strong>De-list request</strong> means you no longer need help, so it should also leave the active feed.
-                    {"\n\n"}
-                    Accepted helpers can stay in parallel chats until you finish the request.
+                                  <button
+                                    onClick={() => void updateOfferStatus(offer, "declined")}
+                                    disabled={busy || isRequestClosed}
+                                    className="ghost-danger-btn"
+                                    type="button"
+                                  >
+                                    Remove helper
+                                  </button>
+                                </>
+                              }
+                            />
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
+
+                  <div className="subsection top-rule">
+                    <div className="subsection-head">
+                      <h3 className="mini-title">Incoming offers</h3>
+                      <Pill
+                        label={`${pendingOfferCount} pending`}
+                        tone={pendingOfferCount ? "amber" : "gray"}
+                      />
+                    </div>
+
+                    {pendingOffers.length === 0 ? (
+                      <EmptyState
+                        title="No pending helper offers"
+                        body="When someone offers help on this request post, they will appear here."
+                      />
+                    ) : (
+                      <div className="request-grid">
+                        {pendingOffers.map((offer) => {
+                          const name = readableName(offer.helper, offer.helper_id);
+                          const status = (offer.status ?? "pending") as OfferStatus;
+                          const busy = busyOfferId === offer.id || busyChatId === offer.id;
+
+                          return (
+                            <ManagePersonCard
+                              key={offer.id}
+                              name={name}
+                              subtitle={
+                                offer.created_at
+                                  ? `Offered ${timeAgo(offer.created_at)}`
+                                  : "Offered recently"
+                              }
+                              note={offer.note}
+                              detailChips={[
+                                offer.availability ? `Availability: ${offer.availability}` : null,
+                              ]}
+                              tone={toneForStatus(status)}
+                              statusLabel={status}
+                              actions={
+                                <>
+                                  <button
+                                    onClick={() => void updateOfferStatus(offer, "accepted")}
+                                    disabled={busy || isRequestClosed}
+                                    className="primary-btn"
+                                    type="button"
+                                  >
+                                    {busyOfferId === offer.id ? "Working…" : "Accept helper"}
+                                  </button>
+
+                                  <button
+                                    onClick={() => void updateOfferStatus(offer, "declined")}
+                                    disabled={busy || isRequestClosed}
+                                    className="ghost-danger-btn"
+                                    type="button"
+                                  >
+                                    Decline
+                                  </button>
+                                </>
+                              }
+                            />
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                <section className="card">
+                  <div className="section-head">
+                    <div>
+                      <h2 className="section-title">Closed history</h2>
+                      <p className="muted">Declined and completed helper offers remain here for reference.</p>
+                    </div>
+
+                    <button
+                      type="button"
+                      className="ghost-btn"
+                      onClick={() => setShowClosedRequests((v) => !v)}
+                    >
+                      {showClosedRequests ? "Hide closed" : `Show closed (${closedOffers.length})`}
+                    </button>
+                  </div>
+
+                  {showClosedRequests ? (
+                    closedOffers.length === 0 ? (
+                      <EmptyState
+                        title="No closed helper activity"
+                        body="Declined and completed offers will show here."
+                      />
+                    ) : (
+                      <div className="request-grid closed-grid">
+                        {closedOffers.map((offer) => {
+                          const name = readableName(offer.helper, offer.helper_id);
+                          const status = (offer.status ?? "declined") as OfferStatus;
+                          const canOpen = status === "completed";
+
+                          return (
+                            <ManagePersonCard
+                              key={offer.id}
+                              name={name}
+                              subtitle={
+                                offer.updated_at || offer.created_at
+                                  ? `Updated ${timeAgo(offer.updated_at ?? offer.created_at)}`
+                                  : "Closed recently"
+                              }
+                              note={offer.note}
+                              detailChips={[
+                                offer.availability ? `Availability: ${offer.availability}` : null,
+                              ]}
+                              tone={toneForStatus(status)}
+                              statusLabel={status}
+                              mutedCard
+                              onCardClick={canOpen ? () => void openHelperChat(offer) : undefined}
+                              actions={
+                                canOpen ? (
+                                  <button
+                                    onClick={() => void openHelperChat(offer)}
+                                    disabled={busyChatId === offer.id}
+                                    className="secondary-btn"
+                                    type="button"
+                                  >
+                                    {busyChatId === offer.id ? "Opening…" : "Open thread"}
+                                  </button>
+                                ) : null
+                              }
+                            />
+                          );
+                        })}
+                      </div>
+                    )
+                  ) : null}
                 </section>
               </>
             ) : null}
@@ -1563,28 +1490,28 @@ export default function ManageItemPage() {
   );
 }
 
-function Hero({ item }: { item: Item }) {
+function CompactSummary({ item }: { item: Item }) {
+  const typeLabel = postTypeLabel(item.post_type);
+  const statusText = item.status ?? (item.post_type === "request" ? "open" : "available");
+
   return (
-    <div className="hero-main">
+    <div className="compact-summary">
       {item.photo_url ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={item.photo_url} alt={item.title} className="hero-image" />
+        <img src={item.photo_url} alt={item.title} className="summary-thumb" />
       ) : (
-        <div className="hero-image-fallback">{postTypeLabel(item.post_type)}</div>
+        <div className="summary-thumb fallback">{typeLabel}</div>
       )}
 
-      <div className="hero-copy">
-        <div className="eyebrow">Manage post</div>
-        <h1 className="title clamp">{item.title}</h1>
-        <p className="muted">{item.description || "No description provided."}</p>
+      <div className="summary-copy">
+        <div className="summary-topline">Manage {typeLabel.toLowerCase()}</div>
+        <h1 className="title compact clamp2">{item.title}</h1>
+        <p className="muted clamp2">{item.description || "No description provided."}</p>
 
         <div className="pill-row top-gap">
-          <Pill label={`Type: ${postTypeLabel(item.post_type)}`} tone="gray" />
-          <Pill
-            label={`Status: ${item.status ?? (item.post_type === "request" ? "open" : "—")}`}
-            tone={toneForStatus(item.status)}
-          />
-          <Pill label={`Posted: ${fmtWhen(item.created_at)}`} tone="gray" />
+          <Pill label={typeLabel} tone="gray" />
+          <Pill label={statusText} tone={toneForStatus(item.status)} />
+          <Pill label={fmtShort(item.created_at)} tone="gray" />
         </div>
       </div>
     </div>
@@ -1629,46 +1556,61 @@ function MetricCard({
   );
 }
 
-function InterestCard({
+function ManagePersonCard({
   name,
   subtitle,
-  phase,
   note,
-  pickup,
-  windowText,
+  detailChips,
+  tone,
+  statusLabel,
   actions,
   highlight = false,
+  mutedCard = false,
+  onCardClick,
 }: {
   name: string;
   subtitle: string;
-  phase: ReturnType<typeof phaseForInterest>;
   note: string | null;
-  pickup: string | null;
-  windowText: string | null;
+  detailChips: Array<string | null>;
+  tone: "green" | "amber" | "red" | "gray" | "blue";
+  statusLabel: string;
   actions: React.ReactNode;
   highlight?: boolean;
+  mutedCard?: boolean;
+  onCardClick?: () => void;
 }) {
   return (
-    <div className={`request-card ${highlight ? "highlight" : ""}`}>
+    <div
+      className={`request-card ${highlight ? "highlight" : ""} ${mutedCard ? "muted-card" : ""} ${
+        onCardClick ? "clickable" : ""
+      }`}
+      onClick={onCardClick}
+    >
       <div className="request-card-top">
         <div className="identity-block">
           <div className="avatar-shell">{initialsOf(name)}</div>
-          <div>
+          <div className="identity-copy">
             <div className="request-title">{name}</div>
             <div className="request-subtitle">{subtitle}</div>
           </div>
         </div>
 
-        <div className="pill-row">
-          <Pill label={phaseLabel(phase)} tone={phaseTone(phase)} />
-          {pickup ? <Pill label={`Pickup: ${pickup}`} tone="gray" /> : null}
-          {windowText ? <Pill label={`Window: ${windowText}`} tone="gray" /> : null}
-        </div>
+        <Pill label={statusLabel} tone={tone} />
       </div>
 
       <div className="note-surface">{note?.trim() ? note : "No note provided."}</div>
 
-      <div className="action-row">{actions}</div>
+      {detailChips.filter(Boolean).length > 0 ? (
+        <div className="detail-chip-row">
+          {detailChips.filter(Boolean).map((chip) => (
+            <span key={chip} className="detail-chip">
+              {chip}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {actions ? <div className="action-row">{actions}</div> : null}
     </div>
   );
 }
@@ -1734,6 +1676,7 @@ function PageStyles() {
         display: flex;
         gap: 8px;
         flex-wrap: wrap;
+        align-items: center;
       }
 
       .stack {
@@ -1741,7 +1684,6 @@ function PageStyles() {
         gap: 16px;
       }
 
-      .hero-card,
       .card,
       .request-card,
       .empty-box {
@@ -1753,40 +1695,38 @@ function PageStyles() {
         box-shadow: 0 14px 40px rgba(15, 23, 42, 0.06);
       }
 
-      .hero-card,
       .card {
         padding: 16px;
       }
 
-      .hero-main {
+      .compact-summary {
         display: grid;
         gap: 14px;
       }
 
-      .hero-image,
-      .hero-image-fallback {
+      .summary-thumb {
         width: 100%;
-        height: 240px;
+        height: 152px;
         border-radius: 22px;
         object-fit: cover;
         display: block;
         background: #e5e7eb;
       }
 
-      .hero-image-fallback {
+      .summary-thumb.fallback {
         display: flex;
         align-items: center;
         justify-content: center;
         color: #475569;
-        font-size: 22px;
+        font-size: 20px;
         font-weight: 950;
       }
 
-      .hero-copy {
+      .summary-copy {
         min-width: 0;
       }
 
-      .eyebrow {
+      .summary-topline {
         font-size: 12px;
         font-weight: 950;
         text-transform: uppercase;
@@ -1802,17 +1742,22 @@ function PageStyles() {
         color: #0f172a;
       }
 
-      .clamp {
-        display: -webkit-box;
-        -webkit-line-clamp: 3;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
+      .title.compact {
+        font-size: clamp(22px, 5.2vw, 32px);
+        line-height: 1.08;
       }
 
       .section-title {
         margin: 0;
         font-size: 21px;
         font-weight: 950;
+        color: #0f172a;
+      }
+
+      .mini-title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 900;
         color: #0f172a;
       }
 
@@ -1823,8 +1768,16 @@ function PageStyles() {
         overflow-wrap: anywhere;
       }
 
+      .clamp2 {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+
       .section-head,
-      .request-card-top {
+      .request-card-top,
+      .subsection-head {
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
@@ -1835,7 +1788,7 @@ function PageStyles() {
       .summary-grid {
         margin-top: 16px;
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 10px;
       }
 
@@ -1880,43 +1833,70 @@ function PageStyles() {
         line-height: 1.2;
       }
 
-      .status-panel {
+      .guide-banner,
+      .guide-card {
         margin-top: 16px;
         border-radius: 22px;
+        padding: 14px 16px;
+      }
+
+      .guide-banner {
         border: 1px solid rgba(16, 185, 129, 0.18);
         background: linear-gradient(180deg, rgba(236, 253, 245, 0.94), rgba(240, 253, 250, 0.9));
-        padding: 16px;
+        color: #065f46;
+        font-weight: 800;
+        line-height: 1.45;
+      }
+
+      .guide-banner.done {
+        border-color: rgba(148, 163, 184, 0.18);
+        background: linear-gradient(180deg, rgba(248, 250, 252, 0.96), rgba(241, 245, 249, 0.94));
+        color: #334155;
+      }
+
+      .guide-card {
+        border: 1px solid rgba(16, 185, 129, 0.18);
+        background: linear-gradient(180deg, rgba(236, 253, 245, 0.94), rgba(240, 253, 250, 0.9));
         display: grid;
         gap: 12px;
       }
 
-      .status-panel.done {
-        border-color: rgba(148, 163, 184, 0.18);
-        background: linear-gradient(180deg, rgba(248, 250, 252, 0.96), rgba(241, 245, 249, 0.94));
-      }
-
-      .status-panel-title {
+      .guide-title {
         font-size: 16px;
         font-weight: 950;
         color: #0f172a;
       }
 
-      .status-panel-text {
+      .guide-text {
         margin-top: 6px;
         color: #475569;
         line-height: 1.5;
       }
 
-      .status-panel-actions {
+      .guide-actions {
         display: flex;
         gap: 8px;
         flex-wrap: wrap;
       }
 
-      .request-grid {
-        margin-top: 16px;
+      .subsection {
         display: grid;
         gap: 12px;
+      }
+
+      .subsection.top-rule {
+        margin-top: 18px;
+        padding-top: 18px;
+        border-top: 1px solid #edf2f7;
+      }
+
+      .request-grid {
+        display: grid;
+        gap: 12px;
+      }
+
+      .closed-grid {
+        margin-top: 16px;
       }
 
       .request-card {
@@ -1928,10 +1908,22 @@ function PageStyles() {
         box-shadow: 0 18px 42px rgba(16, 185, 129, 0.08);
       }
 
+      .request-card.muted-card {
+        background: rgba(248, 250, 252, 0.86);
+      }
+
+      .request-card.clickable {
+        cursor: pointer;
+      }
+
       .identity-block {
         display: flex;
         align-items: center;
         gap: 12px;
+        min-width: 0;
+      }
+
+      .identity-copy {
         min-width: 0;
       }
 
@@ -1975,10 +1967,28 @@ function PageStyles() {
         overflow-wrap: anywhere;
       }
 
+      .detail-chip-row,
       .pill-row {
         display: flex;
         gap: 8px;
         flex-wrap: wrap;
+      }
+
+      .detail-chip-row {
+        margin-top: 12px;
+      }
+
+      .detail-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 28px;
+        padding: 0 11px;
+        border-radius: 999px;
+        border: 1px solid #e5e7eb;
+        background: #f8fafc;
+        color: #475569;
+        font-size: 12px;
+        font-weight: 800;
       }
 
       .pill {
@@ -2031,9 +2041,9 @@ function PageStyles() {
       }
 
       .ghost-btn,
+      .icon-btn,
       .primary-btn,
       .secondary-btn,
-      .danger-btn,
       .ghost-danger-btn {
         appearance: none;
         border: none;
@@ -2050,16 +2060,23 @@ function PageStyles() {
         justify-content: center;
       }
 
+      .icon-btn {
+        min-width: 46px;
+        padding: 0;
+        font-size: 18px;
+      }
+
       .ghost-btn:disabled,
+      .icon-btn:disabled,
       .primary-btn:disabled,
       .secondary-btn:disabled,
-      .danger-btn:disabled,
       .ghost-danger-btn:disabled {
         cursor: not-allowed;
         opacity: 0.6;
       }
 
-      .ghost-btn {
+      .ghost-btn,
+      .icon-btn {
         border: 1px solid #dbe2ea;
         background: #fff;
         color: #0f172a;
@@ -2079,12 +2096,6 @@ function PageStyles() {
         border: 1px solid #e5e7eb;
         background: #fff;
         color: #0f172a;
-      }
-
-      .danger-btn {
-        border: 1px solid rgba(239, 68, 68, 0.24);
-        background: #fff;
-        color: #991b1b;
       }
 
       .ghost-danger-btn {
@@ -2132,17 +2143,20 @@ function PageStyles() {
         animation: shimmer 1.4s ease infinite;
       }
 
-      .skel-lg {
-        height: 34px;
-        width: 52%;
+      .skel-hero {
+        height: 160px;
       }
 
-      .skel-md {
+      .skel-row {
         height: 18px;
-        width: 84%;
+        width: 88%;
       }
 
-      .skel-grid {
+      .skel-row.short {
+        width: 62%;
+      }
+
+      .skel-block {
         height: 220px;
         width: 100%;
       }
@@ -2165,22 +2179,23 @@ function PageStyles() {
           padding: 18px;
         }
 
-        .hero-main {
-          grid-template-columns: 320px minmax(0, 1fr);
+        .compact-summary {
+          grid-template-columns: 220px minmax(0, 1fr);
           align-items: start;
         }
 
-        .hero-image,
-        .hero-image-fallback {
-          height: 260px;
-        }
-
-        .summary-grid {
-          grid-template-columns: repeat(4, minmax(0, 1fr));
+        .summary-thumb {
+          height: 160px;
         }
 
         .request-grid {
           grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 720px) {
+        .summary-grid {
+          grid-template-columns: 1fr;
         }
       }
 
@@ -2191,13 +2206,8 @@ function PageStyles() {
         }
 
         .topbar-actions {
-          width: 100%;
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-        }
-
-        .topbar-actions > * {
-          width: 100%;
+          display: flex;
+          width: auto;
         }
 
         .action-row {
@@ -2210,13 +2220,19 @@ function PageStyles() {
           min-width: 0;
         }
 
-        .action-row > .primary-btn.strong {
+        .action-row > .full-mobile {
           grid-column: 1 / -1;
         }
 
         .request-card-top,
-        .section-head {
+        .section-head,
+        .subsection-head {
           flex-direction: column;
+        }
+
+        .guide-actions {
+          display: grid;
+          grid-template-columns: 1fr;
         }
       }
     `}</style>
