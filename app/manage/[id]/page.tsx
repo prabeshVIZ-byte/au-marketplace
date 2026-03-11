@@ -23,6 +23,7 @@ type Item = {
   claimed_at?: string | null;
   photo_url?: string | null;
   post_type?: PostType | null;
+  is_claimed?: boolean | null;
 };
 
 type InterestRow = {
@@ -36,6 +37,7 @@ type InterestRow = {
   created_at: string;
   accepted_at: string | null;
   accepted_expires_at: string | null;
+  requester_confirmed_at: string | null;
   reserved_at: string | null;
   completed_at: string | null;
 };
@@ -108,34 +110,30 @@ function fmtShort(ts: string | null | undefined) {
   });
 }
 
+function timeAgo(ts: string | null | undefined) {
+  if (!ts) return "—";
+  const d = new Date(ts).getTime();
+  if (Number.isNaN(d)) return "—";
+
+  const diff = Date.now() - d;
+  const mins = Math.floor(diff / 60000);
+  const hrs = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${days}d ago`;
+}
+
 function normStatus(value: string | null | undefined) {
   return (value ?? "").trim().toLowerCase();
 }
 
-function formatTimeLeft(expiresAt: string | null, nowMs: number) {
-  if (!expiresAt) return null;
-
-  const end = new Date(expiresAt).getTime();
-  if (Number.isNaN(end)) return null;
-
-  const diff = end - nowMs;
-  if (diff <= 0) return "expired";
-
-  const totalSec = Math.floor(diff / 1000);
-  const hours = Math.floor(totalSec / 3600);
-  const minutes = Math.floor((totalSec % 3600) / 60);
-  const seconds = totalSec % 60;
-
-  if (hours > 0) {
-    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  }
-
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-function toneForStatus(status: string | null | undefined): "green" | "amber" | "red" | "gray" {
+function toneForStatus(status: string | null | undefined): "green" | "amber" | "red" | "gray" | "blue" {
   const s = normStatus(status);
-  if (["accepted", "reserved", "claimed", "completed"].includes(s)) return "green";
+  if (["completed", "claimed"].includes(s)) return "green";
+  if (["accepted"].includes(s)) return "blue";
   if (["pending", "hold"].includes(s)) return "amber";
   if (["declined", "expired"].includes(s)) return "red";
   return "gray";
@@ -155,10 +153,43 @@ function readableName(
   return "Unknown user";
 }
 
+function initialsOf(name: string) {
+  const clean = name.trim();
+  if (!clean) return "AU";
+  const parts = clean.split(/\s+/).slice(0, 2);
+  return parts.map((p) => p[0]?.toUpperCase() || "").join("") || "AU";
+}
+
 function postTypeLabel(postType: PostType | null | undefined) {
   if (postType === "request") return "Request";
   if (postType === "event") return "Event";
   return "Give";
+}
+
+function phaseForInterest(row: InterestRow): "pending" | "awaiting_reply" | "talking" | "closed" | "completed" {
+  const s = normStatus(row.status);
+
+  if (s === "pending") return "pending";
+  if (s === "accepted" && !row.requester_confirmed_at) return "awaiting_reply";
+  if (s === "accepted" && row.requester_confirmed_at) return "talking";
+  if (s === "completed") return "completed";
+  return "closed";
+}
+
+function phaseLabel(phase: ReturnType<typeof phaseForInterest>) {
+  if (phase === "pending") return "New request";
+  if (phase === "awaiting_reply") return "Invitation sent";
+  if (phase === "talking") return "In conversation";
+  if (phase === "completed") return "Item received";
+  return "Closed";
+}
+
+function phaseTone(phase: ReturnType<typeof phaseForInterest>): "green" | "amber" | "red" | "gray" | "blue" {
+  if (phase === "pending") return "amber";
+  if (phase === "awaiting_reply") return "blue";
+  if (phase === "talking") return "green";
+  if (phase === "completed") return "green";
+  return "gray";
 }
 
 export default function ManageItemPage() {
@@ -180,29 +211,34 @@ export default function ManageItemPage() {
   const [err, setErr] = useState<string | null>(null);
 
   const [busyAcceptId, setBusyAcceptId] = useState<string | null>(null);
-  const [busyPickup, setBusyPickup] = useState(false);
+  const [busyDeclineId, setBusyDeclineId] = useState<string | null>(null);
+  const [busyHandoffId, setBusyHandoffId] = useState<string | null>(null);
   const [busyOfferId, setBusyOfferId] = useState<string | null>(null);
   const [busyChatId, setBusyChatId] = useState<string | null>(null);
-
-  const [nowMs, setNowMs] = useState(Date.now());
-
-  useEffect(() => {
-    const interval = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(interval);
-  }, []);
 
   const postType = (item?.post_type ?? "give") as PostType;
   const isGivePost = postType === "give";
   const isRequestPost = postType === "request";
   const itemStatus = normStatus(item?.status) || "available";
+  const itemFinished = ["claimed", "completed"].includes(itemStatus);
 
-  const activeAcceptedInterest = useMemo(
-    () => interests.find((x) => normStatus(x.status) === "accepted"),
+  const pendingInterests = useMemo(
+    () => interests.filter((x) => phaseForInterest(x) === "pending"),
     [interests]
   );
 
-  const activeReservedInterest = useMemo(
-    () => interests.find((x) => normStatus(x.status) === "reserved"),
+  const awaitingReplyInterests = useMemo(
+    () => interests.filter((x) => phaseForInterest(x) === "awaiting_reply"),
+    [interests]
+  );
+
+  const talkingInterests = useMemo(
+    () => interests.filter((x) => phaseForInterest(x) === "talking"),
+    [interests]
+  );
+
+  const closedInterests = useMemo(
+    () => interests.filter((x) => ["closed", "completed"].includes(phaseForInterest(x))),
     [interests]
   );
 
@@ -211,21 +247,10 @@ export default function ManageItemPage() {
     [offers]
   );
 
-  const pendingInterestCount = useMemo(
-    () => interests.filter((x) => normStatus(x.status) === "pending").length,
-    [interests]
-  );
-
   const pendingOfferCount = useMemo(
     () => offers.filter((x) => normStatus(x.status) === "pending").length,
     [offers]
   );
-
-  const canMarkPickedUp =
-    isGivePost &&
-    itemStatus === "reserved" &&
-    !!item?.reserved_interest_id &&
-    !busyPickup;
 
   const loadAll = useCallback(
     async (showRefreshing = false) => {
@@ -261,7 +286,7 @@ export default function ManageItemPage() {
         const { data: itemRow, error: itemErr } = await supabase
           .from("items")
           .select(
-            "id,title,description,status,created_at,owner_id,reserved_interest_id,reserved_at,claimed_at,photo_url,post_type"
+            "id,title,description,status,created_at,owner_id,reserved_interest_id,reserved_at,claimed_at,photo_url,post_type,is_claimed"
           )
           .eq("id", id)
           .maybeSingle();
@@ -340,7 +365,7 @@ export default function ManageItemPage() {
         const { data: ints, error: interestErr } = await supabase
           .from("interests")
           .select(
-            "id,item_id,user_id,status,earliest_pickup,time_window,note,created_at,accepted_at,accepted_expires_at,reserved_at,completed_at"
+            "id,item_id,user_id,status,earliest_pickup,time_window,note,created_at,accepted_at,accepted_expires_at,requester_confirmed_at,reserved_at,completed_at"
           )
           .eq("item_id", loadedItem.id)
           .order("created_at", { ascending: true });
@@ -386,7 +411,7 @@ export default function ManageItemPage() {
   );
 
   async function acceptInterest(interestId: string) {
-    if (!item || !isGivePost) return;
+    if (!item || !isGivePost || itemFinished) return;
 
     setErr(null);
     setBusyAcceptId(interestId);
@@ -407,31 +432,148 @@ export default function ManageItemPage() {
       await insertSystemMessage({
         threadId,
         senderId: item.owner_id,
-        body: "✅ Seller accepted your request. Please confirm pickup on the item page, then coordinate here.",
+        body: `✅ The lister invited you to continue this conversation about "${item.title}". Please let them know whether you are still interested.`,
       });
 
-      router.push(`/messages/${threadId}`);
+      await loadAll(true);
     } catch (e: any) {
-      setErr(e?.message || "Could not accept the request.");
+      setErr(e?.message || "Could not invite this requester.");
     } finally {
       setBusyAcceptId(null);
     }
   }
 
-  async function markPickedUp() {
-    if (!item || !isGivePost) return;
+  async function declineInterest(interest: InterestRow) {
+    if (!item || !isGivePost || itemFinished) return;
+
+    const current = normStatus(interest.status);
+    const ok = window.confirm(
+      current === "accepted"
+        ? "End consideration for this requester?"
+        : "Decline this request?"
+    );
+    if (!ok) return;
 
     setErr(null);
-    setBusyPickup(true);
+    setBusyDeclineId(interest.id);
 
     try {
-      const { error } = await supabase.rpc("mark_picked_up", { p_item_id: item.id });
+      const { error } = await supabase
+        .from("interests")
+        .update({ status: "declined" })
+        .eq("id", interest.id)
+        .in("status", ["pending", "accepted"]);
+
       if (error) throw new Error(error.message);
+
+      try {
+        const threadId = await ensureThread({
+          itemId: item.id,
+          ownerId: item.owner_id,
+          requesterId: interest.user_id,
+        });
+
+        await insertSystemMessage({
+          threadId,
+          senderId: item.owner_id,
+          body: `This conversation has been closed by the lister. "${item.title}" is no longer being coordinated here.`,
+        });
+      } catch {
+        // Best effort only
+      }
+
       await loadAll(true);
     } catch (e: any) {
-      setErr(e?.message || "Could not mark picked up.");
+      setErr(e?.message || "Could not update this requester.");
     } finally {
-      setBusyPickup(false);
+      setBusyDeclineId(null);
+    }
+  }
+
+  async function openInterestChat(interest: InterestRow) {
+    if (!item || !viewerId || !isGivePost) return;
+
+    setErr(null);
+    setBusyChatId(interest.id);
+
+    try {
+      const threadId = await ensureThread({
+        itemId: item.id,
+        ownerId: item.owner_id,
+        requesterId: interest.user_id,
+      });
+
+      router.push(`/messages/${threadId}`);
+    } catch (e: any) {
+      setErr(e?.message || "Could not open chat.");
+    } finally {
+      setBusyChatId(null);
+    }
+  }
+
+  async function confirmHandoff(interest: InterestRow) {
+    if (!item || !isGivePost || itemFinished) return;
+
+    const ok = window.confirm(
+      `Confirm handoff to this requester?\n\nThis will mark "${item.title}" as given, close the listing, and notify the other active requesters that it is no longer available.`
+    );
+    if (!ok) return;
+
+    setErr(null);
+    setBusyHandoffId(interest.id);
+
+    try {
+      const activeOthers = interests.filter(
+        (x) =>
+          x.id !== interest.id &&
+          normStatus(x.status) === "accepted"
+      );
+
+      const { error } = await supabase.rpc("confirm_handoff", {
+        p_interest_id: interest.id,
+      });
+
+      if (error) throw new Error(error.message);
+
+      for (const other of activeOthers) {
+        try {
+          const threadId = await ensureThread({
+            itemId: item.id,
+            ownerId: item.owner_id,
+            requesterId: other.user_id,
+          });
+
+          await insertSystemMessage({
+            threadId,
+            senderId: item.owner_id,
+            body: `This item has already been given to someone else, so this conversation is now closed.`,
+          });
+        } catch {
+          // Best effort only
+        }
+      }
+
+      try {
+        const winnerThreadId = await ensureThread({
+          itemId: item.id,
+          ownerId: item.owner_id,
+          requesterId: interest.user_id,
+        });
+
+        await insertSystemMessage({
+          threadId: winnerThreadId,
+          senderId: item.owner_id,
+          body: `✅ The handoff has been confirmed. This item has now been marked as given.`,
+        });
+      } catch {
+        // Best effort only
+      }
+
+      await loadAll(true);
+    } catch (e: any) {
+      setErr(e?.message || "Could not confirm handoff.");
+    } finally {
+      setBusyHandoffId(null);
     }
   }
 
@@ -525,6 +667,7 @@ export default function ManageItemPage() {
             <div className="skel skel-lg" />
             <div className="skel skel-md" />
             <div className="skel skel-md" />
+            <div className="skel skel-grid" />
           </div>
         </div>
         <PageStyles />
@@ -537,7 +680,7 @@ export default function ManageItemPage() {
       <div className="shell">
         <div className="topbar">
           <Link href="/feed" className="ghost-btn">
-            ← Back to feed
+            ← Back
           </Link>
 
           <div className="topbar-actions">
@@ -561,26 +704,7 @@ export default function ManageItemPage() {
         ) : accessDenied ? (
           <div className="stack">
             <section className="hero-card">
-              <div className="hero-main">
-                {item.photo_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.photo_url} alt={item.title} className="hero-image" />
-                ) : (
-                  <div className="hero-image-fallback">{postTypeLabel(item.post_type)}</div>
-                )}
-
-                <div className="hero-copy">
-                  <div className="eyebrow">Manage post</div>
-                  <h1 className="title clamp">{item.title}</h1>
-                  <p className="muted">{item.description || "No description provided."}</p>
-
-                  <div className="pill-row top-gap">
-                    <Pill label={`Type: ${postTypeLabel(item.post_type)}`} tone="gray" />
-                    <Pill label={`Status: ${item.status ?? "—"}`} tone="gray" />
-                    <Pill label={`Posted: ${fmtWhen(item.created_at)}`} tone="gray" />
-                  </div>
-                </div>
-              </div>
+              <Hero item={item} />
             </section>
 
             <section className="card">
@@ -600,34 +724,13 @@ export default function ManageItemPage() {
         ) : wrongPage ? (
           <div className="stack">
             <section className="hero-card">
-              <div className="hero-main">
-                {item.photo_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.photo_url} alt={item.title} className="hero-image" />
-                ) : (
-                  <div className="hero-image-fallback">Event</div>
-                )}
-
-                <div className="hero-copy">
-                  <div className="eyebrow">Event flow</div>
-                  <h1 className="title clamp">{item.title}</h1>
-                  <p className="muted">
-                    This page should only manage give items and request posts. Keep events on their own screen so
-                    this workflow stays simple.
-                  </p>
-
-                  <div className="pill-row top-gap">
-                    <Pill label="Type: Event" tone="gray" />
-                    <Pill label={`Posted: ${fmtWhen(item.created_at)}`} tone="gray" />
-                  </div>
-                </div>
-              </div>
+              <Hero item={item} />
             </section>
 
             <section className="card">
-              <h2 className="section-title">Use a separate event manager</h2>
+              <h2 className="section-title">Use an event-specific manager</h2>
               <p className="muted">
-                Put event attendance and event actions in an event-specific page, not here.
+                Event attendance and event actions should stay on an event-focused screen so this workflow remains clean.
               </p>
 
               <div className="action-row">
@@ -643,78 +746,60 @@ export default function ManageItemPage() {
         ) : (
           <div className="stack">
             <section className="hero-card">
-              <div className="hero-main">
-                {item.photo_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.photo_url} alt={item.title} className="hero-image" />
+              <Hero item={item} />
+
+              <div className="summary-grid">
+                <MetricCard
+                  label="Post status"
+                  value={item.status ?? "available"}
+                  tone={toneForStatus(item.status)}
+                />
+                <MetricCard label="Posted" value={fmtShort(item.created_at)} tone="gray" />
+                {isGivePost ? (
+                  <>
+                    <MetricCard label="New requests" value={String(pendingInterests.length)} tone="amber" />
+                    <MetricCard label="In conversation" value={String(talkingInterests.length)} tone="green" />
+                  </>
                 ) : (
-                  <div className="hero-image-fallback">{postTypeLabel(item.post_type)}</div>
+                  <>
+                    <MetricCard label="Offers" value={String(offers.length)} tone="green" />
+                    <MetricCard label="Pending" value={String(pendingOfferCount)} tone="amber" />
+                  </>
                 )}
-
-                <div className="hero-copy">
-                  <div className="eyebrow">Manage post</div>
-                  <h1 className="title clamp">{item.title}</h1>
-                  <p className="muted">{item.description || "No description provided."}</p>
-
-                  <div className="pill-row top-gap">
-                    <Pill label={`Type: ${postTypeLabel(item.post_type)}`} tone="gray" />
-                    <Pill label={`Status: ${item.status ?? "—"}`} tone={toneForStatus(item.status)} />
-                    <Pill
-                      label={isRequestPost ? `Offers: ${offers.length}` : `Requests: ${interests.length}`}
-                      tone={isRequestPost ? "green" : "amber"}
-                    />
-                    <Pill label={`Posted: ${fmtShort(item.created_at)}`} tone="gray" />
-                  </div>
-                </div>
               </div>
 
-              {isGivePost && activeAcceptedInterest && itemStatus === "available" ? (
-                <div className="status-box amber-box">
-                  <div className="status-title">Someone is selected and waiting to confirm</div>
-                  <div className="status-text">
-                    Expires in <b>{formatTimeLeft(activeAcceptedInterest.accepted_expires_at, nowMs) ?? "—"}</b>
-                  </div>
-                  <div className="fine-print">
-                    Until that confirmation window ends, do not choose someone else.
-                  </div>
-                </div>
-              ) : null}
-
-              {isGivePost && itemStatus === "reserved" ? (
-                <div className="status-box green-box">
-                  <div className="status-title">Reserved ✅</div>
-                  <div className="status-text">
-                    The selected person confirmed pickup. Mark it as picked up after the handoff.
-                  </div>
-
-                  <div className="action-row top-gap">
-                    <button
-                      onClick={markPickedUp}
-                      disabled={!canMarkPickedUp}
-                      className="primary-btn"
-                      type="button"
-                    >
-                      {busyPickup ? "Marking…" : "Mark picked up"}
-                    </button>
+              {isGivePost && !itemFinished ? (
+                <div className="status-panel">
+                  <div className="status-panel-copy">
+                    <div className="status-panel-title">Conversation-first marketplace flow</div>
+                    <div className="status-panel-text">
+                      You can invite multiple requesters into conversation. Their “yes” only unlocks chat. The item stays live until you confirm the handoff.
+                    </div>
                   </div>
                 </div>
               ) : null}
 
-              {(isGivePost && itemStatus === "claimed") || (isGivePost && itemStatus === "completed") ? (
-                <div className="status-box gray-box">
-                  <div className="status-title">Finished ✅</div>
-                  <div className="status-text">This give-item workflow is already complete.</div>
+              {isGivePost && itemFinished ? (
+                <div className="status-panel done">
+                  <div className="status-panel-copy">
+                    <div className="status-panel-title">Handoff completed</div>
+                    <div className="status-panel-text">
+                      This item has already been marked as given. It should now appear as closed across the feed and your profile.
+                    </div>
+                  </div>
                 </div>
               ) : null}
 
               {isRequestPost && acceptedOffer ? (
-                <div className="status-box green-box">
-                  <div className="status-title">Helper selected ✅</div>
-                  <div className="status-text">
-                    One helper is already accepted. Continue the coordination in chat.
+                <div className="status-panel">
+                  <div className="status-panel-copy">
+                    <div className="status-panel-title">Helper selected</div>
+                    <div className="status-panel-text">
+                      One helper is already accepted. Continue the coordination in chat.
+                    </div>
                   </div>
 
-                  <div className="action-row top-gap">
+                  <div className="status-panel-actions">
                     <button
                       onClick={() => void openHelperChat(acceptedOffer)}
                       disabled={busyChatId === acceptedOffer.id}
@@ -729,132 +814,254 @@ export default function ManageItemPage() {
             </section>
 
             {isGivePost ? (
-              <section className="card">
-                <div className="section-head">
-                  <div>
-                    <h2 className="section-title">Incoming item requests</h2>
-                    <p className="muted">
-                      Accept only one person. They get a 2-hour confirmation window and a chat thread.
-                    </p>
-                  </div>
-
-                  <div className="pill-row">
-                    <Pill label={`Pending: ${pendingInterestCount}`} tone={pendingInterestCount ? "amber" : "gray"} />
-                    <Pill label={`Total: ${interests.length}`} tone={interests.length ? "green" : "gray"} />
-                  </div>
-                </div>
-
-                {interests.length === 0 ? (
-                  <EmptyState
-                    title="No requests yet"
-                    body="When someone requests this item, it will appear here."
+              <>
+                <section className="card">
+                  <SectionHeader
+                    title="New requests"
+                    body="These people have requested the item but have not been invited into conversation yet."
+                    pills={[
+                      <Pill key="pending" label={`${pendingInterests.length} pending`} tone={pendingInterests.length ? "amber" : "gray"} />,
+                    ]}
                   />
-                ) : (
-                  <div className="list">
-                    {interests.map((request) => {
-                      const profile = profilesById[request.user_id];
-                      const name = readableName(profile, request.user_id);
-                      const requestStatus = normStatus(request.status);
 
-                      const anotherLocked =
-                        (!!activeAcceptedInterest && activeAcceptedInterest.id !== request.id) ||
-                        !!activeReservedInterest;
+                  {pendingInterests.length === 0 ? (
+                    <EmptyState
+                      title="No new requests"
+                      body="When someone requests this item, they will appear here."
+                    />
+                  ) : (
+                    <div className="request-grid">
+                      {pendingInterests.map((request) => {
+                        const profile = profilesById[request.user_id];
+                        const name = readableName(profile, request.user_id);
 
-                      const canAccept =
-                        requestStatus === "pending" &&
-                        itemStatus === "available" &&
-                        !anotherLocked &&
-                        busyAcceptId === null;
+                        return (
+                          <InterestCard
+                            key={request.id}
+                            name={name}
+                            subtitle={`Requested ${timeAgo(request.created_at)}`}
+                            phase={phaseForInterest(request)}
+                            note={request.note}
+                            pickup={request.earliest_pickup}
+                            windowText={request.time_window}
+                            actions={
+                              <>
+                                <button
+                                  onClick={() => void acceptInterest(request.id)}
+                                  disabled={itemFinished || busyAcceptId !== null}
+                                  className="primary-btn"
+                                  type="button"
+                                >
+                                  {busyAcceptId === request.id ? "Inviting…" : "Invite to chat"}
+                                </button>
 
-                      return (
-                        <div key={request.id} className="row-card">
-                          <div className="row-top">
-                            <div>
-                              <div className="row-title">{name}</div>
-                              <div className="row-meta">Requested {fmtWhen(request.created_at)}</div>
-                            </div>
+                                <button
+                                  onClick={() => void declineInterest(request)}
+                                  disabled={itemFinished || busyDeclineId === request.id}
+                                  className="secondary-btn"
+                                  type="button"
+                                >
+                                  {busyDeclineId === request.id ? "Updating…" : "Decline"}
+                                </button>
+                              </>
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
 
-                            <div className="pill-row">
-                              <Pill label={request.status} tone={toneForStatus(request.status)} />
-                              {requestStatus === "accepted" ? (
-                                <Pill
-                                  label={`Expires: ${formatTimeLeft(request.accepted_expires_at, nowMs) ?? "—"}`}
-                                  tone="amber"
-                                />
-                              ) : null}
-                              {request.earliest_pickup ? (
-                                <Pill label={`Pickup: ${request.earliest_pickup}`} tone="gray" />
-                              ) : null}
-                              {request.time_window ? (
-                                <Pill label={`Window: ${request.time_window}`} tone="gray" />
-                              ) : null}
-                            </div>
-                          </div>
+                <section className="card">
+                  <SectionHeader
+                    title="Awaiting reply"
+                    body="You have invited these requesters into conversation, but they have not yet confirmed they are still interested."
+                    pills={[
+                      <Pill key="awaiting" label={`${awaitingReplyInterests.length} awaiting`} tone={awaitingReplyInterests.length ? "blue" : "gray"} />,
+                    ]}
+                  />
 
-                          <div className="note-box">
-                            {request.note?.trim() ? request.note : "No note provided."}
-                          </div>
+                  {awaitingReplyInterests.length === 0 ? (
+                    <EmptyState
+                      title="No pending replies"
+                      body="Once you invite someone to chat, they will appear here until they respond."
+                    />
+                  ) : (
+                    <div className="request-grid">
+                      {awaitingReplyInterests.map((request) => {
+                        const profile = profilesById[request.user_id];
+                        const name = readableName(profile, request.user_id);
 
-                          <div className="action-row">
-                            <button
-                              onClick={() => void acceptInterest(request.id)}
-                              disabled={!canAccept}
-                              className="primary-btn"
-                              type="button"
-                            >
-                              {busyAcceptId === request.id
-                                ? "Selecting…"
-                                : requestStatus === "accepted"
-                                ? "Waiting"
-                                : requestStatus === "reserved"
-                                ? "Confirmed"
-                                : requestStatus === "completed"
-                                ? "Completed"
-                                : anotherLocked
-                                ? "Locked"
-                                : "Accept"}
-                            </button>
+                        return (
+                          <InterestCard
+                            key={request.id}
+                            name={name}
+                            subtitle={request.accepted_at ? `Invited ${timeAgo(request.accepted_at)}` : `Invited recently`}
+                            phase={phaseForInterest(request)}
+                            note={request.note}
+                            pickup={request.earliest_pickup}
+                            windowText={request.time_window}
+                            actions={
+                              <>
+                                <button
+                                  onClick={() => void openInterestChat(request)}
+                                  disabled={busyChatId === request.id}
+                                  className="secondary-btn"
+                                  type="button"
+                                >
+                                  {busyChatId === request.id ? "Opening…" : "Open chat"}
+                                </button>
 
-                            {(requestStatus === "accepted" || requestStatus === "reserved") && (
+                                <button
+                                  onClick={() => void declineInterest(request)}
+                                  disabled={itemFinished || busyDeclineId === request.id}
+                                  className="ghost-danger-btn"
+                                  type="button"
+                                >
+                                  {busyDeclineId === request.id ? "Updating…" : "End consideration"}
+                                </button>
+                              </>
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+
+                <section className="card">
+                  <SectionHeader
+                    title="In conversation"
+                    body="These requesters confirmed they are still interested. Continue in chat, then confirm the handoff when the item has actually been given."
+                    pills={[
+                      <Pill key="talking" label={`${talkingInterests.length} active`} tone={talkingInterests.length ? "green" : "gray"} />,
+                    ]}
+                  />
+
+                  {talkingInterests.length === 0 ? (
+                    <EmptyState
+                      title="No active conversations"
+                      body="Once a requester confirms they are still interested, they will appear here."
+                    />
+                  ) : (
+                    <div className="request-grid">
+                      {talkingInterests.map((request) => {
+                        const profile = profilesById[request.user_id];
+                        const name = readableName(profile, request.user_id);
+
+                        return (
+                          <InterestCard
+                            key={request.id}
+                            name={name}
+                            subtitle={
+                              request.requester_confirmed_at
+                                ? `Confirmed interest ${timeAgo(request.requester_confirmed_at)}`
+                                : "Confirmed interest"
+                            }
+                            phase={phaseForInterest(request)}
+                            note={request.note}
+                            pickup={request.earliest_pickup}
+                            windowText={request.time_window}
+                            highlight
+                            actions={
+                              <>
+                                <button
+                                  onClick={() => void openInterestChat(request)}
+                                  disabled={busyChatId === request.id}
+                                  className="secondary-btn"
+                                  type="button"
+                                >
+                                  {busyChatId === request.id ? "Opening…" : "Open chat"}
+                                </button>
+
+                                <button
+                                  onClick={() => void declineInterest(request)}
+                                  disabled={itemFinished || busyDeclineId === request.id}
+                                  className="ghost-danger-btn"
+                                  type="button"
+                                >
+                                  {busyDeclineId === request.id ? "Updating…" : "End consideration"}
+                                </button>
+
+                                <button
+                                  onClick={() => void confirmHandoff(request)}
+                                  disabled={itemFinished || busyHandoffId !== null}
+                                  className="primary-btn strong"
+                                  type="button"
+                                >
+                                  {busyHandoffId === request.id ? "Confirming…" : "Confirm handoff"}
+                                </button>
+                              </>
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+
+                <section className="card">
+                  <SectionHeader
+                    title="Closed activity"
+                    body="Requests that were declined, expired, or completed are kept here for reference."
+                    pills={[
+                      <Pill key="closed" label={`${closedInterests.length} closed`} tone={closedInterests.length ? "gray" : "gray"} />,
+                    ]}
+                  />
+
+                  {closedInterests.length === 0 ? (
+                    <EmptyState
+                      title="No closed activity"
+                      body="Once requests are closed out, they will appear here."
+                    />
+                  ) : (
+                    <div className="request-grid">
+                      {closedInterests.map((request) => {
+                        const profile = profilesById[request.user_id];
+                        const name = readableName(profile, request.user_id);
+
+                        return (
+                          <InterestCard
+                            key={request.id}
+                            name={name}
+                            subtitle={
+                              request.completed_at
+                                ? `Completed ${timeAgo(request.completed_at)}`
+                                : `Last updated ${timeAgo(request.accepted_at ?? request.created_at)}`
+                            }
+                            phase={phaseForInterest(request)}
+                            note={request.note}
+                            pickup={request.earliest_pickup}
+                            windowText={request.time_window}
+                            actions={
                               <button
-                                onClick={async () => {
-                                  const threadId = await ensureThread({
-                                    itemId: item.id,
-                                    ownerId: item.owner_id,
-                                    requesterId: request.user_id,
-                                  });
-                                  router.push(`/messages/${threadId}`);
-                                }}
+                                onClick={() => void openInterestChat(request)}
+                                disabled={busyChatId === request.id}
                                 className="secondary-btn"
                                 type="button"
                               >
-                                Open chat
+                                {busyChatId === request.id ? "Opening…" : "Open thread"}
                               </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              </>
             ) : null}
 
             {isRequestPost ? (
               <section className="card">
-                <div className="section-head">
-                  <div>
-                    <h2 className="section-title">Incoming helper offers</h2>
-                    <p className="muted">
-                      Pick one helper. Once accepted, the others should be treated as closed out.
-                    </p>
-                  </div>
-
-                  <div className="pill-row">
-                    <Pill label={`Pending: ${pendingOfferCount}`} tone={pendingOfferCount ? "amber" : "gray"} />
-                    <Pill label={`Total: ${offers.length}`} tone={offers.length ? "green" : "gray"} />
-                  </div>
-                </div>
+                <SectionHeader
+                  title="Incoming helper offers"
+                  body="Pick one helper. Once accepted, the others should be treated as closed out."
+                  pills={[
+                    <Pill key="pending" label={`Pending: ${pendingOfferCount}`} tone={pendingOfferCount ? "amber" : "gray"} />,
+                    <Pill key="total" label={`Total: ${offers.length}`} tone={offers.length ? "green" : "gray"} />,
+                  ]}
+                />
 
                 {offers.length === 0 ? (
                   <EmptyState
@@ -862,7 +1069,7 @@ export default function ManageItemPage() {
                     body="When someone offers help on this request post, it will appear here."
                   />
                 ) : (
-                  <div className="list">
+                  <div className="request-grid">
                     {offers.map((offer) => {
                       const name = readableName(offer.helper, offer.helper_id);
                       const status = (offer.status ?? "pending") as OfferStatus;
@@ -870,22 +1077,23 @@ export default function ManageItemPage() {
                       const busy = busyOfferId === offer.id || busyChatId === offer.id;
 
                       return (
-                        <div key={offer.id} className="row-card">
-                          <div className="row-top">
-                            <div>
-                              <div className="row-title">{name}</div>
-                              <div className="row-meta">
-                                Offered {fmtWhen(offer.created_at)}
-                                {offer.availability ? ` • Availability: ${offer.availability}` : ""}
+                        <div key={offer.id} className="request-card">
+                          <div className="request-card-top">
+                            <div className="identity-block">
+                              <div className="avatar-shell">{initialsOf(name)}</div>
+                              <div>
+                                <div className="request-title">{name}</div>
+                                <div className="request-subtitle">
+                                  Offered {fmtWhen(offer.created_at)}
+                                  {offer.availability ? ` • Availability: ${offer.availability}` : ""}
+                                </div>
                               </div>
                             </div>
 
-                            <div className="pill-row">
-                              <Pill label={status} tone={toneForStatus(status)} />
-                            </div>
+                            <Pill label={status} tone={toneForStatus(status)} />
                           </div>
 
-                          <div className="note-box">
+                          <div className="note-surface">
                             {offer.note?.trim() ? offer.note : "No note provided."}
                           </div>
 
@@ -933,6 +1141,115 @@ export default function ManageItemPage() {
   );
 }
 
+function Hero({ item }: { item: Item }) {
+  return (
+    <div className="hero-main">
+      {item.photo_url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={item.photo_url} alt={item.title} className="hero-image" />
+      ) : (
+        <div className="hero-image-fallback">{postTypeLabel(item.post_type)}</div>
+      )}
+
+      <div className="hero-copy">
+        <div className="eyebrow">Manage post</div>
+        <h1 className="title clamp">{item.title}</h1>
+        <p className="muted">{item.description || "No description provided."}</p>
+
+        <div className="pill-row top-gap">
+          <Pill label={`Type: ${postTypeLabel(item.post_type)}`} tone="gray" />
+          <Pill label={`Status: ${item.status ?? "—"}`} tone={toneForStatus(item.status)} />
+          <Pill label={`Posted: ${fmtWhen(item.created_at)}`} tone="gray" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SectionHeader({
+  title,
+  body,
+  pills,
+}: {
+  title: string;
+  body: string;
+  pills?: React.ReactNode[];
+}) {
+  return (
+    <div className="section-head">
+      <div>
+        <h2 className="section-title">{title}</h2>
+        <p className="muted">{body}</p>
+      </div>
+
+      {pills?.length ? <div className="pill-row">{pills}</div> : null}
+    </div>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  tone = "gray",
+}: {
+  label: string;
+  value: string;
+  tone?: "green" | "amber" | "red" | "gray" | "blue";
+}) {
+  return (
+    <div className={`metric-card ${tone}`}>
+      <div className="metric-label">{label}</div>
+      <div className="metric-value">{value}</div>
+    </div>
+  );
+}
+
+function InterestCard({
+  name,
+  subtitle,
+  phase,
+  note,
+  pickup,
+  windowText,
+  actions,
+  highlight = false,
+}: {
+  name: string;
+  subtitle: string;
+  phase: ReturnType<typeof phaseForInterest>;
+  note: string | null;
+  pickup: string | null;
+  windowText: string | null;
+  actions: React.ReactNode;
+  highlight?: boolean;
+}) {
+  return (
+    <div className={`request-card ${highlight ? "highlight" : ""}`}>
+      <div className="request-card-top">
+        <div className="identity-block">
+          <div className="avatar-shell">{initialsOf(name)}</div>
+          <div>
+            <div className="request-title">{name}</div>
+            <div className="request-subtitle">{subtitle}</div>
+          </div>
+        </div>
+
+        <div className="pill-row">
+          <Pill label={phaseLabel(phase)} tone={phaseTone(phase)} />
+          {pickup ? <Pill label={`Pickup: ${pickup}`} tone="gray" /> : null}
+          {windowText ? <Pill label={`Window: ${windowText}`} tone="gray" /> : null}
+        </div>
+      </div>
+
+      <div className="note-surface">
+        {note?.trim() ? note : "No note provided."}
+      </div>
+
+      <div className="action-row">{actions}</div>
+    </div>
+  );
+}
+
 function EmptyState({ title, body }: { title: string; body: string }) {
   return (
     <div className="empty-box">
@@ -947,7 +1264,7 @@ function Pill({
   tone = "gray",
 }: {
   label: string;
-  tone?: "green" | "amber" | "red" | "gray";
+  tone?: "green" | "amber" | "red" | "gray" | "blue";
 }) {
   return <span className={`pill ${tone}`}>{label}</span>;
 }
@@ -968,17 +1285,17 @@ function PageStyles() {
       .manage-page {
         min-height: 100vh;
         background:
-          radial-gradient(circle at top, rgba(16, 185, 129, 0.08), transparent 30%),
-          linear-gradient(180deg, #f8fafc 0%, #f3f4f6 100%);
+          radial-gradient(circle at top, rgba(16, 185, 129, 0.08), transparent 28%),
+          linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
         color: #0f172a;
       }
 
       .shell {
         width: 100%;
-        max-width: 980px;
+        max-width: 1180px;
         margin: 0 auto;
-        padding: 12px;
-        padding-bottom: calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 24px);
+        padding: 14px;
+        padding-bottom: calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 28px);
       }
 
       .topbar {
@@ -987,7 +1304,7 @@ function PageStyles() {
         align-items: center;
         gap: 10px;
         flex-wrap: wrap;
-        margin-bottom: 12px;
+        margin-bottom: 14px;
       }
 
       .topbar-actions {
@@ -998,18 +1315,19 @@ function PageStyles() {
 
       .stack {
         display: grid;
-        gap: 14px;
+        gap: 16px;
       }
 
       .hero-card,
       .card,
-      .row-card,
+      .request-card,
       .empty-box {
         min-width: 0;
-        border-radius: 24px;
-        border: 1px solid #e5e7eb;
-        background: rgba(255, 255, 255, 0.96);
-        box-shadow: 0 14px 38px rgba(15, 23, 42, 0.06);
+        border-radius: 28px;
+        border: 1px solid rgba(226, 232, 240, 0.9);
+        background: rgba(255, 255, 255, 0.94);
+        backdrop-filter: blur(10px);
+        box-shadow: 0 14px 40px rgba(15, 23, 42, 0.06);
       }
 
       .hero-card,
@@ -1025,8 +1343,8 @@ function PageStyles() {
       .hero-image,
       .hero-image-fallback {
         width: 100%;
-        height: 220px;
-        border-radius: 20px;
+        height: 240px;
+        border-radius: 22px;
         object-fit: cover;
         display: block;
         background: #e5e7eb;
@@ -1037,8 +1355,8 @@ function PageStyles() {
         align-items: center;
         justify-content: center;
         color: #475569;
-        font-size: 20px;
-        font-weight: 900;
+        font-size: 22px;
+        font-weight: 950;
       }
 
       .hero-copy {
@@ -1047,16 +1365,16 @@ function PageStyles() {
 
       .eyebrow {
         font-size: 12px;
-        font-weight: 900;
+        font-weight: 950;
         text-transform: uppercase;
-        letter-spacing: 0.35px;
+        letter-spacing: 0.32px;
         color: #047857;
       }
 
       .title {
         margin: 6px 0 0;
-        font-size: clamp(24px, 7vw, 34px);
-        line-height: 1.05;
+        font-size: clamp(26px, 6vw, 38px);
+        line-height: 1.03;
         font-weight: 950;
         color: #0f172a;
       }
@@ -1070,7 +1388,7 @@ function PageStyles() {
 
       .section-title {
         margin: 0;
-        font-size: 20px;
+        font-size: 21px;
         font-weight: 950;
         color: #0f172a;
       }
@@ -1078,38 +1396,160 @@ function PageStyles() {
       .muted {
         margin: 8px 0 0;
         color: #64748b;
-        line-height: 1.5;
+        line-height: 1.52;
         overflow-wrap: anywhere;
       }
 
-      .fine-print {
-        margin-top: 6px;
-        font-size: 12px;
-        line-height: 1.45;
-        color: #64748b;
-      }
-
       .section-head,
-      .row-top {
+      .request-card-top {
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
-        gap: 12px;
+        gap: 14px;
         flex-wrap: wrap;
       }
 
-      .row-title {
+      .summary-grid {
+        margin-top: 16px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .metric-card {
+        border-radius: 20px;
+        padding: 14px;
+        border: 1px solid rgba(226, 232, 240, 0.9);
+        background: #f8fafc;
+      }
+
+      .metric-card.green {
+        border-color: rgba(16, 185, 129, 0.2);
+        background: rgba(16, 185, 129, 0.08);
+      }
+
+      .metric-card.amber {
+        border-color: rgba(245, 158, 11, 0.2);
+        background: rgba(245, 158, 11, 0.08);
+      }
+
+      .metric-card.red {
+        border-color: rgba(239, 68, 68, 0.2);
+        background: rgba(239, 68, 68, 0.08);
+      }
+
+      .metric-card.blue {
+        border-color: rgba(59, 130, 246, 0.2);
+        background: rgba(59, 130, 246, 0.08);
+      }
+
+      .metric-label {
+        font-size: 12px;
+        font-weight: 900;
+        color: #64748b;
+      }
+
+      .metric-value {
+        margin-top: 6px;
+        font-size: 17px;
+        font-weight: 950;
+        color: #0f172a;
+        line-height: 1.2;
+      }
+
+      .status-panel {
+        margin-top: 16px;
+        border-radius: 22px;
+        border: 1px solid rgba(16, 185, 129, 0.18);
+        background: linear-gradient(180deg, rgba(236, 253, 245, 0.94), rgba(240, 253, 250, 0.9));
+        padding: 16px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .status-panel.done {
+        border-color: rgba(148, 163, 184, 0.18);
+        background: linear-gradient(180deg, rgba(248, 250, 252, 0.96), rgba(241, 245, 249, 0.94));
+      }
+
+      .status-panel-title {
         font-size: 16px;
         font-weight: 950;
         color: #0f172a;
-        line-height: 1.3;
       }
 
-      .row-meta {
+      .status-panel-text {
+        margin-top: 6px;
+        color: #475569;
+        line-height: 1.5;
+      }
+
+      .status-panel-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .request-grid {
+        margin-top: 16px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .request-card {
+        padding: 14px;
+      }
+
+      .request-card.highlight {
+        border-color: rgba(16, 185, 129, 0.24);
+        box-shadow: 0 18px 42px rgba(16, 185, 129, 0.08);
+      }
+
+      .identity-block {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .avatar-shell {
+        width: 44px;
+        height: 44px;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, #10b981, #34d399);
+        color: #ffffff;
+        font-size: 13px;
+        font-weight: 950;
+        flex-shrink: 0;
+        box-shadow: 0 10px 22px rgba(16, 185, 129, 0.18);
+      }
+
+      .request-title {
+        font-size: 16px;
+        font-weight: 950;
+        color: #0f172a;
+        line-height: 1.25;
+      }
+
+      .request-subtitle {
         margin-top: 4px;
         font-size: 13px;
         color: #64748b;
         line-height: 1.45;
+      }
+
+      .note-surface {
+        margin-top: 12px;
+        padding: 12px 13px;
+        border-radius: 18px;
+        border: 1px solid #eef2f7;
+        background: linear-gradient(180deg, #f8fafc 0%, #f8fafc 100%);
+        color: #334155;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
       }
 
       .pill-row {
@@ -1123,7 +1563,7 @@ function PageStyles() {
         align-items: center;
         justify-content: center;
         min-height: 28px;
-        padding: 0 10px;
+        padding: 0 11px;
         border-radius: 999px;
         font-size: 12px;
         font-weight: 900;
@@ -1132,80 +1572,32 @@ function PageStyles() {
 
       .pill.green {
         color: #065f46;
-        border: 1px solid rgba(16, 185, 129, 0.25);
+        border: 1px solid rgba(16, 185, 129, 0.24);
         background: rgba(16, 185, 129, 0.1);
       }
 
       .pill.amber {
         color: #92400e;
-        border: 1px solid rgba(245, 158, 11, 0.25);
-        background: rgba(245, 158, 11, 0.12);
+        border: 1px solid rgba(245, 158, 11, 0.24);
+        background: rgba(245, 158, 11, 0.1);
       }
 
       .pill.red {
         color: #991b1b;
-        border: 1px solid rgba(239, 68, 68, 0.25);
+        border: 1px solid rgba(239, 68, 68, 0.24);
         background: rgba(239, 68, 68, 0.1);
+      }
+
+      .pill.blue {
+        color: #1d4ed8;
+        border: 1px solid rgba(59, 130, 246, 0.22);
+        background: rgba(59, 130, 246, 0.1);
       }
 
       .pill.gray {
         color: #334155;
         border: 1px solid #e5e7eb;
         background: #f8fafc;
-      }
-
-      .status-box {
-        margin-top: 14px;
-        padding: 14px;
-        border-radius: 18px;
-      }
-
-      .green-box {
-        border: 1px solid rgba(16, 185, 129, 0.28);
-        background: rgba(16, 185, 129, 0.08);
-      }
-
-      .amber-box {
-        border: 1px solid rgba(245, 158, 11, 0.28);
-        background: rgba(245, 158, 11, 0.1);
-      }
-
-      .gray-box {
-        border: 1px solid #e5e7eb;
-        background: #f8fafc;
-      }
-
-      .status-title {
-        font-weight: 950;
-        color: #0f172a;
-      }
-
-      .status-text {
-        margin-top: 6px;
-        color: #475569;
-        line-height: 1.45;
-      }
-
-      .list {
-        margin-top: 14px;
-        display: grid;
-        gap: 12px;
-      }
-
-      .row-card {
-        padding: 14px;
-      }
-
-      .note-box {
-        margin-top: 12px;
-        padding: 12px;
-        border-radius: 16px;
-        border: 1px solid #eef2f7;
-        background: #f8fafc;
-        color: #334155;
-        line-height: 1.5;
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
       }
 
       .action-row {
@@ -1218,7 +1610,8 @@ function PageStyles() {
       .ghost-btn,
       .primary-btn,
       .secondary-btn,
-      .danger-btn {
+      .danger-btn,
+      .ghost-danger-btn {
         appearance: none;
         border: none;
         outline: none;
@@ -1227,7 +1620,7 @@ function PageStyles() {
         transition: 0.18s ease;
         min-height: 46px;
         padding: 0 14px;
-        border-radius: 14px;
+        border-radius: 15px;
         text-decoration: none;
         display: inline-flex;
         align-items: center;
@@ -1237,7 +1630,8 @@ function PageStyles() {
       .ghost-btn:disabled,
       .primary-btn:disabled,
       .secondary-btn:disabled,
-      .danger-btn:disabled {
+      .danger-btn:disabled,
+      .ghost-danger-btn:disabled {
         cursor: not-allowed;
         opacity: 0.6;
       }
@@ -1249,9 +1643,13 @@ function PageStyles() {
       }
 
       .primary-btn {
-        border: 1px solid rgba(16, 185, 129, 0.32);
+        border: 1px solid rgba(16, 185, 129, 0.28);
         background: linear-gradient(180deg, rgba(16, 185, 129, 0.18), rgba(16, 185, 129, 0.1));
         color: #065f46;
+      }
+
+      .primary-btn.strong {
+        box-shadow: 0 12px 28px rgba(16, 185, 129, 0.12);
       }
 
       .secondary-btn {
@@ -1261,13 +1659,19 @@ function PageStyles() {
       }
 
       .danger-btn {
-        border: 1px solid rgba(239, 68, 68, 0.28);
+        border: 1px solid rgba(239, 68, 68, 0.24);
         background: #fff;
         color: #991b1b;
       }
 
+      .ghost-danger-btn {
+        border: 1px solid rgba(239, 68, 68, 0.18);
+        background: rgba(254, 242, 242, 0.6);
+        color: #991b1b;
+      }
+
       .empty-box {
-        padding: 18px;
+        padding: 20px;
         border-style: dashed;
       }
 
@@ -1286,8 +1690,8 @@ function PageStyles() {
       .error-box {
         margin-bottom: 12px;
         border-radius: 18px;
-        border: 1px solid rgba(239, 68, 68, 0.22);
-        background: rgba(254, 242, 242, 0.95);
+        border: 1px solid rgba(239, 68, 68, 0.2);
+        background: rgba(254, 242, 242, 0.96);
         color: #991b1b;
         padding: 14px;
         font-weight: 800;
@@ -1299,37 +1703,61 @@ function PageStyles() {
       }
 
       .skel {
-        border-radius: 14px;
-        background: #e5e7eb;
+        border-radius: 16px;
+        background: linear-gradient(90deg, #e5e7eb 25%, #f1f5f9 37%, #e5e7eb 63%);
+        background-size: 400% 100%;
+        animation: shimmer 1.4s ease infinite;
       }
 
       .skel-lg {
         height: 34px;
-        width: 60%;
+        width: 52%;
       }
 
       .skel-md {
         height: 18px;
-        width: 88%;
+        width: 84%;
+      }
+
+      .skel-grid {
+        height: 220px;
+        width: 100%;
       }
 
       .top-gap {
         margin-top: 12px;
       }
 
+      @keyframes shimmer {
+        0% {
+          background-position: 100% 0;
+        }
+        100% {
+          background-position: 0 0;
+        }
+      }
+
       @media (min-width: 760px) {
         .shell {
-          padding: 16px;
+          padding: 18px;
         }
 
         .hero-main {
-          grid-template-columns: 280px minmax(0, 1fr);
+          grid-template-columns: 320px minmax(0, 1fr);
           align-items: start;
         }
 
         .hero-image,
         .hero-image-fallback {
-          height: 220px;
+          height: 260px;
+        }
+
+        .summary-grid {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+
+        .request-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
 
@@ -1337,6 +1765,16 @@ function PageStyles() {
         .shell {
           padding-left: 10px;
           padding-right: 10px;
+        }
+
+        .topbar-actions {
+          width: 100%;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .topbar-actions > * {
+          width: 100%;
         }
 
         .action-row {
@@ -1349,14 +1787,13 @@ function PageStyles() {
           min-width: 0;
         }
 
-        .topbar-actions {
-          width: 100%;
-          display: grid;
-          grid-template-columns: 1fr 1fr;
+        .action-row > .primary-btn.strong {
+          grid-column: 1 / -1;
         }
 
-        .topbar-actions > * {
-          width: 100%;
+        .request-card-top,
+        .section-head {
+          flex-direction: column;
         }
       }
     `}</style>
