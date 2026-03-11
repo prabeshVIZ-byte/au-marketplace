@@ -10,7 +10,7 @@ import { supabase } from "@/lib/supabaseClient";
 
 const brandFont = Outfit({
   subsets: ["latin"],
-  weight: ["500", "600", "700", "800"],
+  weight: ["500", "600", "700"],
 });
 
 type OwnerRole = "student" | "faculty" | null;
@@ -147,7 +147,8 @@ type NotificationRow = {
   created_at: string;
 };
 
-const PAGE_BOTTOM_PAD = 110;
+const NAV_APPROX_HEIGHT = 86;
+const PAGE_BOTTOM_PAD = NAV_APPROX_HEIGHT + 28;
 const ATTEND_TABLE = "event_attendees";
 
 function isAshlandEmail(email: string | null) {
@@ -172,11 +173,31 @@ function isItemClosed(item: FeedRow) {
 
 function itemPublicStatus(item: FeedRow): "open" | "in_talks" | "closed" {
   const st = normStatus(item.status);
+
   if (isItemClosed(item) || isExpired(item.expires_at)) return "closed";
   if (st === "reserved" || st === "accepted" || st === "in_talks" || st === "hold") {
     return "in_talks";
   }
   return "open";
+}
+
+function itemBadgeLabel(item: FeedRow) {
+  const pt = (item.post_type ?? "give") as PostType;
+  if (pt === "request") return "REQUEST";
+
+  const publicState = itemPublicStatus(item);
+  if (publicState === "closed") return "CLOSED";
+  if (publicState === "in_talks") return "IN TALKS";
+  return "AVAILABLE";
+}
+
+function itemHint(item: FeedRow) {
+  const pt = (item.post_type ?? "give") as PostType;
+  if (pt === "request") return "";
+
+  const publicState = itemPublicStatus(item);
+  if (publicState === "in_talks") return "Someone is already being considered • Waitlist open";
+  return "";
 }
 
 function requestGroupLabel(g: string | null | undefined) {
@@ -259,15 +280,6 @@ function formatTimeRange(startsAtISO: string, endsAtISO: string | null) {
   return `${day} ${st} → ${endDay} ${et}`;
 }
 
-function eventDateChip(startsAtISO: string) {
-  const d = new Date(startsAtISO);
-  if (Number.isNaN(d.getTime())) return { month: "—", day: "—" };
-  return {
-    month: d.toLocaleDateString(undefined, { month: "short" }).toUpperCase(),
-    day: d.toLocaleDateString(undefined, { day: "numeric" }),
-  };
-}
-
 function isInteractiveDoubleTapTarget(target: EventTarget | null) {
   const el = target as HTMLElement | null;
   if (!el) return false;
@@ -291,24 +303,7 @@ async function getAuthState(): Promise<AuthState> {
   };
 }
 
-function BellButton({
-  unreadCount,
-  onClick,
-}: {
-  unreadCount: number;
-  onClick: () => void;
-}) {
-  return (
-    <button className="bellBtn" onClick={onClick} aria-label="Notifications" type="button">
-      <span className="bellGlyph">🔔</span>
-      {unreadCount > 0 ? (
-        <span className="bellBadge">{unreadCount > 99 ? "99+" : unreadCount}</span>
-      ) : null}
-    </button>
-  );
-}
-
-function TinyLikeButton({
+function LoveButton({
   active,
   count,
   disabled,
@@ -317,19 +312,42 @@ function TinyLikeButton({
   active: boolean;
   count: number;
   disabled?: boolean;
-  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  onClick: () => void;
 }) {
   return (
     <button
-      className={`tinyLike ${active ? "active" : ""}`}
+      className={`loveBtn ${active ? "active" : ""}`}
       type="button"
       onClick={onClick}
       disabled={disabled}
+      data-no-card-doubletap="true"
       aria-label={active ? "Unlike" : "Like"}
+    >
+      <span className="loveBtnGlyph">{active ? "♥" : "♡"}</span>
+      <span className="loveBtnCount">{count}</span>
+    </button>
+  );
+}
+
+function BellButton({
+  unreadCount,
+  onClick,
+}: {
+  unreadCount: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className="bellBtn"
+      onClick={onClick}
+      aria-label="Notifications"
+      type="button"
       data-no-card-doubletap="true"
     >
-      <span className="tinyLikeGlyph">{active ? "♥" : "♡"}</span>
-      <span className="tinyLikeCount">{count}</span>
+      <span className="bellGlyph">🔔</span>
+      {unreadCount > 0 ? (
+        <span className="bellBadge">{unreadCount > 99 ? "99+" : unreadCount}</span>
+      ) : null}
     </button>
   );
 }
@@ -359,376 +377,6 @@ function NotificationTypePill({ type }: { type: NotificationType }) {
       : { label: "Notice", cls: "system" };
 
   return <span className={`notifType ${mapped.cls}`}>{mapped.label}</span>;
-}
-
-function EmptyState({
-  title,
-  subtitle,
-  actionLabel,
-  onAction,
-}: {
-  title: string;
-  subtitle: string;
-  actionLabel?: string;
-  onAction?: () => void;
-}) {
-  return (
-    <div className="emptyState">
-      <div className="emptyIcon">✦</div>
-      <div className="emptyTitle">{title}</div>
-      <div className="emptySubtitle">{subtitle}</div>
-      {actionLabel && onAction ? (
-        <button type="button" className="emptyBtn" onClick={onAction}>
-          {actionLabel}
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
-function FilterPills({
-  tab,
-  sort,
-  roleFilter,
-  categoryFilter,
-  onClearSort,
-  onClearRole,
-  onClearCategory,
-}: {
-  tab: "items" | "requests" | "events";
-  sort: "newest" | "popular";
-  roleFilter: "all" | "student" | "faculty";
-  categoryFilter: string;
-  onClearSort: () => void;
-  onClearRole: () => void;
-  onClearCategory: () => void;
-}) {
-  const pills: Array<{ label: string; onClick: () => void }> = [];
-
-  if (sort === "popular") pills.push({ label: "Popular", onClick: onClearSort });
-  if (roleFilter !== "all") {
-    pills.push({
-      label: roleFilter === "student" ? "Student" : "Faculty",
-      onClick: onClearRole,
-    });
-  }
-  if (tab === "items" && categoryFilter !== "all") {
-    pills.push({ label: categoryFilter, onClick: onClearCategory });
-  }
-
-  if (pills.length === 0) return null;
-
-  return (
-    <div className="activeFilterRow">
-      {pills.map((pill) => (
-        <button key={pill.label} className="activeFilterPill" type="button" onClick={pill.onClick}>
-          {pill.label} <span>✕</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function ItemCard({
-  item,
-  isMine,
-  loved,
-  loveCount,
-  loveBusy,
-  mineActive,
-  myStatus,
-  authLoggedIn,
-  burst,
-  onCardOpen,
-  onOpenImage,
-  onToggleLove,
-  onPrimaryAction,
-}: {
-  item: FeedRow;
-  isMine: boolean;
-  loved: boolean;
-  loveCount: number;
-  loveBusy: boolean;
-  mineActive: boolean;
-  myStatus: MyInterestStatus | undefined;
-  authLoggedIn: boolean;
-  burst: boolean;
-  onCardOpen: () => void;
-  onOpenImage: () => void;
-  onToggleLove: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  onPrimaryAction: (e: React.MouseEvent<HTMLButtonElement>) => void;
-}) {
-  const publicState = itemPublicStatus(item);
-  const badge =
-    publicState === "in_talks" ? "IN TALKS" : publicState === "closed" ? "CLOSED" : "AVAILABLE";
-
-  return (
-    <article className="card cardItem clickableCard" onClick={onCardOpen}>
-      {burst ? <div className="bigHeartBurst">♥</div> : null}
-
-      <div className="media">
-        <div className={`floatingBadge ${publicState === "in_talks" ? "badgeTalks" : "badgeItem"}`}>
-          {badge}
-        </div>
-
-        <TinyLikeButton active={loved} count={loveCount} disabled={loveBusy} onClick={onToggleLove} />
-
-        {item.photo_url ? (
-          <button
-            className="mediaBtn"
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenImage();
-            }}
-            type="button"
-            aria-label="Open photo"
-            data-no-card-doubletap="true"
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={item.photo_url} alt={item.title} loading="lazy" className="mediaImg" />
-          </button>
-        ) : (
-          <div className="noPhoto noPhotoItems">No photo</div>
-        )}
-      </div>
-
-      <div className="body">
-        <div className="eyebrowRow">
-          <span className="eyebrowTag">{item.category || "Uncategorized"}</span>
-          {item.owner_role ? <span className="eyebrowTag subtle">{item.owner_role}</span> : null}
-          {isMine ? <span className="eyebrowTag subtle">Yours</span> : null}
-        </div>
-
-        <div className="title">{item.title}</div>
-
-        <div className="metaLine">
-          {publicState === "in_talks"
-            ? "Someone is being considered • Waitlist still open"
-            : item.hide_interest_count
-            ? "Requests hidden"
-            : `${item.interest_count || 0} request${(item.interest_count || 0) === 1 ? "" : "s"}`}
-        </div>
-
-        <div className="desc clamp2">{item.description || "No description provided."}</div>
-
-        <div className="bottomRow">
-          <div className="miniFacts">
-            {item.expires_at ? <span>⏰ {formatShortDate(item.expires_at)}</span> : <span>⏰ Open</span>}
-          </div>
-
-          <button
-            className={`primaryInlineBtn ${isMine ? "disabled" : mineActive ? "on" : ""}`}
-            type="button"
-            onClick={onPrimaryAction}
-            disabled={isMine}
-            data-no-card-doubletap="true"
-          >
-            {isMine
-              ? "Yours"
-              : authLoggedIn
-              ? mineActive
-                ? myInterestLabel(myStatus)
-                : publicState === "in_talks"
-                ? "Join waitlist"
-                : "Request"
-              : "Request"}
-          </button>
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function RequestCard({
-  item,
-  isMine,
-  loved,
-  loveCount,
-  loveBusy,
-  authLoggedIn,
-  burst,
-  onCardOpen,
-  onToggleLove,
-  onPrimaryAction,
-}: {
-  item: FeedRow;
-  isMine: boolean;
-  loved: boolean;
-  loveCount: number;
-  loveBusy: boolean;
-  authLoggedIn: boolean;
-  burst: boolean;
-  onCardOpen: () => void;
-  onToggleLove: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  onPrimaryAction: (e: React.MouseEvent<HTMLButtonElement>) => void;
-}) {
-  const group = requestGroupLabel(item.request_group);
-  const tf = requestTimeframeLabel(item.request_timeframe);
-  const loc = (item.request_location ?? "").trim();
-
-  return (
-    <article className="card cardRequest clickableCard" onClick={onCardOpen}>
-      {burst ? <div className="bigHeartBurst">♥</div> : null}
-
-      <div className="requestShell">
-        <div className="requestTop">
-          <div className="requestPills">
-            <span className="requestMainPill">REQUEST</span>
-            <span className="requestGroupPill">{group}</span>
-            {isMine ? <span className="requestSoftPill">Yours</span> : null}
-          </div>
-
-          <TinyLikeButton active={loved} count={loveCount} disabled={loveBusy} onClick={onToggleLove} />
-        </div>
-
-        <div className="requestTitle">{item.title}</div>
-        <div className="requestDesc clamp2">{item.description || "Help needed."}</div>
-
-        <div className="requestInfoGrid">
-          <div className="requestInfoCell">
-            <span className="requestInfoKey">Time</span>
-            <span className="requestInfoVal">{tf || "Flexible"}</span>
-          </div>
-          <div className="requestInfoCell">
-            <span className="requestInfoKey">Location</span>
-            <span className="requestInfoVal">{loc || "Not specified"}</span>
-          </div>
-          <div className="requestInfoCell">
-            <span className="requestInfoKey">Offers</span>
-            <span className="requestInfoVal">
-              {item.hide_interest_count ? "Hidden" : `${item.interest_count || 0}`}
-            </span>
-          </div>
-          <div className="requestInfoCell">
-            <span className="requestInfoKey">Posted</span>
-            <span className="requestInfoVal">{formatShortDate(item.created_at)}</span>
-          </div>
-        </div>
-
-        <div className="bottomRow">
-          <div className="miniFacts">
-            <span>🆘 {group}</span>
-          </div>
-
-          <button
-            className={`primaryInlineBtn requestBtn ${isMine ? "disabled" : ""}`}
-            type="button"
-            onClick={onPrimaryAction}
-            disabled={isMine}
-            data-no-card-doubletap="true"
-          >
-            {isMine ? "Yours" : authLoggedIn ? "Offer help" : "Offer help"}
-          </button>
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function EventCard({
-  ev,
-  isMine,
-  attending,
-  loved,
-  loveCount,
-  loveBusy,
-  savingAttend,
-  authLoggedIn,
-  burst,
-  onCardOpen,
-  onOpenImage,
-  onToggleLove,
-  onAttendToggle,
-}: {
-  ev: EventRow;
-  isMine: boolean;
-  attending: boolean;
-  loved: boolean;
-  loveCount: number;
-  loveBusy: boolean;
-  savingAttend: boolean;
-  authLoggedIn: boolean;
-  burst: boolean;
-  onCardOpen: () => void;
-  onOpenImage: () => void;
-  onToggleLove: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  onAttendToggle: (e: React.MouseEvent<HTMLButtonElement>) => void;
-}) {
-  const chip = eventDateChip(ev.starts_at);
-
-  return (
-    <article className="card cardEvent clickableCard" onClick={onCardOpen}>
-      {burst ? <div className="bigHeartBurst">♥</div> : null}
-
-      <div className="media mediaEvent">
-        <div className="floatingBadge badgeEvent">EVENT</div>
-        <div className="dateChip">
-          <span className="dateChipMonth">{chip.month}</span>
-          <span className="dateChipDay">{chip.day}</span>
-        </div>
-
-        <TinyLikeButton active={loved} count={loveCount} disabled={loveBusy} onClick={onToggleLove} />
-
-        {ev.photo_url ? (
-          <button
-            className="mediaBtn"
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenImage();
-            }}
-            type="button"
-            aria-label="Open flyer"
-            data-no-card-doubletap="true"
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={ev.photo_url} alt={ev.title} loading="lazy" className="mediaImg" />
-          </button>
-        ) : (
-          <div className="noPhoto noPhotoEvents">No flyer</div>
-        )}
-      </div>
-
-      <div className="body">
-        <div className="eyebrowRow">
-          <span className="eyebrowTag events">
-            {ev.is_anonymous ? "Anonymous host" : ev.host_org || "Campus host"}
-          </span>
-          <span className="eyebrowTag subtle">{String(ev.category || "other")}</span>
-          {isMine ? <span className="eyebrowTag subtle">Yours</span> : null}
-        </div>
-
-        <div className="title">{ev.title}</div>
-
-        <div className="metaLine">{formatTimeRange(ev.starts_at, ev.ends_at)}</div>
-        <div className="desc clamp2">{ev.description}</div>
-
-        <div className="bottomRow">
-          <div className="miniFacts">
-            <span>📍 {ev.location || "TBA"}</span>
-            <span>{ev.link_url ? "🔗 Link" : "Campus"}</span>
-          </div>
-
-          <button
-            className={`primaryInlineBtn eventBtn ${isMine ? "disabled" : attending ? "on" : ""}`}
-            type="button"
-            onClick={onAttendToggle}
-            disabled={savingAttend || isMine}
-            data-no-card-doubletap="true"
-          >
-            {isMine
-              ? "Yours"
-              : savingAttend
-              ? "Saving…"
-              : authLoggedIn
-              ? attending
-                ? "Attending"
-                : "Attend"
-              : "Attend"}
-          </button>
-        </div>
-      </div>
-    </article>
-  );
 }
 
 export default function FeedPage() {
@@ -793,7 +441,9 @@ export default function FeedPage() {
   function showLoveBurst(cardKey: string) {
     setBurstCardKey(cardKey);
     if (burstTimerRef.current) clearTimeout(burstTimerRef.current);
-    burstTimerRef.current = setTimeout(() => setBurstCardKey(null), 700);
+    burstTimerRef.current = setTimeout(() => {
+      setBurstCardKey(null);
+    }, 700);
   }
 
   async function loadOwnerMeta(itemIds: string[]) {
@@ -809,7 +459,9 @@ export default function FeedPage() {
     if (error) return new Map<string, ItemMeta>();
 
     const map = new Map<string, ItemMeta>();
-    for (const row of (data as ItemMeta[]) || []) map.set(row.id, row);
+    for (const row of (data as ItemMeta[]) || []) {
+      map.set(row.id, row);
+    }
     return map;
   }
 
@@ -855,7 +507,9 @@ export default function FeedPage() {
     }
 
     const next: Record<string, boolean> = {};
-    for (const row of (data as Array<{ event_id: string }>) || []) next[String(row.event_id)] = true;
+    for (const row of (data as Array<{ event_id: string }>) || []) {
+      next[String(row.event_id)] = true;
+    }
     setMyAttending(next);
   }
 
@@ -881,6 +535,7 @@ export default function FeedPage() {
         .limit(40);
 
       if (error) throw new Error(error.message);
+
       setNotifications(((data as NotificationRow[]) || []).filter((x) => !x.is_hidden));
     } catch (e: any) {
       setNotifications([]);
@@ -1075,6 +730,7 @@ export default function FeedPage() {
 
   async function markAllNotificationsRead() {
     if (!auth.userId || markingAllRead) return;
+
     const unreadIds = notifications.filter((n) => !n.is_read).map((n) => n.id);
     if (unreadIds.length === 0) return;
 
@@ -1236,7 +892,9 @@ export default function FeedPage() {
 
         if (error) {
           const msg = error.message.toLowerCase();
-          if (!msg.includes("duplicate") && !msg.includes("unique")) throw new Error(error.message);
+          if (!msg.includes("duplicate") && !msg.includes("unique")) {
+            throw new Error(error.message);
+          }
         }
       }
     } catch (e) {
@@ -1287,7 +945,9 @@ export default function FeedPage() {
 
         if (error) {
           const msg = error.message.toLowerCase();
-          if (!msg.includes("duplicate") && !msg.includes("unique")) throw new Error(error.message);
+          if (!msg.includes("duplicate") && !msg.includes("unique")) {
+            throw new Error(error.message);
+          }
         }
       }
     } catch (e) {
@@ -1322,8 +982,11 @@ export default function FeedPage() {
 
     if (quickEnough && closeEnough) {
       lastTapRef.current[key] = { ts: 0, x: 0, y: 0 };
-      if (kind === "item") void toggleItemLove(id);
-      else void toggleEventLove(id);
+      if (kind === "item") {
+        void toggleItemLove(id);
+      } else {
+        void toggleEventLove(id);
+      }
     }
   }
 
@@ -1333,8 +996,12 @@ export default function FeedPage() {
     setCategoryFilter("all");
     setFiltersOpen(false);
 
-    if (nextTab === "events") setSort("newest");
+    if (nextTab === "events") {
+      setSort("newest");
+    }
+
     window.scrollTo({ top: 0, behavior: "auto" });
+    void refreshAll();
   }
 
   useEffect(() => {
@@ -1546,7 +1213,9 @@ export default function FeedPage() {
           new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime()
       );
     } else {
-      list = list.sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
+      list = list.sort(
+        (a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime()
+      );
     }
 
     return list;
@@ -1556,47 +1225,37 @@ export default function FeedPage() {
   const loading = tab === "events" ? loadingEvents : loadingItems;
   const err = tab === "events" ? errEvents : errItems;
 
-  const activeFilterCount =
-    (sort === "popular" ? 1 : 0) +
-    (roleFilter !== "all" ? 1 : 0) +
-    (tab === "items" && categoryFilter !== "all" ? 1 : 0) +
-    (query.trim() ? 1 : 0);
-
   return (
-    <div className={`${brandFont.className} page page-${tab}`}>
+    <div className={`${brandFont.className} page`}>
       <header className="topbar">
-        <div className="brandRow compact">
+        <div className="row brandRow">
           <button
-            className="homeBtn"
+            className="iconBtn"
             onClick={() => router.push("/feed")}
             aria-label="Home"
             type="button"
+            data-no-card-doubletap="true"
           >
             <Image
               src="/scholarswap-logo.png"
               alt="ScholarSwap"
-              width={30}
-              height={30}
+              width={34}
+              height={34}
               priority
               className="logoImg"
             />
           </button>
 
-          <div className="brandCopy" role="heading" aria-level={1}>
-            <div className="brandLine">
-              <span className="brandName">ScholarSwap</span>
-              <Image
-                src="/Ashland_Eagles_logo.svg.png"
-                alt="Ashland University"
-                width={16}
-                height={16}
-                priority
-                className="brandMark"
-              />
-            </div>
-            <div className="brandSub">
-              {tab === "items" ? "Campus items" : tab === "requests" ? "Help requests" : "Upcoming events"}
-            </div>
+          <div className="brandCenter" role="heading" aria-level={1}>
+            <span className="brandName">ScholarSwap</span>
+            <Image
+              src="/Ashland_Eagles_logo.svg.png"
+              alt="Ashland University"
+              width={18}
+              height={18}
+              priority
+              className="brandMark"
+            />
           </div>
 
           <BellButton
@@ -1611,140 +1270,138 @@ export default function FeedPage() {
           />
         </div>
 
-        <div className="tabsSearchBlock">
-          <div className="tabsRow">
-            <div className="seg3" role="tablist" aria-label="Feed tabs">
-              <button
-                className={`segBtn ${tab === "items" ? "active" : ""}`}
-                onClick={() => handleTabChange("items")}
-                type="button"
-              >
-                Items
-              </button>
-              <button
-                className={`segBtn ${tab === "requests" ? "active" : ""}`}
-                onClick={() => handleTabChange("requests")}
-                type="button"
-              >
-                Requests
-              </button>
-              <button
-                className={`segBtn ${tab === "events" ? "active" : ""}`}
-                onClick={() => handleTabChange("events")}
-                type="button"
-              >
-                Events
-              </button>
-              <span
-                className={`segIndicator3 ${
-                  tab === "items" ? "pos0" : tab === "requests" ? "pos1" : "pos2"
-                }`}
-                aria-hidden="true"
-              />
-            </div>
-
+        <div className="row tabsRow">
+          <div className="seg3" role="tablist" aria-label="Feed tabs">
             <button
-              className={`ctrlBtn ${filtersOpen ? "ctrlActive" : ""}`}
-              onClick={() => setFiltersOpen((v) => !v)}
+              className={`segBtn ${tab === "items" ? "active" : ""}`}
+              onClick={() => handleTabChange("items")}
               type="button"
-              aria-label="Open filters"
-              title="Filters"
             >
-              <span className="ctrlIcon">≡</span>
-              {activeFilterCount > 0 ? <span className="ctrlCount">{activeFilterCount}</span> : null}
+              Items
             </button>
-          </div>
-
-          <div
-            className={`searchWrap ${searchFocused ? "searchFocused" : ""} ${
-              searchPulse ? "searchPulse" : ""
-            }`}
-          >
-            <div className="searchRow">
-              <button
-                type="button"
-                className="searchIconBtn"
-                aria-label="Focus search"
-                onClick={() => searchRef.current?.focus()}
-                title="Search"
-              >
-                🔎
-              </button>
-
-              <input
-                ref={searchRef}
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onFocus={() => setSearchFocused(true)}
-                onBlur={() => setSearchFocused(false)}
-                placeholder={
-                  tab === "events"
-                    ? "Search events, hosts, locations…"
-                    : tab === "items"
-                    ? "Search items, categories…"
-                    : "Search requests, locations…"
-                }
-                autoCorrect="off"
-                autoCapitalize="none"
-                spellCheck={false}
-              />
-
-              {query ? (
-                <button className="clearBtn" onClick={() => setQuery("")} type="button" aria-label="Clear search">
-                  ✕
-                </button>
-              ) : (
-                <div className="kbdHint" aria-hidden="true">
-                  /
-                </div>
-              )}
-            </div>
-
-            {tab === "items" && (
-              <div className="chipRow" ref={chipRowRef} aria-label="Categories">
-                {categories.map((c) => {
-                  const active = categoryFilter === c;
-                  const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
-                  return (
-                    <button
-                      key={c}
-                      className={`chip ${active ? "chipOn" : ""}`}
-                      onClick={() => setCategoryFilter(c)}
-                      type="button"
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
-            <FilterPills
-              tab={tab}
-              sort={sort}
-              roleFilter={roleFilter}
-              categoryFilter={categoryFilter}
-              onClearSort={() => setSort("newest")}
-              onClearRole={() => setRoleFilter("all")}
-              onClearCategory={() => setCategoryFilter("all")}
+            <button
+              className={`segBtn ${tab === "requests" ? "active" : ""}`}
+              onClick={() => handleTabChange("requests")}
+              type="button"
+            >
+              Requests
+            </button>
+            <button
+              className={`segBtn ${tab === "events" ? "active" : ""}`}
+              onClick={() => handleTabChange("events")}
+              type="button"
+            >
+              Events
+            </button>
+            <span
+              className={`segIndicator3 ${
+                tab === "items" ? "pos0" : tab === "requests" ? "pos1" : "pos2"
+              }`}
+              aria-hidden="true"
             />
           </div>
 
-          <div className="subline">
-            <div className="subTitle">
-              {tab === "items"
-                ? "Public Items"
-                : tab === "requests"
-                ? "Public Requests"
-                : "Campus Events"}
-            </div>
-            <div className="count">
-              {loading ? "Loading…" : <>Showing <b>{showingCount}</b></>}
-            </div>
+          <button
+            className={`ctrlBtn ${filtersOpen ? "ctrlActive" : ""}`}
+            onClick={() => setFiltersOpen((v) => !v)}
+            type="button"
+            aria-label="Open filters"
+            title="Filters"
+            data-no-card-doubletap="true"
+          >
+            <span className="ctrlIcon">≡</span>
+          </button>
+        </div>
+
+        <div
+          className={`row searchWrap ${searchFocused ? "searchFocused" : ""} ${
+            searchPulse ? "searchPulse" : ""
+          }`}
+        >
+          <div className="searchRow">
+            <button
+              type="button"
+              className="searchIconBtn"
+              aria-label="Focus search"
+              onClick={() => searchRef.current?.focus()}
+              title="Search"
+              data-no-card-doubletap="true"
+            >
+              🔎
+            </button>
+
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              placeholder={
+                tab === "events"
+                  ? "Search events, hosts, locations…"
+                  : tab === "items"
+                  ? "Search items, categories…"
+                  : "Search requests, locations…"
+              }
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+            />
+
+            {query ? (
+              <button
+                className="clearBtn"
+                onClick={() => setQuery("")}
+                type="button"
+                aria-label="Clear search"
+                data-no-card-doubletap="true"
+              >
+                ✕
+              </button>
+            ) : (
+              <div className="kbdHint" aria-hidden="true">
+                /
+              </div>
+            )}
           </div>
 
-          {err && <div className="err">{err}</div>}
+          {tab === "items" && (
+            <div className="chipRow" ref={chipRowRef} aria-label="Categories">
+              {categories.map((c) => {
+                const active = categoryFilter === c;
+                const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
+
+                return (
+                  <button
+                    key={c}
+                    className={`chip ${active ? "chipOn" : ""}`}
+                    onClick={() => setCategoryFilter(c)}
+                    type="button"
+                    data-no-card-doubletap="true"
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
+
+        <div className="subline">
+          <div className="subTitle">
+            {tab === "items"
+              ? "Public Items"
+              : tab === "requests"
+              ? "Public Requests"
+              : "Campus Events"}
+          </div>
+          <div className="count">
+            Showing <b>{showingCount}</b>
+          </div>
+        </div>
+
+        {err && <div className="err">{err}</div>}
+        {loading && <div className="loading">Loading…</div>}
       </header>
 
       {notificationsOpen && (
@@ -1771,10 +1428,17 @@ export default function FeedPage() {
                   onClick={() => void markAllNotificationsRead()}
                   disabled={markingAllRead || unreadNotificationCount === 0}
                   type="button"
+                  data-no-card-doubletap="true"
                 >
                   {markingAllRead ? "Saving…" : "Mark all read"}
                 </button>
-                <button className="sheetClose" onClick={() => setNotificationsOpen(false)} type="button">
+                <button
+                  className="sheetClose"
+                  onClick={() => setNotificationsOpen(false)}
+                  type="button"
+                  aria-label="Close"
+                  data-no-card-doubletap="true"
+                >
                   ✕
                 </button>
               </div>
@@ -1791,12 +1455,14 @@ export default function FeedPage() {
               {!loadingNotifications && !notificationsErr
                 ? notifications.map((notif) => {
                     const busy = openingNotifId === notif.id;
+
                     return (
                       <button
                         key={notif.id}
                         className={`notifCard ${notif.is_read ? "" : "notifUnread"}`}
                         onClick={() => void openNotification(notif)}
                         type="button"
+                        data-no-card-doubletap="true"
                       >
                         <div className="notifCardTop">
                           <div className="notifCardLeft">
@@ -1812,9 +1478,15 @@ export default function FeedPage() {
                                 <NotificationTypePill type={notif.type} />
                                 {!notif.is_read ? <span className="notifNewDot" /> : null}
                               </div>
-                              <div className="notifCardTitle">{notif.title || "Notification"}</div>
-                              <div className="notifCardBody">{notif.body || "Open to view details."}</div>
-                              <div className="notifMeta">{formatDateTime(notif.created_at)}</div>
+                              <div className="notifCardTitle">
+                                {notif.title || "Notification"}
+                              </div>
+                              <div className="notifCardBody">
+                                {notif.body || "Open to view details."}
+                              </div>
+                              <div className="notifMeta">
+                                {formatDateTime(notif.created_at)}
+                              </div>
                             </div>
                           </div>
 
@@ -1830,11 +1502,22 @@ export default function FeedPage() {
       )}
 
       {filtersOpen && (
-        <div className="sheetBackdrop" onClick={() => setFiltersOpen(false)} role="dialog" aria-modal="true">
+        <div
+          className="sheetBackdrop"
+          onClick={() => setFiltersOpen(false)}
+          role="dialog"
+          aria-modal="true"
+        >
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
             <div className="sheetTop">
               <div className="sheetTitle">Filters</div>
-              <button className="sheetClose" onClick={() => setFiltersOpen(false)} type="button">
+              <button
+                className="sheetClose"
+                onClick={() => setFiltersOpen(false)}
+                type="button"
+                aria-label="Close"
+                data-no-card-doubletap="true"
+              >
                 ✕
               </button>
             </div>
@@ -1847,15 +1530,18 @@ export default function FeedPage() {
                     className={`tog ${sort === "newest" ? "togOn" : ""}`}
                     onClick={() => setSort("newest")}
                     type="button"
+                    data-no-card-doubletap="true"
                   >
-                    {tab === "events" ? "Soonest" : "Newest"}
+                    ↕️ {tab === "events" ? "Soonest" : "Newest"}
                   </button>
+
                   <button
                     className={`tog ${sort === "popular" ? "togOn" : ""}`}
                     onClick={() => setSort("popular")}
                     type="button"
+                    data-no-card-doubletap="true"
                   >
-                    Popular
+                    ♥ Popular
                   </button>
                 </div>
               </div>
@@ -1868,22 +1554,25 @@ export default function FeedPage() {
                       className={`tog ${roleFilter === "all" ? "togOn" : ""}`}
                       onClick={() => setRoleFilter("all")}
                       type="button"
+                      data-no-card-doubletap="true"
                     >
-                      All
+                      👤 All
                     </button>
                     <button
                       className={`tog ${roleFilter === "student" ? "togOn" : ""}`}
                       onClick={() => setRoleFilter("student")}
                       type="button"
+                      data-no-card-doubletap="true"
                     >
-                      Student
+                      🎓 Student
                     </button>
                     <button
                       className={`tog ${roleFilter === "faculty" ? "togOn" : ""}`}
                       onClick={() => setRoleFilter("faculty")}
                       type="button"
+                      data-no-card-doubletap="true"
                     >
-                      Faculty
+                      🧑‍🏫 Faculty
                     </button>
                   </div>
                 </div>
@@ -1899,10 +1588,16 @@ export default function FeedPage() {
                     setCategoryFilter("all");
                     setQuery("");
                   }}
+                  data-no-card-doubletap="true"
                 >
                   Reset
                 </button>
-                <button className="primary" type="button" onClick={() => setFiltersOpen(false)}>
+                <button
+                  className="primary"
+                  type="button"
+                  onClick={() => setFiltersOpen(false)}
+                  data-no-card-doubletap="true"
+                >
                   Done
                 </button>
               </div>
@@ -1913,46 +1608,7 @@ export default function FeedPage() {
 
       <main className="main">
         <div className="grid">
-          {loading && (
-            <>
-              <div className="skeletonCard" />
-              <div className="skeletonCard" />
-              <div className="skeletonCard" />
-            </>
-          )}
-
-          {!loading && tab === "events" && filteredEvents.length === 0 && (
-            <EmptyState
-              title="No events found"
-              subtitle="Try a different search or check back for new campus events."
-              actionLabel="Clear filters"
-              onAction={() => {
-                setQuery("");
-                setSort("newest");
-              }}
-            />
-          )}
-
-          {!loading && tab !== "events" && filteredItems.length === 0 && (
-            <EmptyState
-              title={tab === "items" ? "No items found" : "No requests found"}
-              subtitle={
-                tab === "items"
-                  ? "Try another category, role filter, or search."
-                  : "Try another search or filter combination."
-              }
-              actionLabel="Clear filters"
-              onAction={() => {
-                setQuery("");
-                setSort("newest");
-                setRoleFilter("all");
-                setCategoryFilter("all");
-              }}
-            />
-          )}
-
           {tab === "events" &&
-            !loading &&
             filteredEvents.map((ev) => {
               const isMine = !!auth.userId && !!ev.created_by && ev.created_by === auth.userId;
               const attending = myAttending[ev.id] === true;
@@ -1964,87 +1620,254 @@ export default function FeedPage() {
               return (
                 <article
                   key={ev.id}
+                  className="card cardEvent"
                   onPointerUp={(e) => handleCardPointerUp(e, "event", ev.id)}
-                  className="cardWrapper"
                 >
-                  <EventCard
-                    ev={ev}
-                    isMine={isMine}
-                    attending={attending}
-                    loved={loved}
-                    loveCount={loveCount}
-                    loveBusy={loveBusy}
-                    savingAttend={savingAttendId === ev.id}
-                    authLoggedIn={auth.isLoggedIn}
-                    burst={burstCardKey === cardKey}
-                    onCardOpen={() => router.push(`/event/${ev.id}`)}
-                    onOpenImage={() => {
-                      setOpenImg(ev.photo_url!);
-                      setOpenTitle(ev.title);
-                    }}
-                    onToggleLove={(e) => {
-                      e.stopPropagation();
-                      void toggleEventLove(ev.id);
-                    }}
-                    onAttendToggle={(e) => {
-                      e.stopPropagation();
-                      void onAttendToggle(ev);
-                    }}
-                  />
+                  {burstCardKey === cardKey ? <div className="bigHeartBurst">♥</div> : null}
+
+                  <div className="media">
+                    <div className="badge badgeEvent">EVENT</div>
+
+                    {ev.photo_url ? (
+                      <button
+                        className="mediaBtn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenImg(ev.photo_url!);
+                          setOpenTitle(ev.title);
+                        }}
+                        aria-label="Open flyer"
+                        type="button"
+                        data-no-card-doubletap="true"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={ev.photo_url} alt={ev.title} loading="lazy" className="mediaImg" />
+                      </button>
+                    ) : (
+                      <div className="noPhoto">No flyer</div>
+                    )}
+                  </div>
+
+                  <div className="body">
+                    <div className="metaRow">
+                      <span className="meta">Host: {ev.is_anonymous ? "Anonymous" : ev.host_org}</span>
+                      <span className="meta">• {String(ev.category || "other")}</span>
+                      {isMine ? <span className="mine">Yours</span> : null}
+                    </div>
+
+                    <div className="title">{ev.title}</div>
+
+                    <div className="hint">
+                      {formatTimeRange(ev.starts_at, ev.ends_at)} • {ev.location}
+                    </div>
+
+                    <div className="desc clamp2">{ev.description}</div>
+
+                    <div className="socialRow">
+                      <LoveButton
+                        active={loved}
+                        count={loveCount}
+                        disabled={loveBusy}
+                        onClick={() => void toggleEventLove(ev.id)}
+                      />
+
+                      <div className="metaRight">
+                        <span className="small">{ev.link_url ? "Link included" : "No link"}</span>
+                        <span className="small">Starts: {formatShortDate(ev.starts_at)}</span>
+                      </div>
+                    </div>
+
+                    <div className="actions">
+                      <button
+                        className="btn btnGhost"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          router.push(`/event/${ev.id}`);
+                        }}
+                        type="button"
+                        data-no-card-doubletap="true"
+                      >
+                        View
+                      </button>
+
+                      <button
+                        className={`btn btnPrimary ${isMine ? "btnDisabled" : attending ? "btnOn" : ""}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void onAttendToggle(ev);
+                        }}
+                        disabled={savingAttendId === ev.id || isMine}
+                        type="button"
+                        data-no-card-doubletap="true"
+                      >
+                        {isMine
+                          ? "Yours"
+                          : savingAttendId === ev.id
+                          ? "Saving…"
+                          : auth.isLoggedIn
+                          ? attending
+                            ? "Attending"
+                            : "Attend"
+                          : "Attend (login)"}
+                      </button>
+                    </div>
+                  </div>
                 </article>
               );
             })}
 
           {tab !== "events" &&
-            !loading &&
             filteredItems.map((item) => {
               const postType = (item.post_type ?? "give") as PostType;
               const isMine = !!auth.userId && !!item.owner_id && item.owner_id === auth.userId;
               const myStatus = myInterestMap[item.id];
               const mineActive = isActiveInterestStatus(myStatus);
+              const publicState = itemPublicStatus(item);
+
+              const group = requestGroupLabel(item.request_group);
+              const tf = requestTimeframeLabel(item.request_timeframe);
+              const loc = (item.request_location ?? "").trim();
+
               const loved = likedItemMap[item.id] === true;
               const loveCount = itemLoveCounts[item.id] ?? 0;
               const loveBusy = savingLoveKey === `item:${item.id}`;
               const cardKey = `item:${item.id}`;
 
-              const common = {
-                isMine,
-                loved,
-                loveCount,
-                loveBusy,
-                authLoggedIn: auth.isLoggedIn,
-                burst: burstCardKey === cardKey,
-                onCardOpen: () => router.push(`/item/${item.id}`),
-                onToggleLove: (e: React.MouseEvent<HTMLButtonElement>) => {
-                  e.stopPropagation();
-                  void toggleItemLove(item.id);
-                },
-                onPrimaryAction: (e: React.MouseEvent<HTMLButtonElement>) => {
-                  e.stopPropagation();
-                  router.push(auth.isLoggedIn ? `/item/${item.id}` : "/me");
-                },
-              };
-
               return (
                 <article
                   key={item.id}
+                  className={`card ${postType === "request" ? "cardRequest" : ""}`}
                   onPointerUp={(e) => handleCardPointerUp(e, "item", item.id)}
-                  className="cardWrapper"
                 >
+                  {burstCardKey === cardKey ? <div className="bigHeartBurst">♥</div> : null}
+
                   {postType === "request" ? (
-                    <RequestCard item={item} {...common} />
+                    <div className="reqHero">
+                      <div className="badge badgeRequest">{itemBadgeLabel(item)}</div>
+
+                      <div className="reqMeta">
+                        {group}
+                        {tf ? ` • ${tf}` : ""}
+                        {loc ? ` • ${loc}` : ""}
+                      </div>
+                      <div className="title clamp2">{item.title}</div>
+                    </div>
                   ) : (
-                    <ItemCard
-                      item={item}
-                      mineActive={mineActive}
-                      myStatus={myStatus}
-                      onOpenImage={() => {
-                        setOpenImg(item.photo_url!);
-                        setOpenTitle(item.title);
-                      }}
-                      {...common}
-                    />
+                    <div className="media">
+                      <div className={`badge ${publicState === "in_talks" ? "badgeTalks" : "badgeItem"}`}>
+                        {itemBadgeLabel(item)}
+                      </div>
+
+                      {item.photo_url ? (
+                        <button
+                          className="mediaBtn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenImg(item.photo_url!);
+                            setOpenTitle(item.title);
+                          }}
+                          aria-label="Open photo"
+                          type="button"
+                          data-no-card-doubletap="true"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={item.photo_url} alt={item.title} loading="lazy" className="mediaImg" />
+                        </button>
+                      ) : (
+                        <div className="noPhoto">No photo</div>
+                      )}
+                    </div>
                   )}
+
+                  <div className="body">
+                    <div className="metaRow">
+                      <span className="meta">
+                        {postType === "request"
+                          ? `Type: ${group}`
+                          : item.category
+                          ? `Category: ${item.category}`
+                          : "Category: —"}
+                      </span>
+                      {item.owner_role ? <span className="meta">• {item.owner_role}</span> : null}
+                      {isMine ? <span className="mine">Yours</span> : null}
+                    </div>
+
+                    {postType !== "request" ? <div className="title">{item.title}</div> : null}
+
+                    {postType !== "request" && itemHint(item) ? (
+                      <div className="hint">{itemHint(item)}</div>
+                    ) : null}
+
+                    <div className="desc clamp2">{item.description || "—"}</div>
+
+                    <div className="socialRow">
+                      <LoveButton
+                        active={loved}
+                        count={loveCount}
+                        disabled={loveBusy}
+                        onClick={() => void toggleItemLove(item.id)}
+                      />
+
+                      <div className="metaRight">
+                        {postType === "request" ? (
+                          <span className="small">
+                            {item.hide_interest_count ? "Offer activity hidden" : "Tap to offer help"}
+                          </span>
+                        ) : (
+                          <span className="small">
+                            {item.hide_interest_count
+                              ? "Requests hidden"
+                              : `${item.interest_count || 0} requests`}
+                          </span>
+                        )}
+
+                        {item.expires_at ? (
+                          <span className="small">Ends: {formatShortDate(item.expires_at)}</span>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="actions">
+                      <button
+                        className="btn btnGhost"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          router.push(`/item/${item.id}`);
+                        }}
+                        type="button"
+                        data-no-card-doubletap="true"
+                      >
+                        View
+                      </button>
+
+                      <button
+                        className={`btn btnPrimary ${isMine ? "btnDisabled" : ""} ${
+                          postType !== "request" && mineActive ? "btnOn" : ""
+                        }`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          router.push(auth.isLoggedIn ? `/item/${item.id}` : "/me");
+                        }}
+                        disabled={isMine}
+                        type="button"
+                        data-no-card-doubletap="true"
+                      >
+                        {isMine
+                          ? "Yours"
+                          : postType === "request"
+                          ? auth.isLoggedIn
+                            ? "Offer help"
+                            : "Offer (login)"
+                          : auth.isLoggedIn
+                          ? mineActive
+                            ? myInterestLabel(myStatus)
+                            : publicState === "in_talks"
+                            ? "Join waitlist"
+                            : "Request"
+                          : "Request (login)"}
+                      </button>
+                    </div>
+                  </div>
                 </article>
               );
             })}
@@ -2056,7 +1879,12 @@ export default function FeedPage() {
           <div className="modalInner" onClick={(e) => e.stopPropagation()}>
             <div className="modalTop">
               <div className="modalTitle">{openTitle || "Photo"}</div>
-              <button className="modalClose" onClick={() => setOpenImg(null)} type="button">
+              <button
+                className="modalClose"
+                onClick={() => setOpenImg(null)}
+                type="button"
+                data-no-card-doubletap="true"
+              >
                 ✕
               </button>
             </div>
@@ -2067,119 +1895,93 @@ export default function FeedPage() {
       )}
 
       <style jsx>{`
-        :global(:root) {
-          --bg: #f7f7f8;
-          --surface: #ffffff;
-          --surface-2: #fbfbfc;
-          --border: #e5e7eb;
-          --text: #111827;
-          --muted: #6b7280;
-
-          --items-accent: #10b981;
-          --items-soft: rgba(16, 185, 129, 0.1);
-          --items-border: rgba(16, 185, 129, 0.2);
-
-          --requests-accent: #f59e0b;
-          --requests-soft: rgba(245, 158, 11, 0.1);
-          --requests-border: rgba(245, 158, 11, 0.22);
-
-          --events-accent: #3b82f6;
-          --events-soft: rgba(59, 130, 246, 0.1);
-          --events-border: rgba(59, 130, 246, 0.2);
-
-          --love: #ec4899;
-        }
-
         .page {
           min-height: 100vh;
-          color: var(--text);
-          transition: background 0.2s ease;
-        }
-
-        .page-items {
-          background: #f7f8f7;
-        }
-
-        .page-requests {
-          background: #fbf8f3;
-        }
-
-        .page-events {
-          background: #f6f8fc;
+          background: #f7f7f8;
+          color: #0f172a;
         }
 
         .topbar {
           position: sticky;
           top: 0;
           z-index: 30;
-          backdrop-filter: blur(14px);
-          background: rgba(255, 255, 255, 0.78);
-          border-bottom: 1px solid rgba(229, 231, 235, 0.9);
+          background: rgba(247, 247, 248, 0.86);
+          backdrop-filter: blur(12px);
+          border-bottom: 1px solid #e5e7eb;
         }
 
-        .brandRow.compact {
-          padding: 10px 12px 8px;
+        .row {
+          padding: 10px 12px;
+        }
+
+        .brandRow {
           display: grid;
-          grid-template-columns: 42px 1fr 42px;
-          gap: 10px;
+          grid-template-columns: 44px 1fr 44px;
           align-items: center;
+          gap: 10px;
+          padding-top: 12px;
+          padding-bottom: 8px;
         }
 
-        .homeBtn,
-        .bellBtn {
-          width: 42px;
-          height: 42px;
-          border-radius: 14px;
-          border: 1px solid var(--border);
-          background: rgba(255, 255, 255, 0.92);
+        .iconBtn {
+          width: 44px;
+          height: 44px;
+          border-radius: 16px;
+          overflow: hidden;
+          background: #fff;
+          border: 1px solid #e5e7eb;
           display: grid;
           place-items: center;
-          cursor: pointer;
-          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
-          position: relative;
           padding: 0;
+          cursor: pointer;
+          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
         }
 
         .logoImg {
-          width: 30px;
-          height: 30px;
+          width: 34px;
+          height: 34px;
           object-fit: contain;
         }
 
-        .brandCopy {
-          min-width: 0;
-        }
-
-        .brandLine {
-          display: inline-flex;
+        .brandCenter {
+          display: flex;
           align-items: center;
-          gap: 7px;
+          justify-content: center;
+          gap: 8px;
           min-width: 0;
         }
 
         .brandName {
-          font-size: 20px;
-          font-weight: 800;
-          letter-spacing: -0.45px;
-          color: var(--text);
+          font-size: 22px;
+          font-weight: 900;
+          letter-spacing: -0.6px;
           white-space: nowrap;
+          color: #0f172a;
         }
 
         .brandMark {
+          opacity: 0.9;
           transform: translateY(1px);
-          opacity: 0.92;
         }
 
-        .brandSub {
-          margin-top: 2px;
-          color: var(--muted);
-          font-size: 12px;
-          font-weight: 700;
+        .bellBtn {
+          width: 44px;
+          height: 44px;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          color: #111827;
+          display: grid;
+          place-items: center;
+          cursor: pointer;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
+          position: relative;
         }
 
         .bellGlyph {
-          font-size: 18px;
+          font-size: 19px;
           line-height: 1;
+          transform: translateY(-1px);
         }
 
         .bellBadge {
@@ -2191,33 +1993,31 @@ export default function FeedPage() {
           border-radius: 999px;
           background: #ef4444;
           color: #ffffff;
-          border: 2px solid #ffffff;
+          border: 2px solid #f7f7f8;
           padding: 0 6px;
           display: inline-flex;
           align-items: center;
           justify-content: center;
           font-size: 10px;
-          font-weight: 800;
+          font-weight: 950;
           line-height: 1;
-        }
-
-        .tabsSearchBlock {
-          padding: 0 12px 10px;
         }
 
         .tabsRow {
           display: grid;
-          grid-template-columns: 1fr 48px;
+          grid-template-columns: 1fr 46px;
           gap: 10px;
           align-items: center;
+          padding-top: 6px;
+          padding-bottom: 6px;
         }
 
         .seg3 {
           position: relative;
-          height: 42px;
+          height: 44px;
           border-radius: 999px;
-          border: 1px solid var(--border);
-          background: rgba(243, 244, 246, 0.92);
+          border: 1px solid #e5e7eb;
+          background: #f3f4f6;
           display: grid;
           grid-template-columns: 1fr 1fr 1fr;
           overflow: hidden;
@@ -2226,15 +2026,15 @@ export default function FeedPage() {
         .segBtn {
           border: none;
           background: transparent;
-          color: #4b5563;
-          font-weight: 800;
-          font-size: 13px;
+          color: #374151;
+          font-weight: 950;
           cursor: pointer;
           z-index: 2;
+          transition: color 0.18s ease;
         }
 
         .segBtn.active {
-          color: var(--text);
+          color: #111827;
         }
 
         .segIndicator3 {
@@ -2243,9 +2043,9 @@ export default function FeedPage() {
           bottom: 3px;
           width: calc(33.333% - 6px);
           border-radius: 999px;
-          background: rgba(255, 255, 255, 0.97);
-          border: 1px solid var(--border);
-          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+          background: #ffffff;
+          border: 1px solid #e5e7eb;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
           transition: transform 0.22s ease;
           z-index: 1;
         }
@@ -2261,66 +2061,52 @@ export default function FeedPage() {
         }
 
         .ctrlBtn {
-          width: 48px;
-          height: 42px;
-          border-radius: 14px;
-          border: 1px solid var(--border);
-          background: rgba(255, 255, 255, 0.92);
-          color: var(--text);
+          width: 46px;
+          height: 44px;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          color: #111827;
           cursor: pointer;
           display: grid;
           place-items: center;
-          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
-          position: relative;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
         }
 
         .ctrlActive {
-          border-color: rgba(17, 24, 39, 0.1);
-          background: rgba(17, 24, 39, 0.04);
+          border-color: rgba(16, 185, 129, 0.35);
+          background: rgba(16, 185, 129, 0.08);
         }
 
         .ctrlIcon {
           font-size: 18px;
-          font-weight: 800;
-          line-height: 1;
-        }
-
-        .ctrlCount {
-          position: absolute;
-          top: -5px;
-          right: -5px;
-          width: 18px;
-          height: 18px;
-          border-radius: 999px;
-          background: var(--text);
-          color: white;
-          font-size: 10px;
-          font-weight: 800;
-          display: grid;
-          place-items: center;
+          font-weight: 900;
+          opacity: 0.9;
         }
 
         .searchWrap {
-          padding-top: 10px;
+          padding-top: 6px;
+          padding-bottom: 10px;
         }
 
         .searchRow {
-          height: 44px;
+          height: 46px;
           border-radius: 999px;
-          border: 1px solid var(--border);
-          background: rgba(255, 255, 255, 0.95);
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
           display: grid;
-          grid-template-columns: 38px 1fr 38px;
+          grid-template-columns: 40px 1fr 40px;
           align-items: center;
-          gap: 6px;
+          gap: 8px;
           padding: 0 6px;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.04);
+          margin: 0;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
           transition: border-color 0.18s ease, box-shadow 0.18s ease;
         }
 
         .searchFocused .searchRow {
-          border-color: rgba(17, 24, 39, 0.12);
-          box-shadow: 0 0 0 4px rgba(17, 24, 39, 0.04), 0 10px 24px rgba(0, 0, 0, 0.04);
+          border-color: rgba(16, 185, 129, 0.35);
+          box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.1), 0 10px 24px rgba(0, 0, 0, 0.06);
         }
 
         .searchPulse .searchRow {
@@ -2329,34 +2115,23 @@ export default function FeedPage() {
 
         @keyframes glow {
           from {
-            box-shadow: 0 0 0 0 rgba(17, 24, 39, 0.08), 0 10px 24px rgba(0, 0, 0, 0.04);
+            box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.18), 0 10px 24px rgba(0, 0, 0, 0.06);
           }
           to {
-            box-shadow: 0 0 0 10px rgba(17, 24, 39, 0), 0 10px 24px rgba(0, 0, 0, 0.04);
+            box-shadow: 0 0 0 10px rgba(16, 185, 129, 0), 0 10px 24px rgba(0, 0, 0, 0.06);
           }
         }
 
-        .searchIconBtn,
-        .clearBtn,
-        .kbdHint {
-          width: 38px;
-          height: 38px;
+        .searchIconBtn {
+          width: 40px;
+          height: 40px;
           border-radius: 999px;
-          border: 1px solid var(--border);
+          border: 1px solid #e5e7eb;
           background: #fbfbfc;
-          color: var(--text);
+          color: #111827;
+          cursor: pointer;
           display: grid;
           place-items: center;
-          font-weight: 800;
-        }
-
-        .searchIconBtn,
-        .clearBtn {
-          cursor: pointer;
-        }
-
-        .kbdHint {
-          color: #9ca3af;
         }
 
         .searchRow input {
@@ -2365,23 +2140,45 @@ export default function FeedPage() {
           border: none;
           outline: none;
           background: transparent;
-          color: var(--text);
-          font-weight: 700;
+          color: #111827;
+          font-weight: 900;
           font-size: 14px;
         }
 
         .searchRow input::placeholder {
-          color: var(--muted);
-          font-weight: 700;
+          color: #6b7280;
+          font-weight: 800;
+        }
+
+        .clearBtn,
+        .kbdHint {
+          width: 40px;
+          height: 40px;
+          border-radius: 999px;
+          border: 1px solid #e5e7eb;
+          background: #fbfbfc;
+          color: #111827;
+          display: grid;
+          place-items: center;
+          font-weight: 950;
+        }
+
+        .clearBtn {
+          cursor: pointer;
+        }
+
+        .kbdHint {
+          background: #ffffff;
+          color: #9ca3af;
         }
 
         .chipRow {
           margin-top: 10px;
           display: flex;
-          gap: 9px;
+          gap: 10px;
           overflow-x: auto;
           overflow-y: hidden;
-          padding-bottom: 4px;
+          padding-bottom: 6px;
           -webkit-overflow-scrolling: touch;
           touch-action: pan-x;
           scrollbar-width: none;
@@ -2394,67 +2191,51 @@ export default function FeedPage() {
         .chip {
           flex: 0 0 auto;
           border-radius: 999px;
-          border: 1px solid var(--border);
-          background: rgba(255, 255, 255, 0.95);
-          color: var(--text);
-          padding: 9px 12px;
-          font-weight: 700;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          color: #111827;
+          padding: 10px 12px;
+          font-weight: 900;
           cursor: pointer;
           white-space: nowrap;
-          font-size: 12px;
+          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
         }
 
         .chipOn {
-          border-color: var(--items-border);
-          background: var(--items-soft);
+          border-color: rgba(16, 185, 129, 0.35);
+          background: rgba(16, 185, 129, 0.1);
           color: #065f46;
         }
 
-        .activeFilterRow {
-          margin-top: 10px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .activeFilterPill {
-          border: 1px solid var(--border);
-          background: rgba(255, 255, 255, 0.96);
-          color: var(--text);
-          border-radius: 999px;
-          padding: 7px 10px;
-          font-size: 12px;
-          font-weight: 700;
-          cursor: pointer;
-          display: inline-flex;
-          gap: 6px;
-          align-items: center;
-        }
-
         .subline {
-          padding: 10px 2px 0;
+          padding: 0 12px 10px;
           display: flex;
           justify-content: space-between;
-          gap: 12px;
           align-items: baseline;
+          gap: 12px;
         }
 
         .subTitle {
           font-size: 13px;
-          font-weight: 800;
-          color: var(--text);
+          font-weight: 950;
+          color: #111827;
         }
 
         .count {
           font-size: 12px;
-          color: var(--muted);
-          font-weight: 700;
+          color: #6b7280;
+          font-weight: 900;
         }
 
         .err {
-          padding-top: 8px;
+          padding: 0 12px 10px;
           color: #b91c1c;
-          font-size: 13px;
+          font-weight: 900;
+        }
+
+        .loading {
+          padding: 0 12px 10px;
+          color: #6b7280;
           font-weight: 800;
         }
 
@@ -2473,9 +2254,9 @@ export default function FeedPage() {
         .notifSheet,
         .sheet {
           width: min(720px, 100%);
-          border-radius: 20px;
-          border: 1px solid var(--border);
-          background: rgba(255, 255, 255, 0.94);
+          border-radius: 18px;
+          border: 1px solid #e5e7eb;
+          background: rgba(255, 255, 255, 0.92);
           backdrop-filter: blur(14px);
           box-shadow: 0 30px 80px rgba(0, 0, 0, 0.12);
           overflow: hidden;
@@ -2487,22 +2268,22 @@ export default function FeedPage() {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
-          border-bottom: 1px solid var(--border);
+          border-bottom: 1px solid #e5e7eb;
           gap: 12px;
         }
 
         .notifTitle,
         .sheetTitle {
-          font-weight: 800;
+          font-weight: 950;
           font-size: 14px;
-          color: var(--text);
+          color: #111827;
         }
 
         .notifSub {
           margin-top: 4px;
           font-size: 12px;
-          font-weight: 700;
-          color: var(--muted);
+          font-weight: 800;
+          color: #6b7280;
         }
 
         .notifTopActions {
@@ -2515,11 +2296,11 @@ export default function FeedPage() {
         .sheetClose {
           height: 38px;
           border-radius: 14px;
-          border: 1px solid var(--border);
+          border: 1px solid #e5e7eb;
           background: #ffffff;
-          color: var(--text);
+          color: #111827;
           cursor: pointer;
-          font-weight: 700;
+          font-weight: 950;
           padding: 0 12px;
         }
 
@@ -2533,7 +2314,7 @@ export default function FeedPage() {
 
         .notifError {
           color: #b91c1c;
-          font-weight: 700;
+          font-weight: 900;
         }
 
         .notifEmpty {
@@ -2541,8 +2322,8 @@ export default function FeedPage() {
           border-radius: 16px;
           border: 1px dashed #d1d5db;
           background: #ffffff;
-          color: var(--muted);
-          font-weight: 700;
+          color: #6b7280;
+          font-weight: 800;
           text-align: center;
         }
 
@@ -2550,7 +2331,7 @@ export default function FeedPage() {
           width: 100%;
           text-align: left;
           border-radius: 16px;
-          border: 1px solid var(--border);
+          border: 1px solid #e5e7eb;
           background: #ffffff;
           padding: 12px;
           cursor: pointer;
@@ -2558,8 +2339,8 @@ export default function FeedPage() {
         }
 
         .notifUnread {
-          border-color: rgba(17, 24, 39, 0.1);
-          background: linear-gradient(180deg, rgba(17, 24, 39, 0.02), #ffffff);
+          border-color: rgba(16, 185, 129, 0.24);
+          background: linear-gradient(180deg, rgba(16, 185, 129, 0.04), #ffffff);
         }
 
         .notifCardTop {
@@ -2584,7 +2365,7 @@ export default function FeedPage() {
           border-radius: 14px;
           object-fit: cover;
           flex-shrink: 0;
-          border: 1px solid var(--border);
+          border: 1px solid #e5e7eb;
         }
 
         .notifThumbFallback {
@@ -2613,17 +2394,22 @@ export default function FeedPage() {
           padding: 0 9px;
           border-radius: 999px;
           font-size: 11px;
-          font-weight: 800;
-          border: 1px solid var(--border);
+          font-weight: 950;
+          border: 1px solid #e5e7eb;
           background: #f9fafb;
           color: #374151;
         }
 
         .notifType.item,
-        .notifType.request,
+        .notifType.request {
+          border-color: rgba(16, 185, 129, 0.22);
+          background: rgba(16, 185, 129, 0.1);
+          color: #065f46;
+        }
+
         .notifType.good {
-          border-color: var(--items-border);
-          background: var(--items-soft);
+          border-color: rgba(16, 185, 129, 0.22);
+          background: rgba(16, 185, 129, 0.1);
           color: #065f46;
         }
 
@@ -2634,8 +2420,8 @@ export default function FeedPage() {
         }
 
         .notifType.event {
-          border-color: var(--events-border);
-          background: var(--events-soft);
+          border-color: rgba(59, 130, 246, 0.22);
+          background: rgba(59, 130, 246, 0.1);
           color: #1d4ed8;
         }
 
@@ -2646,7 +2432,7 @@ export default function FeedPage() {
         }
 
         .notifType.system {
-          border-color: var(--border);
+          border-color: #e5e7eb;
           background: #f9fafb;
           color: #374151;
         }
@@ -2655,15 +2441,15 @@ export default function FeedPage() {
           width: 8px;
           height: 8px;
           border-radius: 999px;
-          background: #111827;
+          background: #10b981;
           flex-shrink: 0;
         }
 
         .notifCardTitle {
           margin-top: 6px;
           font-size: 14px;
-          font-weight: 800;
-          color: var(--text);
+          font-weight: 950;
+          color: #111827;
           line-height: 1.35;
         }
 
@@ -2671,19 +2457,19 @@ export default function FeedPage() {
           margin-top: 4px;
           font-size: 13px;
           line-height: 1.45;
-          color: var(--muted);
+          color: #6b7280;
         }
 
         .notifMeta {
           margin-top: 6px;
           font-size: 12px;
-          font-weight: 700;
+          font-weight: 800;
           color: #9ca3af;
         }
 
         .notifOpenHint {
           color: #9ca3af;
-          font-weight: 800;
+          font-weight: 950;
           padding-top: 2px;
         }
 
@@ -2694,17 +2480,17 @@ export default function FeedPage() {
         }
 
         .sheetBlock {
-          border: 1px solid var(--border);
+          border: 1px solid #e5e7eb;
           background: #ffffff;
           border-radius: 16px;
           padding: 12px;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.04);
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.05);
         }
 
         .sheetLabel {
           font-size: 12px;
-          font-weight: 800;
-          color: var(--muted);
+          font-weight: 950;
+          color: #6b7280;
           margin-bottom: 10px;
         }
 
@@ -2716,18 +2502,18 @@ export default function FeedPage() {
 
         .tog {
           border-radius: 999px;
-          border: 1px solid var(--border);
+          border: 1px solid #e5e7eb;
           background: #fbfbfc;
-          color: var(--text);
+          color: #111827;
           padding: 10px 12px;
-          font-weight: 700;
+          font-weight: 900;
           cursor: pointer;
         }
 
         .togOn {
-          border-color: rgba(17, 24, 39, 0.12);
-          background: rgba(17, 24, 39, 0.05);
-          color: var(--text);
+          border-color: rgba(16, 185, 129, 0.35);
+          background: rgba(16, 185, 129, 0.1);
+          color: #065f46;
         }
 
         .sheetActions {
@@ -2736,25 +2522,25 @@ export default function FeedPage() {
           gap: 10px;
         }
 
-        .ghost,
-        .primary {
+        .ghost {
           height: 44px;
           border-radius: 14px;
-          font-weight: 800;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          color: #111827;
+          font-weight: 950;
           cursor: pointer;
         }
 
-        .ghost {
-          border: 1px solid var(--border);
-          background: #ffffff;
-          color: var(--text);
-        }
-
         .primary {
+          height: 44px;
+          border-radius: 14px;
           border: none;
-          background: #111827;
+          background: #10b981;
           color: #ffffff;
-          box-shadow: 0 14px 30px rgba(17, 24, 39, 0.18);
+          font-weight: 950;
+          cursor: pointer;
+          box-shadow: 0 14px 30px rgba(16, 185, 129, 0.2);
         }
 
         .main {
@@ -2767,17 +2553,12 @@ export default function FeedPage() {
           gap: 14px;
         }
 
-        .cardWrapper {
-          min-width: 0;
-        }
-
         @media (min-width: 720px) {
           .main {
             padding: 16px 16px ${PAGE_BOTTOM_PAD}px;
             max-width: 1100px;
             margin: 0 auto;
           }
-
           .grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 16px;
@@ -2786,45 +2567,27 @@ export default function FeedPage() {
 
         .card {
           position: relative;
-          background: var(--surface);
-          border-radius: 22px;
+          background: #ffffff;
+          border-radius: 18px;
+          border: 1px solid #e5e7eb;
           overflow: hidden;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.06);
           user-select: none;
           -webkit-tap-highlight-color: transparent;
-          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.05);
-        }
-
-        .clickableCard {
-          cursor: pointer;
-        }
-
-        .cardItem {
-          border: 1px solid var(--items-border);
-          background: linear-gradient(180deg, rgba(16, 185, 129, 0.04), #ffffff 34%);
         }
 
         .cardRequest {
-          border: 1px solid var(--requests-border);
-          background: linear-gradient(180deg, rgba(245, 158, 11, 0.04), #ffffff 34%);
+          border: 1px solid rgba(16, 185, 129, 0.25);
         }
 
         .cardEvent {
-          border: 1px solid var(--events-border);
-          background: linear-gradient(180deg, rgba(59, 130, 246, 0.04), #ffffff 34%);
+          border: 1px solid rgba(59, 130, 246, 0.18);
         }
 
         .media {
           position: relative;
           height: 210px;
           background: #f3f4f6;
-        }
-
-        .mediaEvent::after {
-          content: "";
-          position: absolute;
-          inset: 0;
-          background: linear-gradient(180deg, rgba(15, 23, 42, 0.02), rgba(15, 23, 42, 0.06));
-          pointer-events: none;
         }
 
         .mediaBtn {
@@ -2843,342 +2606,73 @@ export default function FeedPage() {
           display: block;
         }
 
-        .floatingBadge {
-          position: absolute;
-          top: 12px;
-          left: 12px;
-          z-index: 3;
-          padding: 7px 10px;
-          border-radius: 999px;
-          font-size: 11px;
-          font-weight: 800;
-          border: 1px solid var(--border);
-          background: rgba(255, 255, 255, 0.88);
-          color: var(--text);
-          backdrop-filter: blur(6px);
-        }
-
-        .badgeItem {
-          border-color: var(--items-border);
-          background: rgba(255, 255, 255, 0.82);
-          color: #065f46;
-        }
-
-        .badgeTalks {
-          border-color: var(--events-border);
-          background: rgba(255, 255, 255, 0.82);
-          color: #1d4ed8;
-        }
-
-        .badgeEvent {
-          border-color: var(--events-border);
-          background: rgba(255, 255, 255, 0.82);
-          color: #1d4ed8;
-        }
-
-        .tinyLike {
-          position: absolute;
-          top: 12px;
-          right: 12px;
-          z-index: 3;
-          height: 34px;
-          min-width: 56px;
-          padding: 0 10px;
-          border-radius: 999px;
-          border: 1px solid rgba(255, 255, 255, 0.85);
-          background: rgba(255, 255, 255, 0.86);
-          backdrop-filter: blur(8px);
-          color: #475569;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          gap: 6px;
-          cursor: pointer;
-          box-shadow: 0 6px 16px rgba(15, 23, 42, 0.05);
-        }
-
-        .tinyLike.active {
-          color: var(--love);
-          border-color: #fbcfe8;
-          background: rgba(255, 241, 247, 0.95);
-        }
-
-        .tinyLikeGlyph {
-          font-size: 17px;
-          line-height: 1;
-        }
-
-        .tinyLikeCount {
-          font-size: 12px;
-          font-weight: 800;
-          line-height: 1;
-        }
-
-        .dateChip {
-          position: absolute;
-          left: 12px;
-          bottom: 12px;
-          z-index: 3;
-          width: 54px;
-          border-radius: 16px;
-          padding: 8px 0;
-          background: rgba(255, 255, 255, 0.92);
-          border: 1px solid rgba(255, 255, 255, 0.92);
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
-        }
-
-        .dateChipMonth {
-          font-size: 10px;
-          font-weight: 800;
-          color: #2563eb;
-          letter-spacing: 0.6px;
-        }
-
-        .dateChipDay {
-          font-size: 20px;
-          font-weight: 800;
-          color: var(--text);
-          line-height: 1.05;
-        }
-
         .noPhoto {
           width: 100%;
           height: 100%;
           display: flex;
           align-items: center;
           justify-content: center;
-          color: var(--muted);
-          font-weight: 700;
-        }
-
-        .noPhotoItems {
-          background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), #f8fafc);
-        }
-
-        .noPhotoEvents {
-          background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), #f8fafc);
-        }
-
-        .requestShell {
-          padding: 16px;
-          background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(255, 255, 255, 1) 52%);
-        }
-
-        .requestTop {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 12px;
-        }
-
-        .requestPills {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          min-width: 0;
-        }
-
-        .requestMainPill,
-        .requestGroupPill,
-        .requestSoftPill {
-          min-height: 28px;
-          display: inline-flex;
-          align-items: center;
-          padding: 0 10px;
-          border-radius: 999px;
-          font-size: 11px;
-          font-weight: 800;
-          border: 1px solid var(--border);
-          background: rgba(255, 255, 255, 0.9);
-        }
-
-        .requestMainPill {
-          border-color: var(--requests-border);
-          background: var(--requests-soft);
-          color: #92400e;
-        }
-
-        .requestGroupPill {
-          color: #7c2d12;
-        }
-
-        .requestSoftPill {
-          color: #4b5563;
-        }
-
-        .requestTitle {
-          margin-top: 14px;
-          font-size: 21px;
-          font-weight: 800;
-          letter-spacing: -0.35px;
-          color: var(--text);
-          line-height: 1.15;
-        }
-
-        .requestDesc {
-          margin-top: 10px;
-          color: #374151;
-          font-size: 14px;
-          min-height: 40px;
-        }
-
-        .requestInfoGrid {
-          margin-top: 14px;
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 10px;
-        }
-
-        .requestInfoCell {
-          border-radius: 16px;
-          border: 1px solid rgba(245, 158, 11, 0.16);
-          background: rgba(255, 255, 255, 0.78);
-          padding: 10px;
-          display: grid;
-          gap: 4px;
-        }
-
-        .requestInfoKey {
-          font-size: 11px;
-          color: var(--muted);
-          font-weight: 700;
-        }
-
-        .requestInfoVal {
-          font-size: 13px;
-          color: var(--text);
-          font-weight: 800;
-        }
-
-        .body {
-          padding: 14px;
-        }
-
-        .eyebrowRow {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .eyebrowTag {
-          min-height: 26px;
-          display: inline-flex;
-          align-items: center;
-          border-radius: 999px;
-          padding: 0 10px;
-          font-size: 11px;
-          font-weight: 800;
-          background: rgba(17, 24, 39, 0.04);
-          color: #374151;
-          border: 1px solid rgba(17, 24, 39, 0.06);
-        }
-
-        .eyebrowTag.events {
-          color: #1d4ed8;
-          background: rgba(59, 130, 246, 0.08);
-          border-color: rgba(59, 130, 246, 0.16);
-        }
-
-        .eyebrowTag.subtle {
-          background: rgba(255, 255, 255, 0.82);
-          color: #4b5563;
-        }
-
-        .title {
-          margin-top: 10px;
-          font-size: 19px;
-          font-weight: 800;
-          letter-spacing: -0.25px;
-          color: var(--text);
-          line-height: 1.18;
-        }
-
-        .metaLine {
-          margin-top: 8px;
-          color: var(--muted);
-          font-size: 13px;
-          font-weight: 700;
-        }
-
-        .desc {
-          margin-top: 10px;
-          color: #374151;
-          font-size: 14px;
-          min-height: 40px;
-          line-height: 1.45;
-        }
-
-        .bottomRow {
-          margin-top: 14px;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 10px;
-        }
-
-        .miniFacts {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px 10px;
-          color: var(--muted);
-          font-weight: 700;
-          font-size: 12px;
-          min-width: 0;
-        }
-
-        .primaryInlineBtn {
-          height: 40px;
-          padding: 0 14px;
-          border-radius: 999px;
-          border: none;
-          background: #111827;
-          color: #ffffff;
-          font-weight: 800;
-          cursor: pointer;
-          flex-shrink: 0;
-          box-shadow: 0 12px 24px rgba(17, 24, 39, 0.14);
-        }
-
-        .primaryInlineBtn.on {
-          background: rgba(17, 24, 39, 0.08);
-          color: var(--text);
-          border: 1px solid rgba(17, 24, 39, 0.12);
-          box-shadow: none;
-        }
-
-        .primaryInlineBtn.disabled {
-          opacity: 0.62;
-          cursor: not-allowed;
-          background: #eef2f7;
           color: #6b7280;
-          border: 1px solid var(--border);
-          box-shadow: none;
+          font-weight: 800;
         }
 
-        .requestBtn {
-          background: var(--requests-accent);
-          box-shadow: 0 12px 24px rgba(245, 158, 11, 0.18);
+        .reqHero {
+          position: relative;
+          height: 210px;
+          padding: 16px;
+          display: flex;
+          flex-direction: column;
+          justify-content: flex-end;
+          background: linear-gradient(
+            135deg,
+            rgba(16, 185, 129, 0.08) 0%,
+            rgba(255, 255, 255, 1) 100%
+          );
         }
 
-        .eventBtn {
-          background: var(--events-accent);
-          box-shadow: 0 12px 24px rgba(59, 130, 246, 0.18);
+        .badge {
+          position: absolute;
+          top: 12px;
+          left: 12px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          font-size: 12px;
+          font-weight: 900;
+          border: 1px solid #e5e7eb;
+          background: rgba(255, 255, 255, 0.85);
+          color: #111827;
+        }
+
+        .badgeRequest,
+        .badgeItem {
+          border-color: rgba(16, 185, 129, 0.25);
+          background: rgba(16, 185, 129, 0.12);
+          color: #065f46;
+        }
+
+        .badgeTalks {
+          border-color: rgba(59, 130, 246, 0.25);
+          background: rgba(59, 130, 246, 0.12);
+          color: #1d4ed8;
+        }
+
+        .badgeEvent {
+          border-color: rgba(59, 130, 246, 0.25);
+          background: rgba(59, 130, 246, 0.12);
+          color: #1e3a8a;
         }
 
         .bigHeartBurst {
           position: absolute;
           inset: 0;
-          z-index: 5;
+          z-index: 4;
           pointer-events: none;
           display: flex;
           align-items: center;
           justify-content: center;
           font-size: 88px;
-          font-weight: 800;
-          color: var(--love);
+          font-weight: 900;
+          color: #ec4899;
           text-shadow: 0 16px 34px rgba(236, 72, 153, 0.26);
           animation: heart-pop 0.72s ease forwards;
         }
@@ -3202,61 +2696,163 @@ export default function FeedPage() {
           }
         }
 
-        .emptyState {
-          border-radius: 22px;
-          border: 1px dashed var(--border);
-          background: rgba(255, 255, 255, 0.82);
-          padding: 28px 18px;
-          text-align: center;
-          display: grid;
+        .reqMeta {
+          font-size: 13px;
+          font-weight: 900;
+          color: #374151;
+          margin-bottom: 8px;
+        }
+
+        .body {
+          padding: 14px;
+        }
+
+        .metaRow {
+          display: flex;
+          flex-wrap: wrap;
           gap: 8px;
+          align-items: center;
         }
 
-        .emptyIcon {
-          font-size: 24px;
-          color: #9ca3af;
-        }
-
-        .emptyTitle {
-          font-size: 18px;
+        .meta {
+          font-size: 12px;
+          color: #6b7280;
           font-weight: 800;
-          color: var(--text);
         }
 
-        .emptySubtitle {
-          font-size: 14px;
-          color: var(--muted);
-          line-height: 1.45;
-        }
-
-        .emptyBtn {
-          margin: 6px auto 0;
-          height: 40px;
-          padding: 0 14px;
+        .mine {
+          font-size: 12px;
+          padding: 4px 8px;
           border-radius: 999px;
-          border: 1px solid var(--border);
-          background: white;
-          color: var(--text);
-          font-weight: 800;
+          border: 1px solid #e5e7eb;
+          background: #fbfbfc;
+          color: #111827;
+          font-weight: 900;
+        }
+
+        .title {
+          margin-top: 8px;
+          font-size: 18px;
+          font-weight: 950;
+          letter-spacing: -0.2px;
+          color: #111827;
+        }
+
+        .hint {
+          margin-top: 8px;
+          font-size: 12px;
+          font-weight: 900;
+          color: #065f46;
+        }
+
+        .desc {
+          margin-top: 10px;
+          color: #374151;
+          font-size: 14px;
+          min-height: 40px;
+        }
+
+        .socialRow {
+          margin-top: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        .metaRight {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          gap: 8px 12px;
+          color: #6b7280;
+          font-weight: 900;
+          font-size: 12px;
+          text-align: right;
+        }
+
+        .loveBtn {
+          height: 40px;
+          min-width: 72px;
+          padding: 0 12px;
+          border-radius: 999px;
+          border: 1px solid #e5e7eb;
+          background: #ffffff;
+          color: #475569;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
           cursor: pointer;
+          box-shadow: 0 6px 16px rgba(15, 23, 42, 0.05);
+          flex-shrink: 0;
         }
 
-        .skeletonCard {
-          height: 320px;
-          border-radius: 22px;
-          border: 1px solid var(--border);
-          background: linear-gradient(90deg, #f3f4f6 25%, #fafafa 50%, #f3f4f6 75%);
-          background-size: 200% 100%;
-          animation: shimmer 1.2s infinite linear;
+        .loveBtn.active {
+          color: #ec4899;
+          border-color: #fbcfe8;
+          background: #fff1f7;
         }
 
-        @keyframes shimmer {
-          0% {
-            background-position: 200% 0;
-          }
-          100% {
-            background-position: -200% 0;
-          }
+        .loveBtnGlyph {
+          font-size: 19px;
+          line-height: 1;
+        }
+
+        .loveBtnCount {
+          font-size: 13px;
+          font-weight: 950;
+          line-height: 1;
+        }
+
+        .small {
+          font-size: 12px;
+        }
+
+        .actions {
+          margin-top: 12px;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+
+        .btn {
+          width: 100%;
+          padding: 10px 12px;
+          border-radius: 14px;
+          cursor: pointer;
+          font-weight: 950;
+          border: 1px solid #e5e7eb;
+          transition: background 0.15s ease;
+        }
+
+        .btnGhost {
+          background: #ffffff;
+          color: #111827;
+          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+        }
+
+        .btnPrimary {
+          border: none;
+          background: #10b981;
+          color: #ffffff;
+          box-shadow: 0 14px 30px rgba(16, 185, 129, 0.2);
+        }
+
+        .btnOn {
+          background: rgba(16, 185, 129, 0.14);
+          color: #065f46;
+          border: 1px solid rgba(16, 185, 129, 0.35);
+          box-shadow: 0 10px 22px rgba(16, 185, 129, 0.14);
+        }
+
+        .btnDisabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+          background: #f3f4f6;
+          border: 1px solid #e5e7eb;
+          color: #6b7280;
+          box-shadow: none;
         }
 
         .clamp2 {
@@ -3281,8 +2877,8 @@ export default function FeedPage() {
           width: min(1000px, 95vw);
           max-height: 90vh;
           background: #ffffff;
-          border: 1px solid var(--border);
-          border-radius: 18px;
+          border: 1px solid #e5e7eb;
+          border-radius: 16px;
           overflow: hidden;
           box-shadow: 0 30px 80px rgba(0, 0, 0, 0.2);
         }
@@ -3292,25 +2888,25 @@ export default function FeedPage() {
           align-items: center;
           justify-content: space-between;
           padding: 10px 12px;
-          border-bottom: 1px solid var(--border);
+          border-bottom: 1px solid #e5e7eb;
         }
 
         .modalTitle {
-          font-weight: 800;
+          font-weight: 950;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
-          color: var(--text);
+          color: #111827;
         }
 
         .modalClose {
           background: #ffffff;
-          color: var(--text);
-          border: 1px solid var(--border);
+          color: #111827;
+          border: 1px solid #e5e7eb;
           padding: 6px 10px;
           border-radius: 12px;
           cursor: pointer;
-          font-weight: 800;
+          font-weight: 950;
         }
 
         .modalImg {
@@ -3323,6 +2919,24 @@ export default function FeedPage() {
         }
 
         @media (max-width: 560px) {
+          .actions {
+            grid-template-columns: 1fr 1fr;
+          }
+
+          .socialRow {
+            align-items: flex-start;
+            flex-direction: column;
+          }
+
+          .metaRight {
+            justify-content: flex-start;
+            text-align: left;
+          }
+
+          .bigHeartBurst {
+            font-size: 78px;
+          }
+
           .notifTop {
             align-items: flex-start;
           }
@@ -3334,19 +2948,6 @@ export default function FeedPage() {
 
           .notifGhostBtn {
             width: 100%;
-          }
-
-          .bottomRow {
-            align-items: flex-start;
-            flex-direction: column;
-          }
-
-          .primaryInlineBtn {
-            width: 100%;
-          }
-
-          .bigHeartBurst {
-            font-size: 78px;
           }
         }
       `}</style>
