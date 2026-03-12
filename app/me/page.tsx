@@ -258,35 +258,29 @@ function isPast(ts: string | null | undefined) {
   return ms < Date.now();
 }
 
-function getEffectiveItemStatus(
-  item: Pick<MyItemRow, "status" | "post_type" | "expires_at" | "starts_at" | "ends_at">
-) {
-  const raw = normStatus(item.status);
-  const type = item.post_type ?? "give";
-
-  if (type === "event") {
-    const eventEnd = item.ends_at ?? item.starts_at ?? null;
-    if (eventEnd && isPast(eventEnd)) return "completed";
-    return raw || "available";
-  }
-
-  if (raw === "claimed" || raw === "completed" || raw === "expired" || raw === "reserved") {
-    return raw;
-  }
-
-  if (item.expires_at && isPast(item.expires_at)) {
-    return "expired";
-  }
-
-  return raw || "available";
+function itemTypeLabel(type: "give" | "request" | "event" | null | undefined) {
+  if (type === "request") return "Request";
+  if (type === "event") return "Event";
+  return "Item";
 }
 
-function isArchivedItem(item: MyItemRow) {
-  const status = getEffectiveItemStatus(item);
-  const type = item.post_type ?? "give";
+function mediaTabLabel(tab: MediaTab) {
+  if (tab === "request") return "Requests";
+  if (tab === "event") return "Events";
+  return "Items";
+}
 
-  if (type === "event") return status === "completed";
-  return ["claimed", "completed", "expired"].includes(status);
+function matchesTab(item: MyItemRow, tab: MediaTab) {
+  const t = item.post_type ?? "give";
+  if (tab === "give") return t === "give" || t === null;
+  return t === tab;
+}
+
+function getFriendlyError(e: unknown) {
+  if (!e) return "Something went wrong.";
+  if (typeof e === "string") return e;
+  if (e instanceof Error) return e.message;
+  return "Something went wrong.";
 }
 
 function fmtWhen(ts: string | null | undefined) {
@@ -329,38 +323,57 @@ function readableName(
 function toneForStatus(status: string | null | undefined): "green" | "amber" | "red" | "gray" {
   const s = normStatus(status);
   if (["accepted", "reserved", "claimed", "completed"].includes(s)) return "green";
-  if (["pending", "hold", "available"].includes(s)) return "amber";
-  if (["declined", "expired", "withdrawn"].includes(s)) return "red";
+  if (["pending", "hold", "available", "open"].includes(s)) return "amber";
+  if (["declined", "expired", "withdrawn", "closed", "cancelled"].includes(s)) return "red";
   return "gray";
-}
-
-function itemTypeLabel(type: "give" | "request" | "event" | null | undefined) {
-  if (type === "request") return "Request";
-  if (type === "event") return "Event";
-  return "Item";
-}
-
-function mediaTabLabel(tab: MediaTab) {
-  if (tab === "request") return "Requests";
-  if (tab === "event") return "Events";
-  return "Items";
-}
-
-function matchesTab(item: MyItemRow, tab: MediaTab) {
-  const t = item.post_type ?? "give";
-  if (tab === "give") return t === "give" || t === null;
-  return t === tab;
-}
-
-function getFriendlyError(e: unknown) {
-  if (!e) return "Something went wrong.";
-  if (typeof e === "string") return e;
-  if (e instanceof Error) return e.message;
-  return "Something went wrong.";
 }
 
 function getPostHref(item: { id: string; post_type?: "give" | "request" | "event" | null }) {
   return item.post_type === "event" ? `/event/${item.id}` : `/item/${item.id}`;
+}
+
+function getRequestStatusLabel(raw: string | null | undefined) {
+  const s = normStatus(raw);
+  if (s === "completed") return "fulfilled";
+  if (s === "closed") return "closed";
+  if (s === "cancelled") return "cancelled";
+  if (s === "open") return "open";
+  return s || "open";
+}
+
+function getEffectiveItemStatus(
+  item: Pick<MyItemRow, "status" | "post_type" | "expires_at" | "starts_at" | "ends_at">
+) {
+  const raw = normStatus(item.status);
+  const type = item.post_type ?? "give";
+
+  if (type === "event") {
+    const eventEnd = item.ends_at ?? item.starts_at ?? null;
+    if (eventEnd && isPast(eventEnd)) return "completed";
+    return raw || "available";
+  }
+
+  if (type === "request") {
+    if (["completed", "closed", "cancelled"].includes(raw)) return raw;
+    return raw || "open";
+  }
+
+  if (["claimed", "completed", "expired", "reserved"].includes(raw)) return raw;
+
+  if (item.expires_at && isPast(item.expires_at)) {
+    return "expired";
+  }
+
+  return raw || "available";
+}
+
+function isArchivedItem(item: MyItemRow) {
+  const status = getEffectiveItemStatus(item);
+  const type = item.post_type ?? "give";
+
+  if (type === "event") return status === "completed";
+  if (type === "request") return ["completed", "closed", "cancelled"].includes(status);
+  return ["claimed", "completed", "expired"].includes(status);
 }
 
 /* ==============================
@@ -981,6 +994,7 @@ export default function AccountPage() {
         () => {
           void loadIncomingOffers(userId);
           void loadMyOffers(userId);
+          void loadMyListings(userId);
         }
       )
       .on(
@@ -993,6 +1007,7 @@ export default function AccountPage() {
         () => {
           void loadIncomingInterests(userId);
           void loadMyRequests(userId);
+          void loadMyListings(userId);
         }
       )
       .subscribe();
@@ -1323,7 +1338,11 @@ export default function AccountPage() {
                         key={`${r.item_id}-${r.created_at ?? i}`}
                         photoUrl={r.item?.photo_url ?? null}
                         title={r.item?.title ?? "Unknown post"}
-                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${r.item?.status ?? "—"}`}
+                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${
+                          r.item?.post_type === "request"
+                            ? getRequestStatusLabel(r.item?.status)
+                            : r.item?.status ?? "—"
+                        }`}
                         chips={[
                           { label: "Interest sent", tone: "green" },
                           { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
@@ -1350,7 +1369,9 @@ export default function AccountPage() {
                         <MyOfferCard
                           key={o.id}
                           title={`You offered help on ${o.request_item?.title ?? "a request"}`}
-                          subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
+                          subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${
+                            o.availability ? `Availability: ${o.availability}` : "Availability not provided"
+                          }`}
                           note={o.note}
                           status={status}
                           busy={acting}
@@ -1401,6 +1422,11 @@ function ProfileMediaCard({
   const effectiveStatus = getEffectiveItemStatus(item);
   const statusTone = toneForStatus(effectiveStatus);
 
+  const statusLabel =
+    item.post_type === "request"
+      ? getRequestStatusLabel(effectiveStatus)
+      : effectiveStatus;
+
   return (
     <button className="profile-media-card" onClick={onClick} type="button">
       <div className="profile-media-frame">
@@ -1422,7 +1448,7 @@ function ProfileMediaCard({
         <div className="media-bottom">
           <div className="media-title">{item.title}</div>
           <div className="media-meta-row">
-            <span className={`media-status ${statusTone}`}>{effectiveStatus}</span>
+            <span className={`media-status ${statusTone}`}>{statusLabel}</span>
             <span className="media-date">{fmtShort(item.created_at)}</span>
           </div>
         </div>
