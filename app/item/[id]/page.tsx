@@ -619,7 +619,7 @@ export default function ItemDetailPage() {
 
           if (!completedErr) {
             const normalizedCompletedRows: CompletedInterestRow[] = (
-              ((completedRows ?? []) as CompletedInterestQueryRow[])
+              (((completedRows ?? []) as CompletedInterestQueryRow[]))
             ).map((row) => ({
               id: row.id,
               item_id: row.item_id,
@@ -1027,7 +1027,7 @@ export default function ItemDetailPage() {
   }, []);
 
   return (
-    <div className="page">
+    <div className={`page page-${postType}`}>
       <div className="shell">
         <header className="topBar">
           <button className="iconBtn" onClick={() => router.back()} aria-label="Back" type="button">
@@ -1047,10 +1047,10 @@ export default function ItemDetailPage() {
         {!loading && !err && !item && <div className="alert err">Post not found.</div>}
 
         {!loading && item && (
-          <section className="card">
+          <section className={`card card-${postType}`}>
             <div className="cardTop">
               <div className="authorSide">
-                <div className="avatar">{initials(ownerLabel)}</div>
+                <div className={`avatar avatar-${postType}`}>{initials(ownerLabel)}</div>
 
                 <div className="authorText">
                   <div className="authorName">{ownerLabel}</div>
@@ -1143,7 +1143,7 @@ export default function ItemDetailPage() {
                   <img src={item.photo_url} alt={item.title} className="heroImg" />
                 </button>
               ) : (
-                <div className="noPhoto">No image</div>
+                <div className={`noPhoto noPhoto-${postType}`}>No image</div>
               )}
             </div>
 
@@ -1175,7 +1175,9 @@ export default function ItemDetailPage() {
 
                 <span className="dot">•</span>
 
-                <span className={`statusPill ${itemStateChip.tone}`}>{itemStateChip.label}</span>
+                <span className={`statusPill ${itemStateChip.tone} ${postType}`}>
+                  {itemStateChip.label}
+                </span>
 
                 <span className="dot">•</span>
 
@@ -1202,7 +1204,7 @@ export default function ItemDetailPage() {
                   </div>
                 </div>
               ) : (postType === "give" && giveFlow) || (postType === "request" && requestFlow) ? (
-                <div className="flowCard">
+                <div className={`flowCard flowCard-${postType}`}>
                   <div className="flowTitle">
                     {postType === "give" ? giveFlow?.title : requestFlow?.title}
                   </div>
@@ -1214,7 +1216,7 @@ export default function ItemDetailPage() {
                     {postType === "give" && giveFlow ? (
                       <>
                         <button
-                          className="primaryAction"
+                          className={`primaryAction primaryAction-${postType}`}
                           type="button"
                           disabled={giveFlow.primaryDisabled || !!actionBusy}
                           onClick={() => {
@@ -1266,7 +1268,7 @@ export default function ItemDetailPage() {
                     {postType === "request" && requestFlow ? (
                       <>
                         <button
-                          className="primaryAction"
+                          className={`primaryAction primaryAction-${postType}`}
                           type="button"
                           disabled={requestFlow.primaryDisabled || !!actionBusy}
                           onClick={() => {
@@ -1378,9 +1380,16 @@ export default function ItemDetailPage() {
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background: #f6f7fb;
           color: #0f172a;
           padding: 12px 12px 28px;
+        }
+
+        .page-give {
+          background: #f7f8f7;
+        }
+
+        .page-request {
+          background: #fbf8f3;
         }
 
         .shell {
@@ -1397,8 +1406,15 @@ export default function ItemDetailPage() {
           align-items: center;
           gap: 10px;
           padding: 6px 0 12px;
-          background: rgba(246, 247, 251, 0.9);
           backdrop-filter: blur(12px);
+        }
+
+        .page-give .topBar {
+          background: rgba(247, 248, 247, 0.9);
+        }
+
+        .page-request .topBar {
+          background: rgba(251, 248, 243, 0.9);
         }
 
         .iconBtn,
@@ -1457,10 +1473,19 @@ export default function ItemDetailPage() {
         .card {
           margin-top: 8px;
           background: #fff;
-          border: 1px solid #e5e7eb;
           border-radius: 24px;
           overflow: hidden;
           box-shadow: 0 16px 40px rgba(15, 23, 42, 0.05);
+        }
+
+        .card-give {
+          border: 1px solid rgba(16, 185, 129, 0.2);
+          background: linear-gradient(180deg, rgba(16, 185, 129, 0.04), #ffffff 34%);
+        }
+
+        .card-request {
+          border: 1px solid rgba(245, 158, 11, 0.22);
+          background: linear-gradient(180deg, rgba(245, 158, 11, 0.04), #ffffff 34%);
         }
 
         .cardTop {
@@ -1485,11 +1510,21 @@ export default function ItemDetailPage() {
           border-radius: 999px;
           display: grid;
           place-items: center;
-          border: 1px solid #dbe3f0;
-          background: linear-gradient(135deg, #e0e7ff 0%, #dbeafe 100%);
           font-size: 12px;
           font-weight: 1000;
           flex: 0 0 auto;
+        }
+
+        .avatar-give {
+          border: 1px solid rgba(16, 185, 129, 0.18);
+          background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), #f0fdf4 100%);
+          color: #065f46;
+        }
+
+        .avatar-request {
+          border: 1px solid rgba(245, 158, 11, 0.18);
+          background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), #fffbeb 100%);
+          color: #92400e;
         }
 
         .authorText {
@@ -1620,6 +1655,14 @@ export default function ItemDetailPage() {
           font-weight: 800;
         }
 
+        .noPhoto-give {
+          background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), #f8fafc);
+        }
+
+        .noPhoto-request {
+          background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), #f8fafc);
+        }
+
         .body {
           padding: 14px 14px 16px;
         }
@@ -1680,13 +1723,15 @@ export default function ItemDetailPage() {
           border: 1px solid #e5e7eb;
         }
 
-        .statusPill.good {
+        .statusPill.good.give,
+        .statusPill.good.request {
           color: #166534;
           border-color: #bbf7d0;
           background: #ecfdf5;
         }
 
-        .statusPill.warn {
+        .statusPill.warn.give,
+        .statusPill.warn.request {
           color: #92400e;
           border-color: #fde68a;
           background: #fffbeb;
@@ -1705,7 +1750,16 @@ export default function ItemDetailPage() {
           padding: 14px;
           border-radius: 18px;
           border: 1px solid #e5e7eb;
-          background: #f8fafc;
+        }
+
+        .flowCard-give {
+          border-color: rgba(16, 185, 129, 0.16);
+          background: linear-gradient(180deg, rgba(16, 185, 129, 0.06), #f8fafc);
+        }
+
+        .flowCard-request {
+          border-color: rgba(245, 158, 11, 0.16);
+          background: linear-gradient(180deg, rgba(245, 158, 11, 0.06), #fffaf0);
         }
 
         .archivedCard {
@@ -1777,10 +1831,16 @@ export default function ItemDetailPage() {
           cursor: pointer;
         }
 
-        .primaryAction {
+        .primaryAction-give {
           border: 1px solid rgba(16, 185, 129, 0.26);
           background: rgba(16, 185, 129, 0.12);
           color: #065f46;
+        }
+
+        .primaryAction-request {
+          border: 1px solid rgba(245, 158, 11, 0.26);
+          background: rgba(245, 158, 11, 0.12);
+          color: #92400e;
         }
 
         .secondaryAction {
@@ -1821,9 +1881,9 @@ export default function ItemDetailPage() {
           justify-content: center;
           padding: 7px 10px;
           border-radius: 999px;
-          border: 1px solid #dbeafe;
-          background: #eff6ff;
-          color: #1d4ed8;
+          border: 1px solid rgba(245, 158, 11, 0.2);
+          background: rgba(245, 158, 11, 0.1);
+          color: #92400e;
           font-size: 11px;
           font-weight: 900;
         }
