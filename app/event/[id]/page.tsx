@@ -1050,10 +1050,8 @@ export default function EventDetailPage() {
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background:
-            radial-gradient(circle at top, rgba(99, 102, 241, 0.06), transparent 32%),
-            linear-gradient(180deg, #f8fafc 0%, #f3f4f6 100%);
-          color: #0f172a;
+          background: #f6f8fc;
+          color: #111827;
           padding: 12px 12px 32px;
         }
 
@@ -1071,7 +1069,7 @@ export default function EventDetailPage() {
           align-items: center;
           gap: 10px;
           padding: 6px 0 14px;
-          background: rgba(248, 250, 252, 0.9);
+          background: rgba(246, 248, 252, 0.9);
           backdrop-filter: blur(14px);
         }
 
@@ -1106,16 +1104,16 @@ export default function EventDetailPage() {
         .iconBtn {
           width: 42px;
           height: 42px;
-          border-radius: 999px;
-          border: 1px solid rgba(226, 232, 240, 0.95);
-          background: rgba(255, 255, 255, 0.96);
-          color: #0f172a;
+          border-radius: 14px;
+          border: 1px solid #e5e7eb;
+          background: rgba(255, 255, 255, 0.94);
+          color: #111827;
           font-size: 18px;
           font-weight: 900;
           cursor: pointer;
           display: grid;
           place-items: center;
-          box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
+          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
         }
 
         .iconBtn.small {
@@ -1127,7 +1125,7 @@ export default function EventDetailPage() {
         .notice {
           margin-top: 6px;
           border-radius: 18px;
-          border: 1px solid #e2e8f0;
+          border: 1px solid #e5e7eb;
           background: rgba(255, 255, 255, 0.92);
           padding: 12px 14px;
           font-size: 13px;
@@ -1144,16 +1142,16 @@ export default function EventDetailPage() {
         .eventCard {
           margin-top: 8px;
           overflow: hidden;
-          border-radius: 30px;
-          border: 1px solid rgba(226, 232, 240, 0.92);
-          background: rgba(255, 255, 255, 0.92);
-          box-shadow: 0 24px 60px rgba(15, 23, 42, 0.08);
+          border-radius: 22px;
+          border: 1px solid rgba(59, 130, 246, 0.2);
+          background: linear-gradient(180deg, rgba(59, 130, 246, 0.04), #ffffff 34%);
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.05);
         }
 
         .hero {
           position: relative;
           min-height: 350px;
-          background: #e5e7eb;
+          background: #f3f4f6;
           overflow: hidden;
         }
 
@@ -1181,10 +1179,8 @@ export default function EventDetailPage() {
           align-items: center;
           justify-content: center;
           gap: 10px;
-          background:
-            radial-gradient(circle at top, rgba(99, 102, 241, 0.18), transparent 34%),
-            linear-gradient(135deg, #0f172a 0%, #1e293b 45%, #334155 100%);
-          color: #fff;
+          background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), #f8fafc);
+          color: #475569;
         }
 
         .heroFallbackIcon {
@@ -1193,15 +1189,17 @@ export default function EventDetailPage() {
           display: grid;
           place-items: center;
           border-radius: 18px;
-          background: rgba(255, 255, 255, 0.12);
+          background: rgba(255, 255, 255, 0.82);
+          border: 1px solid rgba(59, 130, 246, 0.16);
           font-size: 24px;
           font-weight: 900;
+          color: #1d4ed8;
         }
 
         .heroFallbackText {
           font-size: 13px;
           font-weight: 800;
-          opacity: 0.88;
+          color: #64748b;
         }
 
         .heroShade {
@@ -1209,18 +1207,18 @@ export default function EventDetailPage() {
           inset: 0;
           background: linear-gradient(
             180deg,
-            rgba(15, 23, 42, 0.1) 0%,
-            rgba(15, 23, 42, 0.16) 28%,
-            rgba(15, 23, 42, 0.82) 100%
+            rgba(15, 23, 42, 0.02) 0%,
+            rgba(15, 23, 42, 0.06) 24%,
+            rgba(15, 23, 42, 0.62) 100%
           );
           pointer-events: none;
         }
 
         .heroTop {
           position: absolute;
-          top: 14px;
-          left: 14px;
-          right: 14px;
+          top: 12px;
+          left: 12px;
+          right: 12px;
           z-index: 2;
           display: flex;
           align-items: flex-start;
@@ -1235,9 +1233,9 @@ export default function EventDetailPage() {
 
         .heroBottom {
           position: absolute;
-          left: 16px;
-          right: 16px;
-          bottom: 16px;
+          left: 14px;
+          right: 14px;
+          bottom: 14px;
           z-index: 2;
         }
 
@@ -1306,54 +1304,53 @@ export default function EventDetailPage() {
           align-items: center;
           justify-content: center;
           border-radius: 999px;
-          backdrop-filter: blur(10px);
           border: 1px solid rgba(255, 255, 255, 0.18);
-          background: rgba(255, 255, 255, 0.14);
-          color: #fff;
+          background: rgba(255, 255, 255, 0.88);
+          color: #111827;
           font-size: 12px;
           font-weight: 900;
-          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.15);
+          backdrop-filter: blur(6px);
         }
 
         .statePill.good {
-          background: rgba(34, 197, 94, 0.18);
-          border-color: rgba(187, 247, 208, 0.3);
+          border-color: rgba(59, 130, 246, 0.2);
+          color: #1d4ed8;
         }
 
         .statePill.closed,
         .statePill.neutral {
-          background: rgba(15, 23, 42, 0.24);
-          border-color: rgba(255, 255, 255, 0.16);
+          border-color: rgba(226, 232, 240, 0.95);
+          color: #475569;
         }
 
         .heroActionBtn {
-          min-width: 42px;
-          height: 42px;
+          min-width: 56px;
+          height: 34px;
+          padding: 0 10px;
+          border-radius: 999px;
+          border: 1px solid rgba(255, 255, 255, 0.85);
+          background: rgba(255, 255, 255, 0.88);
+          backdrop-filter: blur(8px);
+          color: #475569;
           display: inline-flex;
           align-items: center;
           justify-content: center;
           gap: 6px;
-          border-radius: 999px;
-          border: 1px solid rgba(255, 255, 255, 0.18);
-          background: rgba(255, 255, 255, 0.14);
-          backdrop-filter: blur(10px);
-          color: #fff;
-          font-size: 22px;
-          font-weight: 900;
           cursor: pointer;
-          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
-          padding: 0 12px;
+          box-shadow: 0 6px 16px rgba(15, 23, 42, 0.05);
+          font-size: 17px;
+          font-weight: 900;
         }
 
         .heroActionBtn.love.active {
-          color: #fecdd3;
-          background: rgba(190, 24, 93, 0.18);
-          border-color: rgba(251, 207, 232, 0.28);
+          color: #ec4899;
+          border-color: #fbcfe8;
+          background: rgba(255, 241, 247, 0.95);
         }
 
         .loveTinyCount {
           font-size: 12px;
-          font-weight: 900;
+          font-weight: 800;
           line-height: 1;
         }
 
@@ -1371,10 +1368,10 @@ export default function EventDetailPage() {
           position: absolute;
           width: 220px;
           overflow: hidden;
-          border-radius: 18px;
-          border: 1px solid #e2e8f0;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
           background: rgba(255, 255, 255, 0.98);
-          box-shadow: 0 20px 50px rgba(15, 23, 42, 0.16);
+          box-shadow: 0 20px 44px rgba(15, 23, 42, 0.14);
           z-index: 41;
         }
 
@@ -1391,7 +1388,7 @@ export default function EventDetailPage() {
           padding: 13px 14px;
           font-size: 13px;
           font-weight: 850;
-          color: #0f172a;
+          color: #111827;
           cursor: pointer;
         }
 
@@ -1409,9 +1406,9 @@ export default function EventDetailPage() {
 
         .actionCard {
           padding: 16px;
-          border-radius: 22px;
-          border: 1px solid #dbeafe;
-          background: linear-gradient(180deg, rgba(239, 246, 255, 0.96) 0%, rgba(248, 250, 252, 0.96) 100%);
+          border-radius: 20px;
+          border: 1px solid rgba(59, 130, 246, 0.16);
+          background: linear-gradient(180deg, rgba(59, 130, 246, 0.06), #f8fafc);
         }
 
         .actionText {
@@ -1421,7 +1418,7 @@ export default function EventDetailPage() {
         .actionTitle {
           font-size: 15px;
           font-weight: 1000;
-          color: #0f172a;
+          color: #111827;
         }
 
         .actionBody {
@@ -1455,8 +1452,8 @@ export default function EventDetailPage() {
         }
 
         .summaryTile.strong {
-          border-color: #dbeafe;
-          background: linear-gradient(180deg, #eff6ff 0%, #f8fafc 100%);
+          border-color: rgba(59, 130, 246, 0.16);
+          background: linear-gradient(180deg, rgba(59, 130, 246, 0.08) 0%, #f8fafc 100%);
         }
 
         .summaryLabel {
@@ -1472,7 +1469,7 @@ export default function EventDetailPage() {
           font-size: 17px;
           line-height: 1.25;
           font-weight: 1000;
-          color: #0f172a;
+          color: #111827;
           overflow-wrap: anywhere;
         }
 
@@ -1498,7 +1495,7 @@ export default function EventDetailPage() {
         .section {
           margin-top: 16px;
           padding: 16px;
-          border-radius: 22px;
+          border-radius: 20px;
           border: 1px solid #e2e8f0;
           background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
         }
@@ -1514,7 +1511,7 @@ export default function EventDetailPage() {
           font-size: 13px;
           font-weight: 1000;
           letter-spacing: 0.02em;
-          color: #0f172a;
+          color: #111827;
         }
 
         .sectionMeta {
@@ -1547,10 +1544,11 @@ export default function EventDetailPage() {
           display: grid;
           place-items: center;
           flex: 0 0 auto;
-          background: linear-gradient(135deg, #dbeafe 0%, #ede9fe 100%);
-          border: 1px solid #dbe3f0;
+          background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), #f8fafc 100%);
+          border: 1px solid rgba(59, 130, 246, 0.16);
           font-size: 14px;
           font-weight: 1000;
+          color: #1d4ed8;
         }
 
         .hostCopy {
@@ -1561,7 +1559,7 @@ export default function EventDetailPage() {
         .hostName {
           font-size: 15px;
           font-weight: 1000;
-          color: #0f172a;
+          color: #111827;
           overflow-wrap: anywhere;
         }
 
@@ -1609,10 +1607,11 @@ export default function EventDetailPage() {
           display: grid;
           place-items: center;
           flex: 0 0 auto;
-          background: linear-gradient(135deg, #eef2ff 0%, #f5f3ff 100%);
-          border: 1px solid #e2e8f0;
+          background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), #f8fafc 100%);
+          border: 1px solid rgba(59, 130, 246, 0.12);
           font-size: 12px;
           font-weight: 1000;
+          color: #1d4ed8;
         }
 
         .personCopy {
@@ -1623,7 +1622,7 @@ export default function EventDetailPage() {
         .personName {
           font-size: 14px;
           font-weight: 900;
-          color: #0f172a;
+          color: #111827;
           overflow-wrap: anywhere;
         }
 
@@ -1664,7 +1663,7 @@ export default function EventDetailPage() {
           font-size: 13px;
           line-height: 1.5;
           font-weight: 850;
-          color: #0f172a;
+          color: #111827;
           overflow-wrap: anywhere;
         }
 
@@ -1684,7 +1683,7 @@ export default function EventDetailPage() {
           margin-top: 10px;
           font-size: 14px;
           line-height: 1.72;
-          color: #334155;
+          color: #374151;
           white-space: pre-wrap;
           overflow-wrap: anywhere;
         }
@@ -1731,7 +1730,8 @@ export default function EventDetailPage() {
           place-items: center;
           font-size: 11px;
           font-weight: 1000;
-          color: #475569;
+          color: #1d4ed8;
+          background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), #f8fafc);
         }
 
         .relatedBody {
@@ -1742,7 +1742,7 @@ export default function EventDetailPage() {
         .relatedTitle {
           font-size: 14px;
           font-weight: 1000;
-          color: #0f172a;
+          color: #111827;
           line-height: 1.35;
           overflow-wrap: anywhere;
         }
@@ -1776,16 +1776,15 @@ export default function EventDetailPage() {
         }
 
         .primaryBtn {
-          border: 1px solid rgba(59, 130, 246, 0.22);
-          background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
-          color: #fff;
-          box-shadow: 0 14px 28px rgba(37, 99, 235, 0.18);
+          border: 1px solid rgba(59, 130, 246, 0.24);
+          background: rgba(59, 130, 246, 0.12);
+          color: #1d4ed8;
         }
 
         .secondaryBtn {
           border: 1px solid #e2e8f0;
           background: rgba(255, 255, 255, 0.86);
-          color: #0f172a;
+          color: #111827;
         }
 
         .primaryBtn:disabled,
@@ -1815,10 +1814,10 @@ export default function EventDetailPage() {
         .imageCard {
           width: 100%;
           max-width: 560px;
-          border-radius: 26px;
+          border-radius: 22px;
           border: 1px solid #e2e8f0;
           background: #fff;
-          box-shadow: 0 34px 90px rgba(15, 23, 42, 0.2);
+          box-shadow: 0 30px 80px rgba(15, 23, 42, 0.2);
         }
 
         .modalCard {
@@ -1828,7 +1827,7 @@ export default function EventDetailPage() {
         .modalTitle {
           font-size: 17px;
           font-weight: 1000;
-          color: #0f172a;
+          color: #111827;
         }
 
         .modalText {
@@ -1859,7 +1858,7 @@ export default function EventDetailPage() {
         .ghostBtn {
           border: 1px solid #e2e8f0;
           background: #fff;
-          color: #0f172a;
+          color: #111827;
         }
 
         .dangerBtn {
@@ -1891,7 +1890,7 @@ export default function EventDetailPage() {
           width: 100%;
           max-height: 80vh;
           object-fit: contain;
-          background: #0f172a;
+          background: #111827;
         }
 
         .toast {
