@@ -13,8 +13,9 @@ import { ensureThread } from "@/lib/ensureThread";
 
 type MediaTab = "give" | "request" | "event";
 type GridMode = "active" | "archived";
-type DrawerSection = "menu" | "notifications" | "requests" | "activity";
+type DrawerSection = "menu" | "activity";
 type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
+type SortMode = "newest" | "oldest";
 type ToastState = { msg: string; kind?: "ok" | "err" } | null;
 
 type ConfirmState =
@@ -102,41 +103,6 @@ type IncomingOfferRow = {
     email: string | null;
     user_role: string | null;
   } | null;
-};
-
-type NotificationType =
-  | "item_interest_created"
-  | "item_interest_accepted"
-  | "item_interest_declined"
-  | "help_offer_created"
-  | "help_offer_accepted"
-  | "help_offer_declined"
-  | "event_joined"
-  | "event_left"
-  | "event_updated"
-  | "message_received"
-  | "system_notice"
-  | string;
-
-type NotificationRow = {
-  id: string;
-  recipient_id: string | null;
-  actor_id: string | null;
-  type: NotificationType;
-  category: string | null;
-  entity_type: string | null;
-  entity_id: string | null;
-  parent_entity_type: string | null;
-  parent_entity_id: string | null;
-  title: string | null;
-  body: string | null;
-  image_url: string | null;
-  action_url: string | null;
-  is_read: boolean | null;
-  read_at: string | null;
-  is_hidden: boolean | null;
-  hidden_at: string | null;
-  created_at: string;
 };
 
 type MyRequestQueryRow = {
@@ -293,7 +259,9 @@ function isPast(ts: string | null | undefined) {
   return ms < Date.now();
 }
 
-function getEffectiveItemStatus(item: Pick<MyItemRow, "status" | "post_type" | "expires_at" | "starts_at" | "ends_at">) {
+function getEffectiveItemStatus(
+  item: Pick<MyItemRow, "status" | "post_type" | "expires_at" | "starts_at" | "ends_at">
+) {
   const raw = normStatus(item.status);
   const type = item.post_type ?? "give";
 
@@ -318,10 +286,7 @@ function isArchivedItem(item: MyItemRow) {
   const status = getEffectiveItemStatus(item);
   const type = item.post_type ?? "give";
 
-  if (type === "event") {
-    return status === "completed";
-  }
-
+  if (type === "event") return status === "completed";
   return ["claimed", "completed", "expired"].includes(status);
 }
 
@@ -346,9 +311,9 @@ function fmtShort(ts: string | null | undefined) {
 function readableRole(role: string | null | undefined) {
   const raw = (role ?? "").trim().toLowerCase();
   if (!raw) return "Ashland member";
-  if (raw === "student") return "Student member";
-  if (raw === "faculty") return "Faculty member";
-  return raw;
+  if (raw === "student") return "Student";
+  if (raw === "faculty") return "Faculty";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
 function readableName(
@@ -399,12 +364,15 @@ function getPostHref(item: { id: string; post_type?: "give" | "request" | "event
   return item.post_type === "event" ? `/event/${item.id}` : `/item/${item.id}`;
 }
 
-function normalizeActionUrl(url: string) {
-  if (!url.startsWith("/")) return url;
-  if (url.startsWith("/manage/")) {
-    return url.replace("/manage/", "/item/");
-  }
-  return url;
+function getManageHref(item: { id: string; post_type?: "give" | "request" | "event" | null }) {
+  if (item.post_type === "event") return `/event/${item.id}`;
+  return `/manage/${item.id}`;
+}
+
+function tabTheme(tab: MediaTab) {
+  if (tab === "request") return "amber";
+  if (tab === "event") return "blue";
+  return "green";
 }
 
 /* ==============================
@@ -434,10 +402,14 @@ export default function AccountPage() {
   const [myOffers, setMyOffers] = useState<MyOfferRow[]>([]);
   const [incomingInterests, setIncomingInterests] = useState<IncomingInterestRow[]>([]);
   const [incomingOffers, setIncomingOffers] = useState<IncomingOfferRow[]>([]);
-  const [notifications, setNotifications] = useState<NotificationRow[]>([]);
+
+  const [interestCountMap, setInterestCountMap] = useState<Record<string, number>>({});
+  const [offerCountMap, setOfferCountMap] = useState<Record<string, number>>({});
+  const [attendeeCountMap, setAttendeeCountMap] = useState<Record<string, number>>({});
 
   const [mediaTab, setMediaTab] = useState<MediaTab>("give");
   const [gridMode, setGridMode] = useState<GridMode>("active");
+  const [sortMode, setSortMode] = useState<SortMode>("newest");
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerSection, setDrawerSection] = useState<DrawerSection>("menu");
@@ -447,7 +419,6 @@ export default function AccountPage() {
 
   const [incomingOfferBusyId, setIncomingOfferBusyId] = useState<string | null>(null);
   const [myOfferBusyId, setMyOfferBusyId] = useState<string | null>(null);
-  const [markingNotifs, setMarkingNotifs] = useState(false);
 
   const isLoggedIn = useMemo(() => {
     return !!userId && !!userEmail && isAshlandEmail(userEmail);
@@ -460,6 +431,7 @@ export default function AccountPage() {
 
   const displayRole = readableRole(profile?.user_role);
   const memberSince = fmtShort(profile?.created_at);
+  const theme = tabTheme(mediaTab);
 
   const itemsGive = useMemo(() => myItems.filter((x) => matchesTab(x, "give")), [myItems]);
   const itemsRequest = useMemo(() => myItems.filter((x) => matchesTab(x, "request")), [myItems]);
@@ -479,12 +451,7 @@ export default function AccountPage() {
     return currentTabItems.filter((x) => isArchivedItem(x)).length;
   }, [currentTabItems]);
 
-  const unseenNotificationCount = useMemo(
-    () => notifications.filter((n) => !n.is_read && !n.is_hidden).length,
-    [notifications]
-  );
-
-  const requestsCount = useMemo(() => {
+  const needsActionCount = useMemo(() => {
     return incomingInterests.length + incomingOffers.length;
   }, [incomingInterests.length, incomingOffers.length]);
 
@@ -493,14 +460,44 @@ export default function AccountPage() {
   }, [myOffers.length, myRequests.length]);
 
   const gridSource = useMemo(() => {
-    return currentTabItems.filter((x) => (gridMode === "active" ? !isArchivedItem(x) : isArchivedItem(x)));
-  }, [currentTabItems, gridMode]);
+    const filtered = currentTabItems.filter((x) =>
+      gridMode === "active" ? !isArchivedItem(x) : isArchivedItem(x)
+    );
+
+    const sorted = [...filtered].sort((a, b) => {
+      const aTime = new Date(a.created_at).getTime();
+      const bTime = new Date(b.created_at).getTime();
+      return sortMode === "newest" ? bTime - aTime : aTime - bTime;
+    });
+
+    return sorted;
+  }, [currentTabItems, gridMode, sortMode]);
 
   const gridTotalForTab = useMemo(() => {
     if (mediaTab === "give") return itemsGive.length;
     if (mediaTab === "request") return itemsRequest.length;
     return itemsEvent.length;
   }, [itemsEvent.length, itemsGive.length, itemsRequest.length, mediaTab]);
+
+  const recentActivityPreview = useMemo(() => {
+    const reqs = myRequests.slice(0, 2).map((r) => ({
+      key: `req-${r.item_id}-${r.created_at ?? ""}`,
+      title: r.item?.title ?? "Unknown post",
+      subtitle: r.created_at ? `Requested ${fmtWhen(r.created_at)}` : "Interest sent",
+      href: `/item/${r.item_id}`,
+      type: "interest" as const,
+    }));
+
+    const offers = myOffers.slice(0, 2).map((o) => ({
+      key: `offer-${o.id}`,
+      title: o.request_item?.title ?? "Unknown request",
+      subtitle: o.created_at ? `Offered ${fmtWhen(o.created_at)}` : "Offer sent",
+      href: `/item/${o.request_id}`,
+      type: "offer" as const,
+    }));
+
+    return [...reqs, ...offers].slice(0, 4);
+  }, [myOffers, myRequests]);
 
   const showToast = useCallback((msg: string, kind: "ok" | "err" = "ok") => {
     setToast({ msg, kind });
@@ -522,7 +519,9 @@ export default function AccountPage() {
     setMyOffers([]);
     setIncomingInterests([]);
     setIncomingOffers([]);
-    setNotifications([]);
+    setInterestCountMap({});
+    setOfferCountMap({});
+    setAttendeeCountMap({});
     setErr(null);
     setDrawerOpen(false);
     setDrawerSection("menu");
@@ -746,27 +745,58 @@ export default function AccountPage() {
     return filtered;
   }
 
-  async function loadNotifications(uid: string) {
-    const { data, error } = await supabase
-      .from("notifications")
-      .select(
-        "id,recipient_id,actor_id,type,category,entity_type,entity_id,parent_entity_type,parent_entity_id,title,body,image_url,action_url,is_read,read_at,is_hidden,hidden_at,created_at"
-      )
-      .eq("recipient_id", uid)
-      .eq("is_hidden", false)
-      .order("created_at", { ascending: false })
-      .limit(30);
+  async function loadCounts(uid: string) {
+    const [ownedItemsRes, ownedRequestsRes, ownedEventsRes] = await Promise.all([
+      supabase.from("items").select("id,post_type").eq("owner_id", uid),
+      supabase.from("items").select("id").eq("owner_id", uid).eq("post_type", "request"),
+      supabase.from("events").select("id").eq("created_by", uid),
+    ]);
 
-    if (!mountedRef.current) return [] as NotificationRow[];
+    if (!mountedRef.current) return;
 
-    if (error) {
-      setNotifications([]);
-      return [];
+    const itemIds =
+      ((ownedItemsRes.data ?? []) as Array<{ id: string; post_type: "give" | "request" | null }>).filter(
+        (x) => (x.post_type ?? "give") === "give"
+      ).map((x) => x.id);
+
+    const requestIds = ((ownedRequestsRes.data ?? []) as Array<{ id: string }>).map((x) => x.id);
+    const eventIds = ((ownedEventsRes.data ?? []) as Array<{ id: string }>).map((x) => x.id);
+
+    if (itemIds.length > 0) {
+      const { data } = await supabase.from("interests").select("item_id").in("item_id", itemIds);
+      const next: Record<string, number> = {};
+      for (const id of itemIds) next[id] = 0;
+      for (const row of ((data ?? []) as Array<{ item_id: string }>)) {
+        next[row.item_id] = (next[row.item_id] ?? 0) + 1;
+      }
+      if (mountedRef.current) setInterestCountMap(next);
+    } else {
+      setInterestCountMap({});
     }
 
-    const normalized: NotificationRow[] = ((data ?? []) as NotificationRow[]).filter((row) => !row.is_hidden);
-    setNotifications(normalized);
-    return normalized;
+    if (requestIds.length > 0) {
+      const { data } = await supabase.from("request_offers").select("request_id").in("request_id", requestIds);
+      const next: Record<string, number> = {};
+      for (const id of requestIds) next[id] = 0;
+      for (const row of ((data ?? []) as Array<{ request_id: string }>)) {
+        next[row.request_id] = (next[row.request_id] ?? 0) + 1;
+      }
+      if (mountedRef.current) setOfferCountMap(next);
+    } else {
+      setOfferCountMap({});
+    }
+
+    if (eventIds.length > 0) {
+      const { data } = await supabase.from("event_attendees").select("event_id").in("event_id", eventIds);
+      const next: Record<string, number> = {};
+      for (const id of eventIds) next[id] = 0;
+      for (const row of ((data ?? []) as Array<{ event_id: string }>)) {
+        next[row.event_id] = (next[row.event_id] ?? 0) + 1;
+      }
+      if (mountedRef.current) setAttendeeCountMap(next);
+    } else {
+      setAttendeeCountMap({});
+    }
   }
 
   const loadAllFor = useCallback(async (uid: string) => {
@@ -781,7 +811,7 @@ export default function AccountPage() {
         loadMyOffers(uid),
         loadIncomingInterests(uid),
         loadIncomingOffers(uid),
-        loadNotifications(uid),
+        loadCounts(uid),
       ]);
     } catch (e) {
       if (!mountedRef.current) return;
@@ -790,109 +820,6 @@ export default function AccountPage() {
       if (mountedRef.current) setLoading(false);
     }
   }, []);
-
-  async function markNotificationsSeen() {
-    if (!userId) return;
-
-    const unseenIds = notifications.filter((n) => !n.is_read).map((n) => n.id);
-    if (unseenIds.length === 0) return;
-
-    setMarkingNotifs(true);
-
-    try {
-      const nowIso = new Date().toISOString();
-
-      const { error } = await supabase
-        .from("notifications")
-        .update({ is_read: true, read_at: nowIso })
-        .in("id", unseenIds)
-        .eq("recipient_id", userId);
-
-      if (error) throw new Error(error.message);
-
-      if (!mountedRef.current) return;
-
-      setNotifications((prev) =>
-        prev.map((n) => (unseenIds.includes(n.id) ? { ...n, is_read: true, read_at: nowIso } : n))
-      );
-      showToast("Notifications marked seen.");
-    } catch (e) {
-      showToast(getFriendlyError(e), "err");
-    } finally {
-      if (mountedRef.current) setMarkingNotifs(false);
-    }
-  }
-
-  async function hideOfferNotifications(offerIds: string[]) {
-    if (!userId || offerIds.length === 0) return;
-
-    try {
-      const nowIso = new Date().toISOString();
-      await supabase
-        .from("notifications")
-        .update({ is_hidden: true, hidden_at: nowIso })
-        .eq("recipient_id", userId)
-        .in("entity_id", offerIds)
-        .eq("entity_type", "offer");
-    } catch {
-      // ignore
-    }
-
-    if (!mountedRef.current) return;
-    setNotifications((prev) =>
-      prev.filter((n) => !(n.entity_type === "offer" && n.entity_id && offerIds.includes(n.entity_id)))
-    );
-  }
-
-  async function openNotification(notification: NotificationRow) {
-    if (!userId) return;
-
-    try {
-      if (!notification.is_read) {
-        const nowIso = new Date().toISOString();
-
-        const { error } = await supabase
-          .from("notifications")
-          .update({ is_read: true, read_at: nowIso })
-          .eq("id", notification.id)
-          .eq("recipient_id", userId);
-
-        if (error) throw new Error(error.message);
-
-        if (mountedRef.current) {
-          setNotifications((prev) =>
-            prev.map((n) => (n.id === notification.id ? { ...n, is_read: true, read_at: nowIso } : n))
-          );
-        }
-      }
-    } catch {
-      // ignore read-mark failure
-    }
-
-    setDrawerOpen(false);
-
-    if (notification.action_url && notification.action_url.startsWith("/")) {
-      router.push(normalizeActionUrl(notification.action_url));
-      return;
-    }
-
-    if (notification.entity_type === "event" && notification.entity_id) {
-      router.push(`/event/${notification.entity_id}`);
-      return;
-    }
-
-    if (notification.parent_entity_type === "item" && notification.parent_entity_id) {
-      router.push(`/item/${notification.parent_entity_id}`);
-      return;
-    }
-
-    if (notification.entity_type === "item" && notification.entity_id) {
-      router.push(`/item/${notification.entity_id}`);
-      return;
-    }
-
-    router.push("/messages");
-  }
 
   async function acceptIncomingOffer(offer: IncomingOfferRow) {
     if (!userId || incomingOfferBusyId) return;
@@ -935,15 +862,12 @@ export default function AccountPage() {
         requesterId: offer.helper_id,
       });
 
-      await hideOfferNotifications([offer.id, ...siblingIds]);
-
       if (!mountedRef.current) return;
 
       setIncomingOffers((prev) =>
         prev.filter((x) => (x.request_item?.id ?? x.request_id) !== requestKey)
       );
 
-      setDrawerOpen(false);
       router.push(`/messages/${threadId}`);
     } catch (e) {
       showToast(getFriendlyError(e), "err");
@@ -966,8 +890,6 @@ export default function AccountPage() {
         .eq("id", offer.id);
 
       if (error) throw new Error(error.message);
-
-      await hideOfferNotifications([offer.id]);
 
       if (!mountedRef.current) return;
 
@@ -1038,7 +960,6 @@ export default function AccountPage() {
         requesterId: userId,
       });
 
-      setDrawerOpen(false);
       router.push(`/messages/${threadId}`);
     } catch (e) {
       showToast(getFriendlyError(e), "err");
@@ -1137,43 +1058,18 @@ export default function AccountPage() {
     };
   }, [clearAll, loadAllFor]);
 
-  useEffect(() => {
-    if (!isLoggedIn || !userId) return;
-
-    const channel = supabase
-      .channel(`me-notifications-${userId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "notifications",
-          filter: `recipient_id=eq.${userId}`,
-        },
-        () => {
-          void loadNotifications(userId);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      void supabase.removeChannel(channel);
-    };
-  }, [isLoggedIn, userId]);
-
   if (loading) {
     return (
       <div className="account-page">
         <div className="page-shell">
           <div className="profile-card skeleton-shell">
             <div className="skel skel-head" />
-            <div className="skel skel-pills" />
+            <div className="skel skel-actions" />
             <div className="skel skel-tabs" />
-            <div className="skel skel-filter" />
             <div className="skel skel-grid" />
           </div>
         </div>
-        <PageStyles />
+        <PageStyles theme={theme} />
       </div>
     );
   }
@@ -1184,8 +1080,8 @@ export default function AccountPage() {
         <div className="page-shell auth-shell">
           <section className="auth-card">
             <div className="auth-eyebrow">My account</div>
-            <h1 className="auth-title">Sign in to see your profile listings</h1>
-            <p className="auth-sub">Use your Ashland email to manage your posts and profile.</p>
+            <h1 className="auth-title">Sign in to manage your posts</h1>
+            <p className="auth-sub">Use your Ashland email to manage your listings, requests, and events.</p>
 
             <div className="seg-row">
               <button
@@ -1232,13 +1128,13 @@ export default function AccountPage() {
             {err ? <div className="error-text">{err}</div> : null}
           </section>
         </div>
-        <PageStyles />
+        <PageStyles theme={theme} />
       </div>
     );
   }
 
   return (
-    <div className="account-page">
+    <div className={`account-page theme-${theme}`}>
       <div className="page-shell">
         <section className="profile-card">
           <div className="profile-top">
@@ -1247,16 +1143,17 @@ export default function AccountPage() {
 
               <div className="profile-copy">
                 <h1 className="profile-name">{displayName}</h1>
-                <div className="profile-meta">
-                  <span>{displayRole}</span>
+
+                <div className="profile-role-row">
+                  <span className={`role-badge ${theme}`}>{displayRole}</span>
+                </div>
+
+                <div className="profile-email">{userEmail}</div>
+
+                <div className="profile-meta-line">
+                  {memberSince ? <span>Joined {memberSince}</span> : null}
                   <span className="dot">•</span>
-                  <span className="break-any">{userEmail}</span>
-                  {memberSince ? (
-                    <>
-                      <span className="dot">•</span>
-                      <span>Joined {memberSince}</span>
-                    </>
-                  ) : null}
+                  <span>{myItems.length} posts</span>
                 </div>
               </div>
             </div>
@@ -1273,31 +1170,135 @@ export default function AccountPage() {
             </button>
           </div>
 
-          <div className="mini-stats mini-stats-three">
-            <button
-              type="button"
-              className={`mini-pill ${unseenNotificationCount > 0 ? "active" : ""}`}
-              onClick={() => openDrawer("notifications")}
-            >
-              <span className="mini-pill-label">Notifications</span>
-              <span className="mini-pill-value">{unseenNotificationCount}</span>
+          <div className="hero-actions">
+            <button className="btn btn-primary fullish" type="button" onClick={() => router.push("/create")}>
+              Create post
             </button>
-
-            <button
-              type="button"
-              className={`mini-pill ${requestsCount > 0 ? "active" : ""}`}
-              onClick={() => openDrawer("requests")}
-            >
-              <span className="mini-pill-label">Requests</span>
-              <span className="mini-pill-value">{requestsCount}</span>
-            </button>
-
-            <button type="button" className="mini-pill" onClick={() => openDrawer("activity")}>
-              <span className="mini-pill-label">Activity</span>
-              <span className="mini-pill-value">{activityCount}</span>
+            <button className="btn btn-secondary fullish" type="button" onClick={() => router.push("/messages")}>
+              Messages
             </button>
           </div>
+
+          <div className="mini-stats mini-stats-three">
+            <div className={`mini-pill ${needsActionCount > 0 ? `active ${theme}` : ""}`}>
+              <span className="mini-pill-label">Needs action</span>
+              <span className="mini-pill-value">{needsActionCount}</span>
+            </div>
+
+            <div className="mini-pill">
+              <span className="mini-pill-label">My activity</span>
+              <span className="mini-pill-value">{activityCount}</span>
+            </div>
+
+            <div className="mini-pill">
+              <span className="mini-pill-label">Live posts</span>
+              <span className="mini-pill-value">{activeListingsCount}</span>
+            </div>
+          </div>
         </section>
+
+        {needsActionCount > 0 ? (
+          <section className="surface-section">
+            <div className="section-topline">
+              <div>
+                <div className="section-title">Needs action</div>
+                <div className="section-sub">Pending requests and helper offers that need your response.</div>
+              </div>
+            </div>
+
+            <div className="action-grid">
+              <div className="drawer-section-card">
+                <div className="drawer-section-head">
+                  <div className="drawer-section-title">Incoming item requests</div>
+                  <Chip label={`${incomingInterests.length}`} tone={incomingInterests.length ? "green" : "gray"} />
+                </div>
+
+                <div className="drawer-section-stack">
+                  {incomingInterests.length === 0 ? (
+                    <DrawerEmpty title="No item requests" body="When someone requests your item, it appears here." />
+                  ) : (
+                    incomingInterests.slice(0, 3).map((r) => (
+                      <InterestCard
+                        key={r.id}
+                        photoUrl={r.item?.photo_url ?? null}
+                        title={`${readableName(r.requester)} requested ${r.item?.title ?? "your post"}`}
+                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${r.item?.status ?? "—"}`}
+                        chips={[
+                          { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
+                          { label: r.item?.status ?? "—", tone: toneForStatus(r.item?.status) },
+                        ]}
+                        manageLabel="Manage"
+                        onManage={() => router.push(`/manage/${r.item_id}`)}
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="drawer-section-card">
+                <div className="drawer-section-head">
+                  <div className="drawer-section-title">Incoming helper offers</div>
+                  <Chip label={`${incomingOffers.length}`} tone={incomingOffers.length ? "amber" : "gray"} />
+                </div>
+
+                <div className="drawer-section-stack">
+                  {incomingOffers.length === 0 ? (
+                    <DrawerEmpty title="No helper offers" body="When someone offers help on your request post, it appears here." />
+                  ) : (
+                    incomingOffers.slice(0, 3).map((o) => {
+                      const busy = incomingOfferBusyId === o.id;
+
+                      return (
+                        <IncomingOfferCard
+                          key={o.id}
+                          title={`${readableName(o.helper)} offered help on ${o.request_item?.title ?? "your request"}`}
+                          subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
+                          note={o.note}
+                          busy={busy}
+                          onAccept={() => void acceptIncomingOffer(o)}
+                          onDecline={() => void declineIncomingOffer(o)}
+                        />
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        {recentActivityPreview.length > 0 ? (
+          <section className="surface-section compact">
+            <div className="section-topline">
+              <div>
+                <div className="section-title">Recent activity</div>
+                <div className="section-sub">Your latest requests and offers.</div>
+              </div>
+
+              <button className="linkish-btn" type="button" onClick={() => openDrawer("activity")}>
+                See all
+              </button>
+            </div>
+
+            <div className="recent-activity-list">
+              {recentActivityPreview.map((a) => (
+                <button
+                  key={a.key}
+                  type="button"
+                  className="recent-activity-row"
+                  onClick={() => router.push(a.href)}
+                >
+                  <div className={`recent-activity-icon ${a.type}`}>{a.type === "offer" ? "🙌" : "📩"}</div>
+                  <div className="recent-activity-copy">
+                    <div className="recent-activity-title">{a.title}</div>
+                    <div className="recent-activity-sub">{a.subtitle}</div>
+                  </div>
+                  <div className="recent-activity-arrow">→</div>
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
 
         <section className="content-head">
           <div className="media-tabs" role="tablist" aria-label="Listing types">
@@ -1327,24 +1328,43 @@ export default function AccountPage() {
             </button>
           </div>
 
-          <div className="sub-filter-row" aria-label="Listing visibility filter">
-            <button
-              type="button"
-              className={`sub-filter-pill ${gridMode === "active" ? "active" : ""}`}
-              onClick={() => setGridMode("active")}
-            >
-              Active
-              <span className="sub-filter-count">{activeListingsCount}</span>
-            </button>
+          <div className="toolbar-row">
+            <div className="sub-filter-row" aria-label="Listing visibility filter">
+              <button
+                type="button"
+                className={`sub-filter-pill ${gridMode === "active" ? "active" : ""}`}
+                onClick={() => setGridMode("active")}
+              >
+                Active
+                <span className="sub-filter-count">{activeListingsCount}</span>
+              </button>
 
-            <button
-              type="button"
-              className={`sub-filter-pill ${gridMode === "archived" ? "active" : ""}`}
-              onClick={() => setGridMode("archived")}
-            >
-              Archived
-              <span className="sub-filter-count">{archivedListingsCount}</span>
-            </button>
+              <button
+                type="button"
+                className={`sub-filter-pill ${gridMode === "archived" ? "active" : ""}`}
+                onClick={() => setGridMode("archived")}
+              >
+                Archived
+                <span className="sub-filter-count">{archivedListingsCount}</span>
+              </button>
+            </div>
+
+            <div className="sort-wrap">
+              <button
+                type="button"
+                className={`sort-pill ${sortMode === "newest" ? "active" : ""}`}
+                onClick={() => setSortMode("newest")}
+              >
+                Newest
+              </button>
+              <button
+                type="button"
+                className={`sort-pill ${sortMode === "oldest" ? "active" : ""}`}
+                onClick={() => setSortMode("oldest")}
+              >
+                Oldest
+              </button>
+            </div>
           </div>
         </section>
 
@@ -1378,7 +1398,19 @@ export default function AccountPage() {
                   <ProfileMediaCard
                     key={item.id}
                     item={item}
+                    statLabel={
+                      (item.post_type ?? "give") === "request"
+                        ? `${offerCountMap[item.id] ?? 0} offers`
+                        : item.post_type === "event"
+                        ? `${attendeeCountMap[item.id] ?? 0} attending`
+                        : `${interestCountMap[item.id] ?? 0} requests`
+                    }
                     onClick={() => router.push(getPostHref(item))}
+                    onManage={
+                      item.post_type === "event"
+                        ? undefined
+                        : () => router.push(getManageHref(item))
+                    }
                   />
                 ))}
               </div>
@@ -1396,18 +1428,6 @@ export default function AccountPage() {
             {drawerSection === "menu" ? (
               <div className="drawer-stack">
                 <DrawerMenuRow
-                  label="Notifications"
-                  meta={unseenNotificationCount ? `${unseenNotificationCount} new` : "Nothing new"}
-                  onClick={() => setDrawerSection("notifications")}
-                  highlight={unseenNotificationCount > 0}
-                />
-                <DrawerMenuRow
-                  label="Requests on my posts"
-                  meta={requestsCount ? `${requestsCount} waiting` : "All clear"}
-                  onClick={() => setDrawerSection("requests")}
-                  highlight={requestsCount > 0}
-                />
-                <DrawerMenuRow
                   label="My activity"
                   meta={activityCount ? `${activityCount} records` : "No recent activity"}
                   onClick={() => setDrawerSection("activity")}
@@ -1415,95 +1435,6 @@ export default function AccountPage() {
                 <button className="drawer-danger-btn" onClick={() => void signOut()} type="button">
                   Sign out
                 </button>
-              </div>
-            ) : null}
-
-            {drawerSection === "notifications" ? (
-              <div className="drawer-stack">
-                <div className="drawer-headline-row">
-                  <div>
-                    <div className="drawer-title">Notifications</div>
-                    <div className="drawer-sub">Only the remaining alerts stay here.</div>
-                  </div>
-                  <button
-                    onClick={() => void markNotificationsSeen()}
-                    disabled={markingNotifs || unseenNotificationCount === 0}
-                    className="btn btn-secondary inline"
-                    type="button"
-                  >
-                    {markingNotifs ? "Working…" : "Mark seen"}
-                  </button>
-                </div>
-
-                {notifications.length === 0 ? (
-                  <DrawerEmpty title="No notifications" body="New alerts will appear here." />
-                ) : (
-                  notifications.map((n) => (
-                    <NotificationCard
-                      key={n.id}
-                      title={n.title || "Notification"}
-                      body={n.body || "Open to see details."}
-                      meta={fmtWhen(n.created_at)}
-                      isNew={!n.is_read}
-                      onClick={() => void openNotification(n)}
-                    />
-                  ))
-                )}
-              </div>
-            ) : null}
-
-            {drawerSection === "requests" ? (
-              <div className="drawer-stack">
-                <div>
-                  <div className="drawer-title">Requests on my posts</div>
-                  <div className="drawer-sub">Handle incoming asks and helper offers here.</div>
-                </div>
-
-                <DrawerSectionCard title="Incoming item requests" count={incomingInterests.length}>
-                  {incomingInterests.length === 0 ? (
-                    <DrawerEmpty title="No item requests" body="When someone requests your item, it appears here." />
-                  ) : (
-                    incomingInterests.map((r) => (
-                      <InterestCard
-                        key={r.id}
-                        photoUrl={r.item?.photo_url ?? null}
-                        title={`${readableName(r.requester)} requested ${r.item?.title ?? "your post"}`}
-                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${r.item?.status ?? "—"}`}
-                        chips={[
-                          { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
-                          { label: r.item?.status ?? "—", tone: toneForStatus(r.item?.status) },
-                        ]}
-                        manageLabel="Open post"
-                        onManage={() => {
-                          setDrawerOpen(false);
-                          router.push(`/item/${r.item_id}`);
-                        }}
-                      />
-                    ))
-                  )}
-                </DrawerSectionCard>
-
-                <DrawerSectionCard title="Incoming helper offers" count={incomingOffers.length}>
-                  {incomingOffers.length === 0 ? (
-                    <DrawerEmpty title="No helper offers" body="When someone offers help on your request post, it appears here." />
-                  ) : (
-                    incomingOffers.map((o) => {
-                      const busy = incomingOfferBusyId === o.id;
-
-                      return (
-                        <IncomingOfferCard
-                          key={o.id}
-                          title={`${readableName(o.helper)} offered help on ${o.request_item?.title ?? "your request"}`}
-                          subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
-                          note={o.note}
-                          busy={busy}
-                          onAccept={() => void acceptIncomingOffer(o)}
-                          onDecline={() => void declineIncomingOffer(o)}
-                        />
-                      );
-                    })
-                  )}
-                </DrawerSectionCard>
               </div>
             ) : null}
 
@@ -1582,7 +1513,7 @@ export default function AccountPage() {
         {toast ? <Toast msg={toast.msg} kind={toast.kind} /> : null}
       </div>
 
-      <PageStyles />
+      <PageStyles theme={theme} />
     </div>
   );
 }
@@ -1593,45 +1524,62 @@ export default function AccountPage() {
 
 function ProfileMediaCard({
   item,
+  statLabel,
   onClick,
+  onManage,
 }: {
   item: MyItemRow;
+  statLabel: string;
   onClick: () => void;
+  onManage?: () => void;
 }) {
   const effectiveStatus = getEffectiveItemStatus(item);
   const statusTone = toneForStatus(effectiveStatus);
+  const archived = isArchivedItem(item);
 
   return (
-    <button className="profile-media-card" onClick={onClick} type="button">
-      <div className="profile-media-frame">
-        {item.photo_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.photo_url} alt={item.title} className="profile-media-img" />
-        ) : (
-          <div className={`profile-media-fallback ${item.post_type ?? "give"}`}>
-            <span>{itemTypeLabel(item.post_type)}</span>
-          </div>
-        )}
+    <div className={`profile-media-card ${archived ? "archived" : ""}`}>
+      <button className="profile-media-main" onClick={onClick} type="button">
+        <div className="profile-media-frame">
+          {item.photo_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={item.photo_url} alt={item.title} className="profile-media-img" />
+          ) : (
+            <div className={`profile-media-fallback ${item.post_type ?? "give"}`}>
+              <span>{itemTypeLabel(item.post_type)}</span>
+            </div>
+          )}
 
-        <div className="media-badge-row">
-          <span className="media-type-badge">{itemTypeLabel(item.post_type)}</span>
+          <div className="media-badge-row">
+            <span className="media-type-badge">{itemTypeLabel(item.post_type)}</span>
+            {archived ? <span className="media-archived-badge">Archived</span> : null}
+          </div>
+
+          <div className="media-gradient" />
+
+          <div className="media-bottom">
+            <div className="media-title">{item.title}</div>
+            <div className="media-meta-row">
+              <span className={`media-status ${statusTone}`}>{effectiveStatus}</span>
+              <span className="media-date">{fmtShort(item.created_at)}</span>
+            </div>
+          </div>
         </div>
 
-        <div className="media-gradient" />
-
-        <div className="media-bottom">
-          <div className="media-title">{item.title}</div>
-          <div className="media-meta-row">
-            <span className={`media-status ${statusTone}`}>{effectiveStatus}</span>
-            <span className="media-date">{fmtShort(item.created_at)}</span>
-          </div>
+        <div className="profile-media-copy">
+          <div className="profile-media-stat">{statLabel}</div>
+          <div className="profile-media-desc">{item.description || "No description provided."}</div>
         </div>
-      </div>
+      </button>
 
-      <div className="profile-media-copy">
-        <div className="profile-media-desc">{item.description || "No description provided."}</div>
-      </div>
-    </button>
+      {onManage && !archived ? (
+        <div className="profile-media-actions">
+          <button className="btn btn-secondary inline small-btn" onClick={onManage} type="button">
+            Manage
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1679,15 +1627,13 @@ function DrawerMenuRow({
   label,
   meta,
   onClick,
-  highlight,
 }: {
   label: string;
   meta: string;
   onClick: () => void;
-  highlight?: boolean;
 }) {
   return (
-    <button type="button" className={`drawer-menu-row ${highlight ? "highlight" : ""}`} onClick={onClick}>
+    <button type="button" className="drawer-menu-row" onClick={onClick}>
       <div className="drawer-menu-copy">
         <div className="drawer-menu-title">{label}</div>
         <div className="drawer-menu-meta">{meta}</div>
@@ -1714,33 +1660,6 @@ function DrawerSectionCard({
       </div>
       <div className="drawer-section-stack">{children}</div>
     </section>
-  );
-}
-
-function NotificationCard({
-  title,
-  body,
-  meta,
-  isNew,
-  onClick,
-}: {
-  title: string;
-  body: string;
-  meta: string;
-  isNew: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button className="notif-card" onClick={onClick} type="button">
-      <div className="notif-head">
-        <div className="notif-title-wrap">
-          <div className="notif-title">{title}</div>
-          <div className="notif-body">{body}</div>
-        </div>
-        <Chip label={isNew ? "New" : "Seen"} tone={isNew ? "red" : "gray"} />
-      </div>
-      <div className="notif-meta">{meta}</div>
-    </button>
   );
 }
 
@@ -1977,7 +1896,7 @@ function ConfirmModal({
   );
 }
 
-function PageStyles() {
+function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
   return (
     <style jsx global>{`
       * {
@@ -1996,19 +1915,46 @@ function PageStyles() {
         --line: #e7ebf0;
         --text: #111827;
         --muted: #6b7280;
+
+        --theme-green-border: rgba(16, 185, 129, 0.24);
+        --theme-green-bg: rgba(16, 185, 129, 0.1);
+        --theme-green-text: #065f46;
+
+        --theme-amber-border: rgba(245, 158, 11, 0.24);
+        --theme-amber-bg: rgba(245, 158, 11, 0.1);
+        --theme-amber-text: #92400e;
+
+        --theme-blue-border: rgba(59, 130, 246, 0.22);
+        --theme-blue-bg: rgba(59, 130, 246, 0.1);
+        --theme-blue-text: #1d4ed8;
       }
 
       .account-page {
         min-height: 100vh;
+        color: var(--text);
+      }
+
+      .account-page.theme-green {
         background:
           radial-gradient(circle at top left, rgba(16, 185, 129, 0.06), transparent 24%),
           linear-gradient(180deg, #fbfbfc 0%, #f5f7fa 100%);
-        color: var(--text);
+      }
+
+      .account-page.theme-amber {
+        background:
+          radial-gradient(circle at top left, rgba(245, 158, 11, 0.06), transparent 24%),
+          linear-gradient(180deg, #fcfbf8 0%, #f8f6f1 100%);
+      }
+
+      .account-page.theme-blue {
+        background:
+          radial-gradient(circle at top left, rgba(59, 130, 246, 0.06), transparent 24%),
+          linear-gradient(180deg, #fbfcff 0%, #f4f7fb 100%);
       }
 
       .page-shell {
         width: 100%;
-        max-width: 1040px;
+        max-width: 1100px;
         margin: 0 auto;
         padding: 12px;
         padding-bottom: calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 24px);
@@ -2037,19 +1983,43 @@ function PageStyles() {
         width: 100%;
       }
 
+      .btn.fullish {
+        flex: 1;
+      }
+
       .btn.inline {
         min-height: 42px;
         padding: 0 14px;
         border-radius: 14px;
       }
 
+      .small-btn {
+        min-height: 38px !important;
+        padding: 0 12px !important;
+      }
+
       .btn-primary {
         min-height: 48px;
-        border: 1px solid rgba(16, 185, 129, 0.3);
-        background: linear-gradient(180deg, rgba(16, 185, 129, 0.18) 0%, rgba(16, 185, 129, 0.1) 100%);
-        color: #065f46;
         border-radius: 16px;
         padding: 0 16px;
+      }
+
+      .theme-green .btn-primary {
+        border: 1px solid var(--theme-green-border);
+        background: linear-gradient(180deg, rgba(16, 185, 129, 0.18) 0%, rgba(16, 185, 129, 0.1) 100%);
+        color: var(--theme-green-text);
+      }
+
+      .theme-amber .btn-primary {
+        border: 1px solid var(--theme-amber-border);
+        background: linear-gradient(180deg, rgba(245, 158, 11, 0.18) 0%, rgba(245, 158, 11, 0.1) 100%);
+        color: var(--theme-amber-text);
+      }
+
+      .theme-blue .btn-primary {
+        border: 1px solid var(--theme-blue-border);
+        background: linear-gradient(180deg, rgba(59, 130, 246, 0.18) 0%, rgba(59, 130, 246, 0.1) 100%);
+        color: var(--theme-blue-text);
       }
 
       .btn-secondary {
@@ -2078,7 +2048,8 @@ function PageStyles() {
       .interest-card,
       .offer-card,
       .empty-grid,
-      .profile-media-card {
+      .profile-media-card,
+      .surface-section {
         min-width: 0;
       }
 
@@ -2133,8 +2104,48 @@ function PageStyles() {
         word-break: break-word;
       }
 
-      .profile-meta {
+      .profile-role-row {
         margin-top: 8px;
+      }
+
+      .role-badge {
+        min-height: 28px;
+        border-radius: 999px;
+        padding: 0 10px;
+        display: inline-flex;
+        align-items: center;
+        font-size: 12px;
+        font-weight: 900;
+      }
+
+      .role-badge.green {
+        border: 1px solid var(--theme-green-border);
+        background: var(--theme-green-bg);
+        color: var(--theme-green-text);
+      }
+
+      .role-badge.amber {
+        border: 1px solid var(--theme-amber-border);
+        background: var(--theme-amber-bg);
+        color: var(--theme-amber-text);
+      }
+
+      .role-badge.blue {
+        border: 1px solid var(--theme-blue-border);
+        background: var(--theme-blue-bg);
+        color: var(--theme-blue-text);
+      }
+
+      .profile-email {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .profile-meta-line {
+        margin-top: 6px;
         display: flex;
         flex-wrap: wrap;
         gap: 6px;
@@ -2146,10 +2157,6 @@ function PageStyles() {
 
       .dot {
         color: #9ca3af;
-      }
-
-      .break-any {
-        overflow-wrap: anywhere;
       }
 
       .menu-btn {
@@ -2172,6 +2179,12 @@ function PageStyles() {
         border-radius: 999px;
         background: #111827;
         display: block;
+      }
+
+      .hero-actions {
+        margin-top: 14px;
+        display: flex;
+        gap: 10px;
       }
 
       .mini-stats {
@@ -2197,9 +2210,19 @@ function PageStyles() {
         text-align: left;
       }
 
-      .mini-pill.active {
-        border-color: rgba(16, 185, 129, 0.28);
-        background: rgba(16, 185, 129, 0.08);
+      .mini-pill.active.green {
+        border-color: var(--theme-green-border);
+        background: var(--theme-green-bg);
+      }
+
+      .mini-pill.active.amber {
+        border-color: var(--theme-amber-border);
+        background: var(--theme-amber-bg);
+      }
+
+      .mini-pill.active.blue {
+        border-color: var(--theme-blue-border);
+        background: var(--theme-blue-bg);
       }
 
       .mini-pill-label {
@@ -2215,6 +2238,117 @@ function PageStyles() {
         font-weight: 950;
         color: #111827;
         line-height: 1;
+      }
+
+      .surface-section {
+        margin-top: 14px;
+        border-radius: 24px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: 0 14px 30px rgba(15, 23, 42, 0.05);
+        padding: 14px;
+      }
+
+      .surface-section.compact {
+        padding: 12px;
+      }
+
+      .section-topline {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: flex-start;
+      }
+
+      .section-title {
+        font-size: 18px;
+        font-weight: 950;
+        color: #111827;
+      }
+
+      .section-sub {
+        margin-top: 4px;
+        font-size: 13px;
+        color: #6b7280;
+        line-height: 1.45;
+      }
+
+      .linkish-btn {
+        border: 0;
+        background: transparent;
+        color: #111827;
+        font-size: 13px;
+        font-weight: 900;
+        cursor: pointer;
+      }
+
+      .action-grid {
+        margin-top: 12px;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .recent-activity-list {
+        margin-top: 12px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .recent-activity-row {
+        width: 100%;
+        text-align: left;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: #fff;
+        padding: 12px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .recent-activity-icon {
+        width: 44px;
+        height: 44px;
+        border-radius: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 44px;
+        font-size: 20px;
+      }
+
+      .recent-activity-icon.interest {
+        background: rgba(16, 185, 129, 0.08);
+        border: 1px solid rgba(16, 185, 129, 0.16);
+      }
+
+      .recent-activity-icon.offer {
+        background: rgba(245, 158, 11, 0.08);
+        border: 1px solid rgba(245, 158, 11, 0.16);
+      }
+
+      .recent-activity-copy {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .recent-activity-title {
+        font-size: 14px;
+        font-weight: 900;
+        color: #111827;
+        overflow-wrap: anywhere;
+      }
+
+      .recent-activity-sub {
+        margin-top: 4px;
+        font-size: 13px;
+        color: #6b7280;
+      }
+
+      .recent-activity-arrow {
+        color: #6b7280;
+        font-weight: 900;
       }
 
       .content-head {
@@ -2251,10 +2385,22 @@ function PageStyles() {
         padding: 0 10px;
       }
 
-      .media-tab.active {
-        border-color: rgba(16, 185, 129, 0.28);
-        background: rgba(16, 185, 129, 0.1);
-        color: #065f46;
+      .theme-green .media-tab.active {
+        border-color: var(--theme-green-border);
+        background: var(--theme-green-bg);
+        color: var(--theme-green-text);
+      }
+
+      .theme-amber .media-tab.active {
+        border-color: var(--theme-amber-border);
+        background: var(--theme-amber-bg);
+        color: var(--theme-amber-text);
+      }
+
+      .theme-blue .media-tab.active {
+        border-color: var(--theme-blue-border);
+        background: var(--theme-blue-bg);
+        color: var(--theme-blue-text);
       }
 
       .media-tab-count {
@@ -2271,8 +2417,16 @@ function PageStyles() {
         padding: 0 6px;
       }
 
-      .sub-filter-row {
+      .toolbar-row {
         margin-top: 10px;
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .sub-filter-row {
         display: flex;
         align-items: center;
         gap: 8px;
@@ -2293,10 +2447,22 @@ function PageStyles() {
         gap: 8px;
       }
 
-      .sub-filter-pill.active {
-        border-color: rgba(16, 185, 129, 0.28);
-        background: rgba(16, 185, 129, 0.1);
-        color: #065f46;
+      .theme-green .sub-filter-pill.active {
+        border-color: var(--theme-green-border);
+        background: var(--theme-green-bg);
+        color: var(--theme-green-text);
+      }
+
+      .theme-amber .sub-filter-pill.active {
+        border-color: var(--theme-amber-border);
+        background: var(--theme-amber-bg);
+        color: var(--theme-amber-text);
+      }
+
+      .theme-blue .sub-filter-pill.active {
+        border-color: var(--theme-blue-border);
+        background: var(--theme-blue-bg);
+        color: var(--theme-blue-text);
       }
 
       .sub-filter-count {
@@ -2311,6 +2477,40 @@ function PageStyles() {
         align-items: center;
         justify-content: center;
         padding: 0 5px;
+      }
+
+      .sort-wrap {
+        display: flex;
+        gap: 8px;
+      }
+
+      .sort-pill {
+        min-height: 34px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.92);
+        color: #374151;
+        font-size: 12px;
+        font-weight: 900;
+        padding: 0 12px;
+      }
+
+      .theme-green .sort-pill.active {
+        border-color: var(--theme-green-border);
+        background: var(--theme-green-bg);
+        color: var(--theme-green-text);
+      }
+
+      .theme-amber .sort-pill.active {
+        border-color: var(--theme-amber-border);
+        background: var(--theme-amber-bg);
+        color: var(--theme-amber-text);
+      }
+
+      .theme-blue .sort-pill.active {
+        border-color: var(--theme-blue-border);
+        background: var(--theme-blue-bg);
+        color: var(--theme-blue-text);
       }
 
       .grid-wrap {
@@ -2345,12 +2545,23 @@ function PageStyles() {
       }
 
       .profile-media-card {
-        text-align: left;
         border-radius: 24px;
         border: 1px solid var(--line);
         background: #fff;
         overflow: hidden;
         box-shadow: 0 14px 30px rgba(15, 23, 42, 0.06);
+      }
+
+      .profile-media-card.archived {
+        opacity: 0.84;
+      }
+
+      .profile-media-main {
+        width: 100%;
+        text-align: left;
+        background: transparent;
+        border: 0;
+        padding: 0;
       }
 
       .profile-media-frame {
@@ -2367,6 +2578,10 @@ function PageStyles() {
         display: block;
       }
 
+      .profile-media-card.archived .profile-media-img {
+        filter: saturate(0.75) brightness(0.9);
+      }
+
       .profile-media-fallback {
         width: 100%;
         height: 100%;
@@ -2380,15 +2595,15 @@ function PageStyles() {
       }
 
       .profile-media-fallback.give {
-        background: linear-gradient(180deg, #f8fafc 0%, #e5e7eb 100%);
+        background: linear-gradient(180deg, rgba(16, 185, 129, 0.08) 0%, #f8fafc 100%);
       }
 
       .profile-media-fallback.request {
-        background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
+        background: linear-gradient(180deg, rgba(245, 158, 11, 0.08) 0%, #f8fafc 100%);
       }
 
       .profile-media-fallback.event {
-        background: linear-gradient(180deg, #faf5ff 0%, #ede9fe 100%);
+        background: linear-gradient(180deg, rgba(59, 130, 246, 0.08) 0%, #f8fafc 100%);
       }
 
       .media-badge-row {
@@ -2397,10 +2612,12 @@ function PageStyles() {
         left: 10px;
         right: 10px;
         display: flex;
-        justify-content: flex-start;
+        justify-content: space-between;
+        gap: 8px;
       }
 
-      .media-type-badge {
+      .media-type-badge,
+      .media-archived-badge {
         min-height: 26px;
         border-radius: 999px;
         padding: 0 9px;
@@ -2411,6 +2628,10 @@ function PageStyles() {
         font-weight: 900;
         display: inline-flex;
         align-items: center;
+      }
+
+      .media-archived-badge {
+        background: rgba(239, 68, 68, 0.7);
       }
 
       .media-gradient {
@@ -2487,7 +2708,14 @@ function PageStyles() {
         padding: 12px;
       }
 
+      .profile-media-stat {
+        font-size: 12px;
+        font-weight: 900;
+        color: #111827;
+      }
+
       .profile-media-desc {
+        margin-top: 6px;
         font-size: 13px;
         color: #6b7280;
         line-height: 1.45;
@@ -2495,6 +2723,10 @@ function PageStyles() {
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
+      }
+
+      .profile-media-actions {
+        padding: 0 12px 12px;
       }
 
       .empty-grid {
@@ -2615,11 +2847,6 @@ function PageStyles() {
         gap: 12px;
       }
 
-      .drawer-menu-row.highlight {
-        border-color: rgba(16, 185, 129, 0.28);
-        background: rgba(16, 185, 129, 0.08);
-      }
-
       .drawer-menu-copy {
         min-width: 0;
         flex: 1;
@@ -2665,13 +2892,6 @@ function PageStyles() {
         line-height: 1.45;
       }
 
-      .drawer-headline-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 12px;
-      }
-
       .drawer-section-card {
         border-radius: 22px;
         border: 1px solid var(--line);
@@ -2696,46 +2916,6 @@ function PageStyles() {
         margin-top: 12px;
         display: grid;
         gap: 10px;
-      }
-
-      .notif-card {
-        width: 100%;
-        text-align: left;
-        border-radius: 18px;
-        border: 1px solid var(--line);
-        background: #fff;
-        padding: 14px;
-      }
-
-      .notif-head {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 10px;
-      }
-
-      .notif-title-wrap {
-        min-width: 0;
-        flex: 1;
-      }
-
-      .notif-title {
-        font-size: 15px;
-        font-weight: 950;
-        color: #111827;
-      }
-
-      .notif-body {
-        margin-top: 4px;
-        color: #6b7280;
-        line-height: 1.45;
-      }
-
-      .notif-meta {
-        margin-top: 8px;
-        font-size: 12px;
-        color: #6b7280;
-        font-weight: 800;
       }
 
       .interest-card {
@@ -3080,19 +3260,14 @@ function PageStyles() {
         height: 92px;
       }
 
-      .skel-pills {
+      .skel-actions {
         width: 100%;
-        height: 68px;
+        height: 48px;
       }
 
       .skel-tabs {
         width: 100%;
         height: 56px;
-      }
-
-      .skel-filter {
-        width: 180px;
-        height: 34px;
       }
 
       .skel-grid {
@@ -3107,6 +3282,10 @@ function PageStyles() {
 
         .profile-card {
           padding: 18px;
+        }
+
+        .action-grid {
+          grid-template-columns: 1fr 1fr;
         }
 
         .listing-grid {
@@ -3149,6 +3328,10 @@ function PageStyles() {
           font-size: 24px;
         }
 
+        .hero-actions {
+          flex-direction: column;
+        }
+
         .mini-stats {
           gap: 6px;
         }
@@ -3185,12 +3368,16 @@ function PageStyles() {
           font-size: 10px;
         }
 
+        .toolbar-row {
+          gap: 8px;
+        }
+
         .sub-filter-row {
-          margin-top: 8px;
           gap: 6px;
         }
 
-        .sub-filter-pill {
+        .sub-filter-pill,
+        .sort-pill {
           min-height: 32px;
           font-size: 11px;
           padding: 0 10px;
