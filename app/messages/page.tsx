@@ -118,10 +118,14 @@ export default function MessagesPage() {
   const [cards, setCards] = useState<ThreadCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"all" | "unread" | "active">("all");
+
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -193,6 +197,7 @@ export default function MessagesPage() {
 
     if (threads.length === 0) {
       setCards([]);
+      setSelectedIds([]);
       setLoading(false);
       setRefreshing(false);
       return;
@@ -274,8 +279,77 @@ export default function MessagesPage() {
     });
 
     setCards(built);
+    setSelectedIds((prev) => prev.filter((id) => built.some((c) => c.thread.id === id)));
     setLoading(false);
     setRefreshing(false);
+  }
+
+  function openThread(threadId: string) {
+    router.push(`/messages/${threadId}`);
+  }
+
+  function enterSelectMode() {
+    setSelectMode(true);
+    setSelectedIds([]);
+  }
+
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelectedIds([]);
+  }
+
+  function toggleThreadSelected(threadId: string) {
+    setSelectedIds((prev) => {
+      if (prev.includes(threadId)) return prev.filter((id) => id !== threadId);
+      return [...prev, threadId];
+    });
+  }
+
+  function toggleSelectAllVisible() {
+    const visibleIds = filtered.map((c) => c.thread.id);
+    const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
+
+    if (allSelected) {
+      setSelectedIds((prev) => prev.filter((id) => !visibleIds.includes(id)));
+      return;
+    }
+
+    setSelectedIds((prev) => Array.from(new Set([...prev, ...visibleIds])));
+  }
+
+  async function deleteSelectedThreads() {
+    if (!userId || selectedIds.length === 0) return;
+
+    const ok = window.confirm(
+      selectedIds.length === 1
+        ? "Delete this conversation from your inbox?"
+        : `Delete ${selectedIds.length} conversations from your inbox?`
+    );
+
+    if (!ok) return;
+
+    setDeleting(true);
+    setErr(null);
+
+    const payload = selectedIds.map((threadId) => ({
+      user_id: userId,
+      thread_id: threadId,
+    }));
+
+    const { error } = await supabase
+      .from("user_hidden_threads")
+      .upsert(payload, { onConflict: "user_id,thread_id" });
+
+    if (error) {
+      setErr(error.message || "Could not delete selected conversations.");
+      setDeleting(false);
+      return;
+    }
+
+    setCards((prev) => prev.filter((c) => !selectedIds.includes(c.thread.id)));
+    setSelectedIds([]);
+    setSelectMode(false);
+    setDeleting(false);
   }
 
   useEffect(() => {
@@ -302,7 +376,7 @@ export default function MessagesPage() {
     }
 
     const ch = supabase
-      .channel("inbox")
+      .channel(`inbox:${userId}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => {
         loadInbox({ silent: true });
       })
@@ -375,6 +449,16 @@ export default function MessagesPage() {
 
   const unreadTotal = useMemo(() => cards.reduce((sum, c) => sum + (c.unread || 0), 0), [cards]);
 
+  const visibleSelectedCount = useMemo(() => {
+    const visibleIds = new Set(filtered.map((c) => c.thread.id));
+    return selectedIds.filter((id) => visibleIds.has(id)).length;
+  }, [filtered, selectedIds]);
+
+  const allVisibleSelected = useMemo(() => {
+    if (filtered.length === 0) return false;
+    return filtered.every((c) => selectedIds.includes(c.thread.id));
+  }, [filtered, selectedIds]);
+
   if (!isAshland) {
     return (
       <div style={{ minHeight: "100vh", background: "#f8fafc", color: "#0f172a", padding: 18 }}>
@@ -388,17 +472,52 @@ export default function MessagesPage() {
       <header className="header">
         <div className="headerRow">
           <div className="headingBlock">
-            <div className="heading">Messages</div>
-            <div className="subheading">{unreadTotal > 0 ? `${unreadTotal} unread` : "All caught up"}</div>
+            <div className="heading">{selectMode ? "Select Conversations" : "Messages"}</div>
+            <div className="subheading">
+              {selectMode
+                ? `${selectedIds.length} selected`
+                : unreadTotal > 0
+                ? `${unreadTotal} unread`
+                : "All caught up"}
+            </div>
           </div>
 
           <div className="headerActions">
-            <button className="iconBtn" onClick={() => router.push("/feed")} type="button" aria-label="Back to feed">
-              ←
-            </button>
-            <button className="iconBtn" type="button" onClick={() => loadInbox()} aria-label="Refresh">
-              {refreshing ? "…" : "↻"}
-            </button>
+            {!selectMode ? (
+              <>
+                <button
+                  className="iconBtn"
+                  onClick={() => router.push("/feed")}
+                  type="button"
+                  aria-label="Back to feed"
+                >
+                  ←
+                </button>
+
+                <button className="iconBtn" type="button" onClick={() => loadInbox()} aria-label="Refresh">
+                  {refreshing ? "…" : "↻"}
+                </button>
+
+                <button className="textBtn" type="button" onClick={enterSelectMode} aria-label="Select threads">
+                  Select
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="textBtn" type="button" onClick={exitSelectMode} aria-label="Cancel selecting">
+                  Cancel
+                </button>
+
+                <button
+                  className="textBtn"
+                  type="button"
+                  onClick={toggleSelectAllVisible}
+                  aria-label={allVisibleSelected ? "Deselect all" : "Select all"}
+                >
+                  {allVisibleSelected ? "Deselect All" : "Select All"}
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -413,6 +532,7 @@ export default function MessagesPage() {
               autoCorrect="off"
               autoCapitalize="none"
               spellCheck={false}
+              disabled={selectMode}
             />
             {query ? (
               <button className="clearBtn" type="button" onClick={() => setQuery("")} aria-label="Clear search">
@@ -425,17 +545,51 @@ export default function MessagesPage() {
         </div>
 
         <div className="tabsWrap">
-          <button className={`tab ${tab === "all" ? "active" : ""}`} type="button" onClick={() => setTab("all")}>
+          <button
+            className={`tab ${tab === "all" ? "active" : ""}`}
+            type="button"
+            onClick={() => setTab("all")}
+            disabled={selectMode}
+          >
             All
           </button>
-          <button className={`tab ${tab === "unread" ? "active" : ""}`} type="button" onClick={() => setTab("unread")}>
+
+          <button
+            className={`tab ${tab === "unread" ? "active" : ""}`}
+            type="button"
+            onClick={() => setTab("unread")}
+            disabled={selectMode}
+          >
             Unread
             {unreadTotal > 0 ? <span className="tabCount">{unreadTotal}</span> : null}
           </button>
-          <button className={`tab ${tab === "active" ? "active" : ""}`} type="button" onClick={() => setTab("active")}>
+
+          <button
+            className={`tab ${tab === "active" ? "active" : ""}`}
+            type="button"
+            onClick={() => setTab("active")}
+            disabled={selectMode}
+          >
             Active
           </button>
         </div>
+
+        {selectMode ? (
+          <div className="selectionBar">
+            <div className="selectionMeta">
+              {visibleSelectedCount} of {filtered.length} visible selected
+            </div>
+
+            <button
+              className="deleteBtn"
+              type="button"
+              onClick={deleteSelectedThreads}
+              disabled={selectedIds.length === 0 || deleting}
+            >
+              {deleting ? "Deleting…" : selectedIds.length > 0 ? `Delete (${selectedIds.length})` : "Delete"}
+            </button>
+          </div>
+        ) : null}
 
         {err ? <div className="errorBox">{err}</div> : null}
       </header>
@@ -479,17 +633,33 @@ export default function MessagesPage() {
                 const when = c.last?.created_at ? fmtWhen(c.last.created_at) : fmtWhen(c.thread.created_at);
                 const pill = statusPill(item?.status);
                 const unread = c.unread > 0;
+                const checked = selectedIds.includes(c.thread.id);
 
                 return (
                   <button
                     key={c.thread.id}
-                    className={`chatRow ${unread ? "unread" : ""}`}
+                    className={`chatRow ${unread ? "unread" : ""} ${selectMode ? "selecting" : ""} ${
+                      checked ? "checked" : ""
+                    }`}
                     type="button"
-                    onClick={() => router.push(`/messages/${c.thread.id}`)}
+                    onClick={() => {
+                      if (selectMode) {
+                        toggleThreadSelected(c.thread.id);
+                        return;
+                      }
+                      openThread(c.thread.id);
+                    }}
+                    aria-pressed={selectMode ? checked : undefined}
                   >
+                    {selectMode ? (
+                      <div className="checkCol" aria-hidden="true">
+                        <span className={`checkCircle ${checked ? "checked" : ""}`}>{checked ? "✓" : ""}</span>
+                      </div>
+                    ) : null}
+
                     <div className="avatarWrap">
                       <div className="avatar">{initialsOf(otherName)}</div>
-                      {unread ? <span className="presenceDot" /> : null}
+                      {!selectMode && unread ? <span className="presenceDot" /> : null}
                     </div>
 
                     <div className="rowMain">
@@ -504,7 +674,7 @@ export default function MessagesPage() {
 
                       <div className="previewLine">
                         <span className={`previewText ${unread ? "bold" : ""}`}>{preview}</span>
-                        {unread ? <span className="unreadBadge">{c.unread}</span> : null}
+                        {!selectMode && unread ? <span className="unreadBadge">{c.unread}</span> : null}
                       </div>
 
                       <div className="metaLine">
@@ -578,18 +748,28 @@ export default function MessagesPage() {
           display: flex;
           gap: 8px;
           align-items: center;
+          flex-wrap: wrap;
         }
 
-        .iconBtn {
-          width: 44px;
+        .iconBtn,
+        .textBtn {
           height: 44px;
           border-radius: 14px;
           border: 1px solid rgba(15, 23, 42, 0.08);
           background: rgba(255, 255, 255, 0.95);
           color: #0f172a;
           font-weight: 950;
-          font-size: 18px;
           cursor: pointer;
+        }
+
+        .iconBtn {
+          width: 44px;
+          font-size: 18px;
+        }
+
+        .textBtn {
+          padding: 0 14px;
+          font-size: 13px;
         }
 
         .searchWrap {
@@ -629,6 +809,11 @@ export default function MessagesPage() {
           min-width: 0;
         }
 
+        .search input:disabled {
+          color: #94a3b8;
+          cursor: not-allowed;
+        }
+
         .search input::placeholder {
           color: #94a3b8;
         }
@@ -666,6 +851,11 @@ export default function MessagesPage() {
           gap: 8px;
         }
 
+        .tab:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+
         .tab.active {
           background: rgba(16, 185, 129, 0.12);
           border-color: rgba(16, 185, 129, 0.22);
@@ -683,6 +873,42 @@ export default function MessagesPage() {
           display: grid;
           place-items: center;
           padding: 0 5px;
+        }
+
+        .selectionBar {
+          margin-top: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 10px 12px;
+          border-radius: 16px;
+          background: rgba(255, 255, 255, 0.95);
+          border: 1px solid rgba(15, 23, 42, 0.06);
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+        }
+
+        .selectionMeta {
+          font-size: 13px;
+          font-weight: 850;
+          color: #475569;
+        }
+
+        .deleteBtn {
+          height: 40px;
+          border-radius: 12px;
+          padding: 0 14px;
+          border: 1px solid rgba(239, 68, 68, 0.18);
+          background: rgba(239, 68, 68, 0.1);
+          color: #b91c1c;
+          font-size: 13px;
+          font-weight: 950;
+          cursor: pointer;
+        }
+
+        .deleteBtn:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
         }
 
         .errorBox {
@@ -718,7 +944,12 @@ export default function MessagesPage() {
           padding: 12px 2px;
           cursor: pointer;
           border-bottom: 1px solid rgba(15, 23, 42, 0.06);
-          transition: background 120ms ease;
+          transition: background 120ms ease, box-shadow 120ms ease;
+        }
+
+        .chatRow.selecting {
+          grid-template-columns: 28px 56px 1fr;
+          padding-left: 0;
         }
 
         .chatRow:hover {
@@ -727,6 +958,36 @@ export default function MessagesPage() {
 
         .chatRow.unread {
           background: rgba(16, 185, 129, 0.035);
+        }
+
+        .chatRow.checked {
+          background: rgba(16, 185, 129, 0.08);
+        }
+
+        .checkCol {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .checkCircle {
+          width: 22px;
+          height: 22px;
+          border-radius: 999px;
+          border: 2px solid #cbd5e1;
+          background: white;
+          color: white;
+          display: grid;
+          place-items: center;
+          font-size: 12px;
+          font-weight: 1000;
+          flex-shrink: 0;
+        }
+
+        .checkCircle.checked {
+          border-color: #10b981;
+          background: #10b981;
+          color: white;
         }
 
         .avatarWrap {
