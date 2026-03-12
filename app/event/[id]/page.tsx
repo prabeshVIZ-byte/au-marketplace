@@ -139,7 +139,7 @@ function formatShortDate(iso: string | null) {
 
 function ownerNameLabel(event: EventRow | null, owner: OwnerProfile | null) {
   if (!event) return "Ashland user";
-  if (event.is_anonymous) return "Anonymous host";
+  if (event.is_anonymous) return "";
   const name = (owner?.full_name ?? "").trim();
   return name || "Ashland user";
 }
@@ -247,6 +247,16 @@ export default function EventDetailPage() {
     return formatTimeRange(event?.starts_at ?? null, event?.ends_at ?? null);
   }, [event?.starts_at, event?.ends_at]);
 
+  const hostOrgLabel = useMemo(() => {
+    const org = (event?.host_org ?? "").trim();
+    return org || "Campus organization";
+  }, [event?.host_org]);
+
+  const postedByLabel = useMemo(() => {
+    if (!event || event.is_anonymous) return "";
+    return ownerLabel;
+  }, [event, ownerLabel]);
+
   const actionCard = useMemo(() => {
     if (!event || isOwner) return null;
 
@@ -324,14 +334,14 @@ export default function EventDetailPage() {
       },
       {
         label: "Host",
-        value: event.host_org?.trim() || ownerLabel,
+        value: hostOrgLabel,
       },
       {
         label: "Category",
         value: eventCategoryLabel(event.category),
       },
     ];
-  }, [event, ownerLabel, eventDateDisplay]);
+  }, [event, hostOrgLabel, eventDateDisplay]);
 
   function showToast(msg: string, kind: "ok" | "err" = "ok") {
     setToast({ msg, kind });
@@ -414,9 +424,7 @@ export default function EventDetailPage() {
 
       const attendeePreviewPromise = supabase
         .from(ATTENDEES_TABLE)
-        .select(
-          "user_id, profile:profiles!event_attendees_user_id_fkey(id,full_name,user_role)"
-        )
+        .select("user_id, profile:profiles!event_attendees_user_id_fkey(id,full_name,user_role)")
         .eq("event_id", eventId)
         .limit(6);
 
@@ -598,16 +606,6 @@ export default function EventDetailPage() {
     }
   }
 
-  async function copyShareLink() {
-    try {
-      if (typeof window === "undefined") return;
-      await navigator.clipboard.writeText(window.location.href);
-      showToast("Event link copied.");
-    } catch {
-      showToast("Could not copy link.", "err");
-    }
-  }
-
   async function deleteEvent() {
     if (!event || !isOwner) return;
 
@@ -675,9 +673,68 @@ export default function EventDetailPage() {
             <div className="topSub">scholarswap</div>
           </div>
 
-          <button className="iconBtn" onClick={() => void copyShareLink()} aria-label="Share" type="button">
-            ↗
-          </button>
+          {isOwner ? (
+            <div className="headerMenuWrap">
+              {menuOpen ? (
+                <button
+                  className="menuBackdrop"
+                  aria-label="Close menu"
+                  onClick={() => setMenuOpen(false)}
+                  type="button"
+                />
+              ) : null}
+
+              <button
+                className="iconBtn"
+                type="button"
+                aria-label="Event options"
+                onClick={() => setMenuOpen((v) => !v)}
+              >
+                ⋯
+              </button>
+
+              {menuOpen ? (
+                <div className="menuCard topMenu">
+                  <button
+                    className="menuItem"
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      router.push(`/event/${event?.id}/edit`);
+                    }}
+                  >
+                    Edit event
+                  </button>
+
+                  {event?.link_url ? (
+                    <button
+                      className="menuItem"
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        window.open(event.link_url!, "_blank", "noopener,noreferrer");
+                      }}
+                    >
+                      Open event link
+                    </button>
+                  ) : null}
+
+                  <button
+                    className="menuItem danger"
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setConfirmDelete(true);
+                    }}
+                  >
+                    Delete event
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="topSpacer" />
+          )}
         </header>
 
         {err && <div className="notice error">{err}</div>}
@@ -703,92 +760,20 @@ export default function EventDetailPage() {
               <div className="heroTop">
                 <span className={`statePill ${chip.tone}`}>{chip.label}</span>
 
-                <div className="heroTopRight">
-                  {!isOwner ? (
-                    <button
-                      className={`heroActionBtn love ${myLoved ? "active" : ""}`}
-                      type="button"
-                      onClick={toggleLove}
-                      disabled={busy}
-                      aria-label="Love event"
-                    >
-                      <span>{myLoved ? "♥" : "♡"}</span>
-                      <span className="loveTinyCount">{loveCount}</span>
-                    </button>
-                  ) : null}
-
-                  {isOwner ? (
-                    <div className="menuWrap">
-                      {menuOpen ? (
-                        <button
-                          className="menuBackdrop"
-                          aria-label="Close menu"
-                          onClick={() => setMenuOpen(false)}
-                          type="button"
-                        />
-                      ) : null}
-
-                      <button
-                        className="heroActionBtn"
-                        type="button"
-                        aria-label="Event options"
-                        onClick={() => setMenuOpen((v) => !v)}
-                      >
-                        ⋯
-                      </button>
-
-                      {menuOpen ? (
-                        <div className="menuCard">
-                          <button
-                            className="menuItem"
-                            type="button"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              router.push(`/event/${event.id}/edit`);
-                            }}
-                          >
-                            Edit event
-                          </button>
-
-                          <button
-                            className="menuItem"
-                            type="button"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              void copyShareLink();
-                            }}
-                          >
-                            Copy event link
-                          </button>
-
-                          {event.link_url ? (
-                            <button
-                              className="menuItem"
-                              type="button"
-                              onClick={() => {
-                                setMenuOpen(false);
-                                window.open(event.link_url!, "_blank", "noopener,noreferrer");
-                              }}
-                            >
-                              Open event link
-                            </button>
-                          ) : null}
-
-                          <button
-                            className="menuItem danger"
-                            type="button"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              setConfirmDelete(true);
-                            }}
-                          >
-                            Delete event
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
+                {!isOwner ? (
+                  <button
+                    className={`heroActionBtn love ${myLoved ? "active" : ""}`}
+                    type="button"
+                    onClick={toggleLove}
+                    disabled={busy}
+                    aria-label="Love event"
+                  >
+                    <span>{myLoved ? "♥" : "♡"}</span>
+                    <span className="loveTinyCount">{loveCount}</span>
+                  </button>
+                ) : (
+                  <div className="heroOwnerSpacer" />
+                )}
               </div>
 
               <div className="heroBottom">
@@ -799,9 +784,7 @@ export default function EventDetailPage() {
                 <div className="heroSocialRow">
                   <div className="heroStat">
                     <span className="heroStatIcon">👥</span>
-                    <span className="heroStatText">
-                      {attendeeCount} going
-                    </span>
+                    <span className="heroStatText">{attendeeCount} going</span>
                   </div>
 
                   <div className="heroStat subtle">
@@ -905,22 +888,22 @@ export default function EventDetailPage() {
 
                 <div className="hostCard">
                   <div className="hostLeft">
-                    <div className="hostAvatar">{initials(ownerLabel)}</div>
+                    <div className="hostAvatar">{initials(hostOrgLabel)}</div>
                     <div className="hostCopy">
-                      <div className="hostName">{ownerLabel}</div>
-                      <div className="hostMeta">
-                        {event.host_org?.trim() || readableRole(owner?.user_role)}
-                      </div>
+                      <div className="hostName">{hostOrgLabel}</div>
+                      {!event.is_anonymous && postedByLabel ? (
+                        <div className="hostMeta">Posted by {postedByLabel}</div>
+                      ) : null}
                     </div>
                   </div>
 
-                  <div className="hostRight">
-                    {!event.is_anonymous && relatedEvents.length > 0 ? (
+                  {!event.is_anonymous && relatedEvents.length > 0 ? (
+                    <div className="hostRight">
                       <span className="hostStatPill">
                         {relatedEvents.length}+ more event{relatedEvents.length === 1 ? "" : "s"}
                       </span>
-                    ) : null}
-                  </div>
+                    </div>
+                  ) : null}
                 </div>
               </div>
 
@@ -985,7 +968,7 @@ export default function EventDetailPage() {
                 </div>
               ) : null}
 
-              {relatedEvents.length > 0 ? (
+              {!event.is_anonymous && relatedEvents.length > 0 ? (
                 <div className="section">
                   <div className="sectionHead">
                     <div className="sectionTitle">More from this host</div>
@@ -1082,13 +1065,13 @@ export default function EventDetailPage() {
         .topBar {
           position: sticky;
           top: 0;
-          z-index: 30;
+          z-index: 40;
           display: grid;
           grid-template-columns: 42px 1fr 42px;
           align-items: center;
           gap: 10px;
           padding: 6px 0 14px;
-          background: rgba(248, 250, 252, 0.82);
+          background: rgba(248, 250, 252, 0.9);
           backdrop-filter: blur(14px);
         }
 
@@ -1111,12 +1094,21 @@ export default function EventDetailPage() {
           color: #64748b;
         }
 
+        .topSpacer {
+          width: 42px;
+          height: 42px;
+        }
+
+        .headerMenuWrap {
+          position: relative;
+        }
+
         .iconBtn {
           width: 42px;
           height: 42px;
           border-radius: 999px;
           border: 1px solid rgba(226, 232, 240, 0.95);
-          background: rgba(255, 255, 255, 0.92);
+          background: rgba(255, 255, 255, 0.96);
           color: #0f172a;
           font-size: 18px;
           font-weight: 900;
@@ -1236,10 +1228,9 @@ export default function EventDetailPage() {
           gap: 10px;
         }
 
-        .heroTopRight {
-          display: flex;
-          align-items: flex-start;
-          gap: 8px;
+        .heroOwnerSpacer {
+          width: 42px;
+          height: 42px;
         }
 
         .heroBottom {
@@ -1366,10 +1357,6 @@ export default function EventDetailPage() {
           line-height: 1;
         }
 
-        .menuWrap {
-          position: relative;
-        }
-
         .menuBackdrop {
           position: fixed;
           inset: 0;
@@ -1377,19 +1364,23 @@ export default function EventDetailPage() {
           padding: 0;
           margin: 0;
           background: transparent;
+          z-index: 39;
         }
 
         .menuCard {
           position: absolute;
-          top: calc(100% + 8px);
-          right: 0;
           width: 220px;
           overflow: hidden;
           border-radius: 18px;
           border: 1px solid #e2e8f0;
           background: rgba(255, 255, 255, 0.98);
           box-shadow: 0 20px 50px rgba(15, 23, 42, 0.16);
-          z-index: 40;
+          z-index: 41;
+        }
+
+        .menuCard.topMenu {
+          top: calc(100% + 8px);
+          right: 0;
         }
 
         .menuItem {
