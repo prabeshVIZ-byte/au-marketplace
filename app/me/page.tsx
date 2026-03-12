@@ -13,9 +13,8 @@ import { ensureThread } from "@/lib/ensureThread";
 
 type MediaTab = "give" | "request" | "event";
 type GridMode = "active" | "archived";
-type DrawerSection = "menu" | "activity";
+type DrawerSection = "menu" | "action" | "activity";
 type OfferStatus = "pending" | "hold" | "accepted" | "declined" | "completed";
-type SortMode = "newest" | "oldest";
 type ToastState = { msg: string; kind?: "ok" | "err" } | null;
 
 type ConfirmState =
@@ -311,8 +310,8 @@ function fmtShort(ts: string | null | undefined) {
 function readableRole(role: string | null | undefined) {
   const raw = (role ?? "").trim().toLowerCase();
   if (!raw) return "Ashland member";
-  if (raw === "student") return "Student";
-  if (raw === "faculty") return "Faculty";
+  if (raw === "student") return "Student member";
+  if (raw === "faculty") return "Faculty member";
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
@@ -331,7 +330,7 @@ function toneForStatus(status: string | null | undefined): "green" | "amber" | "
   const s = normStatus(status);
   if (["accepted", "reserved", "claimed", "completed"].includes(s)) return "green";
   if (["pending", "hold", "available"].includes(s)) return "amber";
-  if (["declined", "expired"].includes(s)) return "red";
+  if (["declined", "expired", "withdrawn"].includes(s)) return "red";
   return "gray";
 }
 
@@ -364,17 +363,6 @@ function getPostHref(item: { id: string; post_type?: "give" | "request" | "event
   return item.post_type === "event" ? `/event/${item.id}` : `/item/${item.id}`;
 }
 
-function getManageHref(item: { id: string; post_type?: "give" | "request" | "event" | null }) {
-  if (item.post_type === "event") return `/event/${item.id}`;
-  return `/manage/${item.id}`;
-}
-
-function tabTheme(tab: MediaTab) {
-  if (tab === "request") return "amber";
-  if (tab === "event") return "blue";
-  return "green";
-}
-
 /* ==============================
    PAGE
 ============================== */
@@ -403,13 +391,8 @@ export default function AccountPage() {
   const [incomingInterests, setIncomingInterests] = useState<IncomingInterestRow[]>([]);
   const [incomingOffers, setIncomingOffers] = useState<IncomingOfferRow[]>([]);
 
-  const [interestCountMap, setInterestCountMap] = useState<Record<string, number>>({});
-  const [offerCountMap, setOfferCountMap] = useState<Record<string, number>>({});
-  const [attendeeCountMap, setAttendeeCountMap] = useState<Record<string, number>>({});
-
   const [mediaTab, setMediaTab] = useState<MediaTab>("give");
   const [gridMode, setGridMode] = useState<GridMode>("active");
-  const [sortMode, setSortMode] = useState<SortMode>("newest");
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerSection, setDrawerSection] = useState<DrawerSection>("menu");
@@ -431,7 +414,6 @@ export default function AccountPage() {
 
   const displayRole = readableRole(profile?.user_role);
   const memberSince = fmtShort(profile?.created_at);
-  const theme = tabTheme(mediaTab);
 
   const itemsGive = useMemo(() => myItems.filter((x) => matchesTab(x, "give")), [myItems]);
   const itemsRequest = useMemo(() => myItems.filter((x) => matchesTab(x, "request")), [myItems]);
@@ -451,53 +433,23 @@ export default function AccountPage() {
     return currentTabItems.filter((x) => isArchivedItem(x)).length;
   }, [currentTabItems]);
 
-  const needsActionCount = useMemo(() => {
+  const actionNeededCount = useMemo(() => {
     return incomingInterests.length + incomingOffers.length;
   }, [incomingInterests.length, incomingOffers.length]);
 
   const activityCount = useMemo(() => {
     return myRequests.length + myOffers.length;
-  }, [myOffers.length, myRequests.length]);
+  }, [myRequests.length, myOffers.length]);
 
   const gridSource = useMemo(() => {
-    const filtered = currentTabItems.filter((x) =>
-      gridMode === "active" ? !isArchivedItem(x) : isArchivedItem(x)
-    );
-
-    const sorted = [...filtered].sort((a, b) => {
-      const aTime = new Date(a.created_at).getTime();
-      const bTime = new Date(b.created_at).getTime();
-      return sortMode === "newest" ? bTime - aTime : aTime - bTime;
-    });
-
-    return sorted;
-  }, [currentTabItems, gridMode, sortMode]);
+    return currentTabItems.filter((x) => (gridMode === "active" ? !isArchivedItem(x) : isArchivedItem(x)));
+  }, [currentTabItems, gridMode]);
 
   const gridTotalForTab = useMemo(() => {
     if (mediaTab === "give") return itemsGive.length;
     if (mediaTab === "request") return itemsRequest.length;
     return itemsEvent.length;
   }, [itemsEvent.length, itemsGive.length, itemsRequest.length, mediaTab]);
-
-  const recentActivityPreview = useMemo(() => {
-    const reqs = myRequests.slice(0, 2).map((r) => ({
-      key: `req-${r.item_id}-${r.created_at ?? ""}`,
-      title: r.item?.title ?? "Unknown post",
-      subtitle: r.created_at ? `Requested ${fmtWhen(r.created_at)}` : "Interest sent",
-      href: `/item/${r.item_id}`,
-      type: "interest" as const,
-    }));
-
-    const offers = myOffers.slice(0, 2).map((o) => ({
-      key: `offer-${o.id}`,
-      title: o.request_item?.title ?? "Unknown request",
-      subtitle: o.created_at ? `Offered ${fmtWhen(o.created_at)}` : "Offer sent",
-      href: `/item/${o.request_id}`,
-      type: "offer" as const,
-    }));
-
-    return [...reqs, ...offers].slice(0, 4);
-  }, [myOffers, myRequests]);
 
   const showToast = useCallback((msg: string, kind: "ok" | "err" = "ok") => {
     setToast({ msg, kind });
@@ -519,9 +471,6 @@ export default function AccountPage() {
     setMyOffers([]);
     setIncomingInterests([]);
     setIncomingOffers([]);
-    setInterestCountMap({});
-    setOfferCountMap({});
-    setAttendeeCountMap({});
     setErr(null);
     setDrawerOpen(false);
     setDrawerSection("menu");
@@ -674,6 +623,7 @@ export default function AccountPage() {
         items:items(id,title,photo_url,status,owner_id,post_type),
         requester:profiles!interests_user_id_fkey(full_name,email,user_role)
       `)
+      .eq("status", "pending")
       .order("created_at", { ascending: false });
 
     if (!mountedRef.current) return [] as IncomingInterestRow[];
@@ -695,7 +645,12 @@ export default function AccountPage() {
       })
     );
 
-    const filtered = normalizedAll.filter((row) => row.item?.owner_id === uid);
+    const filtered = normalizedAll.filter(
+      (row) =>
+        row.item?.owner_id === uid &&
+        (row.item?.post_type === "give" || row.item?.post_type === null || row.item?.post_type === undefined)
+    );
+
     setIncomingInterests(filtered);
     return filtered;
   }
@@ -715,6 +670,7 @@ export default function AccountPage() {
         request_item:items(id,title,status,owner_id,post_type),
         helper:profiles!request_offers_helper_id_fkey(full_name,email,user_role)
       `)
+      .in("status", ["pending", "hold"])
       .order("created_at", { ascending: false });
 
     if (!mountedRef.current) return [] as IncomingOfferRow[];
@@ -737,66 +693,17 @@ export default function AccountPage() {
       helper: singleRelation(row.helper),
     }));
 
-    const filtered = normalizedAll.filter(
-      (row) => row.request_item?.owner_id === uid && row.request_item?.post_type === "request"
-    );
+    const filtered = normalizedAll.filter((row) => {
+      const st = normStatus(row.status);
+      return (
+        row.request_item?.owner_id === uid &&
+        row.request_item?.post_type === "request" &&
+        (st === "pending" || st === "hold")
+      );
+    });
 
     setIncomingOffers(filtered);
     return filtered;
-  }
-
-  async function loadCounts(uid: string) {
-    const [ownedItemsRes, ownedRequestsRes, ownedEventsRes] = await Promise.all([
-      supabase.from("items").select("id,post_type").eq("owner_id", uid),
-      supabase.from("items").select("id").eq("owner_id", uid).eq("post_type", "request"),
-      supabase.from("events").select("id").eq("created_by", uid),
-    ]);
-
-    if (!mountedRef.current) return;
-
-    const itemIds =
-      ((ownedItemsRes.data ?? []) as Array<{ id: string; post_type: "give" | "request" | null }>).filter(
-        (x) => (x.post_type ?? "give") === "give"
-      ).map((x) => x.id);
-
-    const requestIds = ((ownedRequestsRes.data ?? []) as Array<{ id: string }>).map((x) => x.id);
-    const eventIds = ((ownedEventsRes.data ?? []) as Array<{ id: string }>).map((x) => x.id);
-
-    if (itemIds.length > 0) {
-      const { data } = await supabase.from("interests").select("item_id").in("item_id", itemIds);
-      const next: Record<string, number> = {};
-      for (const id of itemIds) next[id] = 0;
-      for (const row of ((data ?? []) as Array<{ item_id: string }>)) {
-        next[row.item_id] = (next[row.item_id] ?? 0) + 1;
-      }
-      if (mountedRef.current) setInterestCountMap(next);
-    } else {
-      setInterestCountMap({});
-    }
-
-    if (requestIds.length > 0) {
-      const { data } = await supabase.from("request_offers").select("request_id").in("request_id", requestIds);
-      const next: Record<string, number> = {};
-      for (const id of requestIds) next[id] = 0;
-      for (const row of ((data ?? []) as Array<{ request_id: string }>)) {
-        next[row.request_id] = (next[row.request_id] ?? 0) + 1;
-      }
-      if (mountedRef.current) setOfferCountMap(next);
-    } else {
-      setOfferCountMap({});
-    }
-
-    if (eventIds.length > 0) {
-      const { data } = await supabase.from("event_attendees").select("event_id").in("event_id", eventIds);
-      const next: Record<string, number> = {};
-      for (const id of eventIds) next[id] = 0;
-      for (const row of ((data ?? []) as Array<{ event_id: string }>)) {
-        next[row.event_id] = (next[row.event_id] ?? 0) + 1;
-      }
-      if (mountedRef.current) setAttendeeCountMap(next);
-    } else {
-      setAttendeeCountMap({});
-    }
   }
 
   const loadAllFor = useCallback(async (uid: string) => {
@@ -811,7 +718,6 @@ export default function AccountPage() {
         loadMyOffers(uid),
         loadIncomingInterests(uid),
         loadIncomingOffers(uid),
-        loadCounts(uid),
       ]);
     } catch (e) {
       if (!mountedRef.current) return;
@@ -868,6 +774,7 @@ export default function AccountPage() {
         prev.filter((x) => (x.request_item?.id ?? x.request_id) !== requestKey)
       );
 
+      setDrawerOpen(false);
       router.push(`/messages/${threadId}`);
     } catch (e) {
       showToast(getFriendlyError(e), "err");
@@ -960,6 +867,7 @@ export default function AccountPage() {
         requesterId: userId,
       });
 
+      setDrawerOpen(false);
       router.push(`/messages/${threadId}`);
     } catch (e) {
       showToast(getFriendlyError(e), "err");
@@ -1058,18 +966,55 @@ export default function AccountPage() {
     };
   }, [clearAll, loadAllFor]);
 
+  useEffect(() => {
+    if (!isLoggedIn || !userId) return;
+
+    const channel = supabase
+      .channel(`me-action-needed-${userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "request_offers",
+        },
+        () => {
+          void loadIncomingOffers(userId);
+          void loadMyOffers(userId);
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "interests",
+        },
+        () => {
+          void loadIncomingInterests(userId);
+          void loadMyRequests(userId);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [isLoggedIn, userId]);
+
   if (loading) {
     return (
       <div className="account-page">
         <div className="page-shell">
           <div className="profile-card skeleton-shell">
             <div className="skel skel-head" />
-            <div className="skel skel-actions" />
+            <div className="skel skel-pills" />
             <div className="skel skel-tabs" />
+            <div className="skel skel-filter" />
             <div className="skel skel-grid" />
           </div>
         </div>
-        <PageStyles theme={theme} />
+        <PageStyles />
       </div>
     );
   }
@@ -1080,8 +1025,8 @@ export default function AccountPage() {
         <div className="page-shell auth-shell">
           <section className="auth-card">
             <div className="auth-eyebrow">My account</div>
-            <h1 className="auth-title">Sign in to manage your posts</h1>
-            <p className="auth-sub">Use your Ashland email to manage your listings, requests, and events.</p>
+            <h1 className="auth-title">Sign in to see your profile listings</h1>
+            <p className="auth-sub">Use your Ashland email to manage your posts and profile.</p>
 
             <div className="seg-row">
               <button
@@ -1128,13 +1073,13 @@ export default function AccountPage() {
             {err ? <div className="error-text">{err}</div> : null}
           </section>
         </div>
-        <PageStyles theme={theme} />
+        <PageStyles />
       </div>
     );
   }
 
   return (
-    <div className={`account-page theme-${theme}`}>
+    <div className="account-page">
       <div className="page-shell">
         <section className="profile-card">
           <div className="profile-top">
@@ -1143,17 +1088,16 @@ export default function AccountPage() {
 
               <div className="profile-copy">
                 <h1 className="profile-name">{displayName}</h1>
-
-                <div className="profile-role-row">
-                  <span className={`role-badge ${theme}`}>{displayRole}</span>
-                </div>
-
-                <div className="profile-email">{userEmail}</div>
-
-                <div className="profile-meta-line">
-                  {memberSince ? <span>Joined {memberSince}</span> : null}
+                <div className="profile-meta">
+                  <span>{displayRole}</span>
                   <span className="dot">•</span>
-                  <span>{myItems.length} posts</span>
+                  <span className="break-any">{userEmail}</span>
+                  {memberSince ? (
+                    <>
+                      <span className="dot">•</span>
+                      <span>Joined {memberSince}</span>
+                    </>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -1170,135 +1114,22 @@ export default function AccountPage() {
             </button>
           </div>
 
-          <div className="hero-actions">
-            <button className="btn btn-primary fullish" type="button" onClick={() => router.push("/create")}>
-              Create post
+          <div className="mini-stats mini-stats-two">
+            <button
+              type="button"
+              className={`mini-pill ${actionNeededCount > 0 ? "active" : ""}`}
+              onClick={() => openDrawer("action")}
+            >
+              <span className="mini-pill-label">Action needed</span>
+              <span className="mini-pill-value">{actionNeededCount}</span>
             </button>
-            <button className="btn btn-secondary fullish" type="button" onClick={() => router.push("/messages")}>
-              Messages
-            </button>
-          </div>
 
-          <div className="mini-stats mini-stats-three">
-            <div className={`mini-pill ${needsActionCount > 0 ? `active ${theme}` : ""}`}>
-              <span className="mini-pill-label">Needs action</span>
-              <span className="mini-pill-value">{needsActionCount}</span>
-            </div>
-
-            <div className="mini-pill">
+            <button type="button" className="mini-pill" onClick={() => openDrawer("activity")}>
               <span className="mini-pill-label">My activity</span>
               <span className="mini-pill-value">{activityCount}</span>
-            </div>
-
-            <div className="mini-pill">
-              <span className="mini-pill-label">Live posts</span>
-              <span className="mini-pill-value">{activeListingsCount}</span>
-            </div>
+            </button>
           </div>
         </section>
-
-        {needsActionCount > 0 ? (
-          <section className="surface-section">
-            <div className="section-topline">
-              <div>
-                <div className="section-title">Needs action</div>
-                <div className="section-sub">Pending requests and helper offers that need your response.</div>
-              </div>
-            </div>
-
-            <div className="action-grid">
-              <div className="drawer-section-card">
-                <div className="drawer-section-head">
-                  <div className="drawer-section-title">Incoming item requests</div>
-                  <Chip label={`${incomingInterests.length}`} tone={incomingInterests.length ? "green" : "gray"} />
-                </div>
-
-                <div className="drawer-section-stack">
-                  {incomingInterests.length === 0 ? (
-                    <DrawerEmpty title="No item requests" body="When someone requests your item, it appears here." />
-                  ) : (
-                    incomingInterests.slice(0, 3).map((r) => (
-                      <InterestCard
-                        key={r.id}
-                        photoUrl={r.item?.photo_url ?? null}
-                        title={`${readableName(r.requester)} requested ${r.item?.title ?? "your post"}`}
-                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Status: ${r.item?.status ?? "—"}`}
-                        chips={[
-                          { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
-                          { label: r.item?.status ?? "—", tone: toneForStatus(r.item?.status) },
-                        ]}
-                        manageLabel="Manage"
-                        onManage={() => router.push(`/manage/${r.item_id}`)}
-                      />
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div className="drawer-section-card">
-                <div className="drawer-section-head">
-                  <div className="drawer-section-title">Incoming helper offers</div>
-                  <Chip label={`${incomingOffers.length}`} tone={incomingOffers.length ? "amber" : "gray"} />
-                </div>
-
-                <div className="drawer-section-stack">
-                  {incomingOffers.length === 0 ? (
-                    <DrawerEmpty title="No helper offers" body="When someone offers help on your request post, it appears here." />
-                  ) : (
-                    incomingOffers.slice(0, 3).map((o) => {
-                      const busy = incomingOfferBusyId === o.id;
-
-                      return (
-                        <IncomingOfferCard
-                          key={o.id}
-                          title={`${readableName(o.helper)} offered help on ${o.request_item?.title ?? "your request"}`}
-                          subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
-                          note={o.note}
-                          busy={busy}
-                          onAccept={() => void acceptIncomingOffer(o)}
-                          onDecline={() => void declineIncomingOffer(o)}
-                        />
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-            </div>
-          </section>
-        ) : null}
-
-        {recentActivityPreview.length > 0 ? (
-          <section className="surface-section compact">
-            <div className="section-topline">
-              <div>
-                <div className="section-title">Recent activity</div>
-                <div className="section-sub">Your latest requests and offers.</div>
-              </div>
-
-              <button className="linkish-btn" type="button" onClick={() => openDrawer("activity")}>
-                See all
-              </button>
-            </div>
-
-            <div className="recent-activity-list">
-              {recentActivityPreview.map((a) => (
-                <button
-                  key={a.key}
-                  type="button"
-                  className="recent-activity-row"
-                  onClick={() => router.push(a.href)}
-                >
-                  <div className={`recent-activity-icon ${a.type}`}>{a.type === "offer" ? "🙌" : "📩"}</div>
-                  <div className="recent-activity-copy">
-                    <div className="recent-activity-title">{a.title}</div>
-                    <div className="recent-activity-sub">{a.subtitle}</div>
-                  </div>
-                  <div className="recent-activity-arrow">→</div>
-                </button>
-              ))}
-            </div>
-          </section>
-        ) : null}
 
         <section className="content-head">
           <div className="media-tabs" role="tablist" aria-label="Listing types">
@@ -1328,43 +1159,24 @@ export default function AccountPage() {
             </button>
           </div>
 
-          <div className="toolbar-row">
-            <div className="sub-filter-row" aria-label="Listing visibility filter">
-              <button
-                type="button"
-                className={`sub-filter-pill ${gridMode === "active" ? "active" : ""}`}
-                onClick={() => setGridMode("active")}
-              >
-                Active
-                <span className="sub-filter-count">{activeListingsCount}</span>
-              </button>
+          <div className="sub-filter-row" aria-label="Listing visibility filter">
+            <button
+              type="button"
+              className={`sub-filter-pill ${gridMode === "active" ? "active" : ""}`}
+              onClick={() => setGridMode("active")}
+            >
+              Active
+              <span className="sub-filter-count">{activeListingsCount}</span>
+            </button>
 
-              <button
-                type="button"
-                className={`sub-filter-pill ${gridMode === "archived" ? "active" : ""}`}
-                onClick={() => setGridMode("archived")}
-              >
-                Archived
-                <span className="sub-filter-count">{archivedListingsCount}</span>
-              </button>
-            </div>
-
-            <div className="sort-wrap">
-              <button
-                type="button"
-                className={`sort-pill ${sortMode === "newest" ? "active" : ""}`}
-                onClick={() => setSortMode("newest")}
-              >
-                Newest
-              </button>
-              <button
-                type="button"
-                className={`sort-pill ${sortMode === "oldest" ? "active" : ""}`}
-                onClick={() => setSortMode("oldest")}
-              >
-                Oldest
-              </button>
-            </div>
+            <button
+              type="button"
+              className={`sub-filter-pill ${gridMode === "archived" ? "active" : ""}`}
+              onClick={() => setGridMode("archived")}
+            >
+              Archived
+              <span className="sub-filter-count">{archivedListingsCount}</span>
+            </button>
           </div>
         </section>
 
@@ -1398,19 +1210,7 @@ export default function AccountPage() {
                   <ProfileMediaCard
                     key={item.id}
                     item={item}
-                    statLabel={
-                      (item.post_type ?? "give") === "request"
-                        ? `${offerCountMap[item.id] ?? 0} offers`
-                        : item.post_type === "event"
-                        ? `${attendeeCountMap[item.id] ?? 0} attending`
-                        : `${interestCountMap[item.id] ?? 0} requests`
-                    }
                     onClick={() => router.push(getPostHref(item))}
-                    onManage={
-                      item.post_type === "event"
-                        ? undefined
-                        : () => router.push(getManageHref(item))
-                    }
                   />
                 ))}
               </div>
@@ -1428,13 +1228,82 @@ export default function AccountPage() {
             {drawerSection === "menu" ? (
               <div className="drawer-stack">
                 <DrawerMenuRow
+                  label="Action needed"
+                  meta={actionNeededCount ? `${actionNeededCount} waiting` : "Nothing pending"}
+                  onClick={() => setDrawerSection("action")}
+                  highlight={actionNeededCount > 0}
+                />
+                <DrawerMenuRow
                   label="My activity"
                   meta={activityCount ? `${activityCount} records` : "No recent activity"}
                   onClick={() => setDrawerSection("activity")}
                 />
+                <DrawerMenuRow
+                  label="Messages"
+                  meta="Open your conversations"
+                  onClick={() => {
+                    setDrawerOpen(false);
+                    router.push("/messages");
+                  }}
+                />
                 <button className="drawer-danger-btn" onClick={() => void signOut()} type="button">
                   Sign out
                 </button>
+              </div>
+            ) : null}
+
+            {drawerSection === "action" ? (
+              <div className="drawer-stack">
+                <div>
+                  <div className="drawer-title">Action needed</div>
+                  <div className="drawer-sub">Only things that still need your decision stay here.</div>
+                </div>
+
+                <DrawerSectionCard title="Incoming item requests" count={incomingInterests.length}>
+                  {incomingInterests.length === 0 ? (
+                    <DrawerEmpty title="No item requests" body="When someone requests your item, it appears here." />
+                  ) : (
+                    incomingInterests.map((r) => (
+                      <InterestCard
+                        key={r.id}
+                        photoUrl={r.item?.photo_url ?? null}
+                        title={`${readableName(r.requester)} requested ${r.item?.title ?? "your item"}`}
+                        subtitle={`${r.created_at ? `Requested ${fmtWhen(r.created_at)} • ` : ""}Pending decision`}
+                        chips={[
+                          { label: itemTypeLabel(r.item?.post_type ?? "give"), tone: "gray" },
+                          { label: "pending", tone: "amber" },
+                        ]}
+                        manageLabel="Open manage"
+                        onManage={() => {
+                          setDrawerOpen(false);
+                          router.push(`/manage/${r.item_id}`);
+                        }}
+                      />
+                    ))
+                  )}
+                </DrawerSectionCard>
+
+                <DrawerSectionCard title="Incoming helper offers" count={incomingOffers.length}>
+                  {incomingOffers.length === 0 ? (
+                    <DrawerEmpty title="No helper offers" body="When someone offers help on your request post, it appears here." />
+                  ) : (
+                    incomingOffers.map((o) => {
+                      const busy = incomingOfferBusyId === o.id;
+
+                      return (
+                        <IncomingOfferCard
+                          key={o.id}
+                          title={`${readableName(o.helper)} offered help on ${o.request_item?.title ?? "your request"}`}
+                          subtitle={`${o.created_at ? `Offered ${fmtWhen(o.created_at)} • ` : ""}${o.availability ? `Availability: ${o.availability}` : "Availability not provided"}`}
+                          note={o.note}
+                          busy={busy}
+                          onAccept={() => void acceptIncomingOffer(o)}
+                          onDecline={() => void declineIncomingOffer(o)}
+                        />
+                      );
+                    })
+                  )}
+                </DrawerSectionCard>
               </div>
             ) : null}
 
@@ -1513,7 +1382,7 @@ export default function AccountPage() {
         {toast ? <Toast msg={toast.msg} kind={toast.kind} /> : null}
       </div>
 
-      <PageStyles theme={theme} />
+      <PageStyles />
     </div>
   );
 }
@@ -1524,62 +1393,45 @@ export default function AccountPage() {
 
 function ProfileMediaCard({
   item,
-  statLabel,
   onClick,
-  onManage,
 }: {
   item: MyItemRow;
-  statLabel: string;
   onClick: () => void;
-  onManage?: () => void;
 }) {
   const effectiveStatus = getEffectiveItemStatus(item);
   const statusTone = toneForStatus(effectiveStatus);
-  const archived = isArchivedItem(item);
 
   return (
-    <div className={`profile-media-card ${archived ? "archived" : ""}`}>
-      <button className="profile-media-main" onClick={onClick} type="button">
-        <div className="profile-media-frame">
-          {item.photo_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={item.photo_url} alt={item.title} className="profile-media-img" />
-          ) : (
-            <div className={`profile-media-fallback ${item.post_type ?? "give"}`}>
-              <span>{itemTypeLabel(item.post_type)}</span>
-            </div>
-          )}
-
-          <div className="media-badge-row">
-            <span className="media-type-badge">{itemTypeLabel(item.post_type)}</span>
-            {archived ? <span className="media-archived-badge">Archived</span> : null}
+    <button className="profile-media-card" onClick={onClick} type="button">
+      <div className="profile-media-frame">
+        {item.photo_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={item.photo_url} alt={item.title} className="profile-media-img" />
+        ) : (
+          <div className={`profile-media-fallback ${item.post_type ?? "give"}`}>
+            <span>{itemTypeLabel(item.post_type)}</span>
           </div>
+        )}
 
-          <div className="media-gradient" />
+        <div className="media-badge-row">
+          <span className="media-type-badge">{itemTypeLabel(item.post_type)}</span>
+        </div>
 
-          <div className="media-bottom">
-            <div className="media-title">{item.title}</div>
-            <div className="media-meta-row">
-              <span className={`media-status ${statusTone}`}>{effectiveStatus}</span>
-              <span className="media-date">{fmtShort(item.created_at)}</span>
-            </div>
+        <div className="media-gradient" />
+
+        <div className="media-bottom">
+          <div className="media-title">{item.title}</div>
+          <div className="media-meta-row">
+            <span className={`media-status ${statusTone}`}>{effectiveStatus}</span>
+            <span className="media-date">{fmtShort(item.created_at)}</span>
           </div>
         </div>
+      </div>
 
-        <div className="profile-media-copy">
-          <div className="profile-media-stat">{statLabel}</div>
-          <div className="profile-media-desc">{item.description || "No description provided."}</div>
-        </div>
-      </button>
-
-      {onManage && !archived ? (
-        <div className="profile-media-actions">
-          <button className="btn btn-secondary inline small-btn" onClick={onManage} type="button">
-            Manage
-          </button>
-        </div>
-      ) : null}
-    </div>
+      <div className="profile-media-copy">
+        <div className="profile-media-desc">{item.description || "No description provided."}</div>
+      </div>
+    </button>
   );
 }
 
@@ -1627,13 +1479,15 @@ function DrawerMenuRow({
   label,
   meta,
   onClick,
+  highlight,
 }: {
   label: string;
   meta: string;
   onClick: () => void;
+  highlight?: boolean;
 }) {
   return (
-    <button type="button" className="drawer-menu-row" onClick={onClick}>
+    <button type="button" className={`drawer-menu-row ${highlight ? "highlight" : ""}`} onClick={onClick}>
       <div className="drawer-menu-copy">
         <div className="drawer-menu-title">{label}</div>
         <div className="drawer-menu-meta">{meta}</div>
@@ -1896,7 +1750,7 @@ function ConfirmModal({
   );
 }
 
-function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
+function PageStyles() {
   return (
     <style jsx global>{`
       * {
@@ -1915,46 +1769,19 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         --line: #e7ebf0;
         --text: #111827;
         --muted: #6b7280;
-
-        --theme-green-border: rgba(16, 185, 129, 0.24);
-        --theme-green-bg: rgba(16, 185, 129, 0.1);
-        --theme-green-text: #065f46;
-
-        --theme-amber-border: rgba(245, 158, 11, 0.24);
-        --theme-amber-bg: rgba(245, 158, 11, 0.1);
-        --theme-amber-text: #92400e;
-
-        --theme-blue-border: rgba(59, 130, 246, 0.22);
-        --theme-blue-bg: rgba(59, 130, 246, 0.1);
-        --theme-blue-text: #1d4ed8;
       }
 
       .account-page {
         min-height: 100vh;
-        color: var(--text);
-      }
-
-      .account-page.theme-green {
         background:
           radial-gradient(circle at top left, rgba(16, 185, 129, 0.06), transparent 24%),
           linear-gradient(180deg, #fbfbfc 0%, #f5f7fa 100%);
-      }
-
-      .account-page.theme-amber {
-        background:
-          radial-gradient(circle at top left, rgba(245, 158, 11, 0.06), transparent 24%),
-          linear-gradient(180deg, #fcfbf8 0%, #f8f6f1 100%);
-      }
-
-      .account-page.theme-blue {
-        background:
-          radial-gradient(circle at top left, rgba(59, 130, 246, 0.06), transparent 24%),
-          linear-gradient(180deg, #fbfcff 0%, #f4f7fb 100%);
+        color: var(--text);
       }
 
       .page-shell {
         width: 100%;
-        max-width: 1100px;
+        max-width: 1040px;
         margin: 0 auto;
         padding: 12px;
         padding-bottom: calc(var(--bottom-nav-height, 86px) + env(safe-area-inset-bottom) + 24px);
@@ -1983,43 +1810,19 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         width: 100%;
       }
 
-      .btn.fullish {
-        flex: 1;
-      }
-
       .btn.inline {
         min-height: 42px;
         padding: 0 14px;
         border-radius: 14px;
       }
 
-      .small-btn {
-        min-height: 38px !important;
-        padding: 0 12px !important;
-      }
-
       .btn-primary {
         min-height: 48px;
+        border: 1px solid rgba(16, 185, 129, 0.3);
+        background: linear-gradient(180deg, rgba(16, 185, 129, 0.18) 0%, rgba(16, 185, 129, 0.1) 100%);
+        color: #065f46;
         border-radius: 16px;
         padding: 0 16px;
-      }
-
-      .theme-green .btn-primary {
-        border: 1px solid var(--theme-green-border);
-        background: linear-gradient(180deg, rgba(16, 185, 129, 0.18) 0%, rgba(16, 185, 129, 0.1) 100%);
-        color: var(--theme-green-text);
-      }
-
-      .theme-amber .btn-primary {
-        border: 1px solid var(--theme-amber-border);
-        background: linear-gradient(180deg, rgba(245, 158, 11, 0.18) 0%, rgba(245, 158, 11, 0.1) 100%);
-        color: var(--theme-amber-text);
-      }
-
-      .theme-blue .btn-primary {
-        border: 1px solid var(--theme-blue-border);
-        background: linear-gradient(180deg, rgba(59, 130, 246, 0.18) 0%, rgba(59, 130, 246, 0.1) 100%);
-        color: var(--theme-blue-text);
       }
 
       .btn-secondary {
@@ -2042,14 +1845,12 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
 
       .profile-card,
       .auth-card,
-      .notif-card,
       .drawer-menu-row,
       .drawer-section-card,
       .interest-card,
       .offer-card,
       .empty-grid,
-      .profile-media-card,
-      .surface-section {
+      .profile-media-card {
         min-width: 0;
       }
 
@@ -2104,48 +1905,8 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         word-break: break-word;
       }
 
-      .profile-role-row {
+      .profile-meta {
         margin-top: 8px;
-      }
-
-      .role-badge {
-        min-height: 28px;
-        border-radius: 999px;
-        padding: 0 10px;
-        display: inline-flex;
-        align-items: center;
-        font-size: 12px;
-        font-weight: 900;
-      }
-
-      .role-badge.green {
-        border: 1px solid var(--theme-green-border);
-        background: var(--theme-green-bg);
-        color: var(--theme-green-text);
-      }
-
-      .role-badge.amber {
-        border: 1px solid var(--theme-amber-border);
-        background: var(--theme-amber-bg);
-        color: var(--theme-amber-text);
-      }
-
-      .role-badge.blue {
-        border: 1px solid var(--theme-blue-border);
-        background: var(--theme-blue-bg);
-        color: var(--theme-blue-text);
-      }
-
-      .profile-email {
-        margin-top: 8px;
-        color: var(--muted);
-        font-size: 13px;
-        line-height: 1.45;
-        overflow-wrap: anywhere;
-      }
-
-      .profile-meta-line {
-        margin-top: 6px;
         display: flex;
         flex-wrap: wrap;
         gap: 6px;
@@ -2157,6 +1918,10 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
 
       .dot {
         color: #9ca3af;
+      }
+
+      .break-any {
+        overflow-wrap: anywhere;
       }
 
       .menu-btn {
@@ -2181,20 +1946,14 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         display: block;
       }
 
-      .hero-actions {
-        margin-top: 14px;
-        display: flex;
-        gap: 10px;
-      }
-
       .mini-stats {
         margin-top: 14px;
         display: grid;
         gap: 8px;
       }
 
-      .mini-stats-three {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+      .mini-stats-two {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
       .mini-pill {
@@ -2210,19 +1969,9 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         text-align: left;
       }
 
-      .mini-pill.active.green {
-        border-color: var(--theme-green-border);
-        background: var(--theme-green-bg);
-      }
-
-      .mini-pill.active.amber {
-        border-color: var(--theme-amber-border);
-        background: var(--theme-amber-bg);
-      }
-
-      .mini-pill.active.blue {
-        border-color: var(--theme-blue-border);
-        background: var(--theme-blue-bg);
+      .mini-pill.active {
+        border-color: rgba(16, 185, 129, 0.28);
+        background: rgba(16, 185, 129, 0.08);
       }
 
       .mini-pill-label {
@@ -2238,117 +1987,6 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         font-weight: 950;
         color: #111827;
         line-height: 1;
-      }
-
-      .surface-section {
-        margin-top: 14px;
-        border-radius: 24px;
-        border: 1px solid var(--line);
-        background: rgba(255, 255, 255, 0.96);
-        box-shadow: 0 14px 30px rgba(15, 23, 42, 0.05);
-        padding: 14px;
-      }
-
-      .surface-section.compact {
-        padding: 12px;
-      }
-
-      .section-topline {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        align-items: flex-start;
-      }
-
-      .section-title {
-        font-size: 18px;
-        font-weight: 950;
-        color: #111827;
-      }
-
-      .section-sub {
-        margin-top: 4px;
-        font-size: 13px;
-        color: #6b7280;
-        line-height: 1.45;
-      }
-
-      .linkish-btn {
-        border: 0;
-        background: transparent;
-        color: #111827;
-        font-size: 13px;
-        font-weight: 900;
-        cursor: pointer;
-      }
-
-      .action-grid {
-        margin-top: 12px;
-        display: grid;
-        grid-template-columns: 1fr;
-        gap: 12px;
-      }
-
-      .recent-activity-list {
-        margin-top: 12px;
-        display: grid;
-        gap: 10px;
-      }
-
-      .recent-activity-row {
-        width: 100%;
-        text-align: left;
-        border-radius: 18px;
-        border: 1px solid var(--line);
-        background: #fff;
-        padding: 12px;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
-
-      .recent-activity-icon {
-        width: 44px;
-        height: 44px;
-        border-radius: 14px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex: 0 0 44px;
-        font-size: 20px;
-      }
-
-      .recent-activity-icon.interest {
-        background: rgba(16, 185, 129, 0.08);
-        border: 1px solid rgba(16, 185, 129, 0.16);
-      }
-
-      .recent-activity-icon.offer {
-        background: rgba(245, 158, 11, 0.08);
-        border: 1px solid rgba(245, 158, 11, 0.16);
-      }
-
-      .recent-activity-copy {
-        min-width: 0;
-        flex: 1;
-      }
-
-      .recent-activity-title {
-        font-size: 14px;
-        font-weight: 900;
-        color: #111827;
-        overflow-wrap: anywhere;
-      }
-
-      .recent-activity-sub {
-        margin-top: 4px;
-        font-size: 13px;
-        color: #6b7280;
-      }
-
-      .recent-activity-arrow {
-        color: #6b7280;
-        font-weight: 900;
       }
 
       .content-head {
@@ -2385,22 +2023,10 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         padding: 0 10px;
       }
 
-      .theme-green .media-tab.active {
-        border-color: var(--theme-green-border);
-        background: var(--theme-green-bg);
-        color: var(--theme-green-text);
-      }
-
-      .theme-amber .media-tab.active {
-        border-color: var(--theme-amber-border);
-        background: var(--theme-amber-bg);
-        color: var(--theme-amber-text);
-      }
-
-      .theme-blue .media-tab.active {
-        border-color: var(--theme-blue-border);
-        background: var(--theme-blue-bg);
-        color: var(--theme-blue-text);
+      .media-tab.active {
+        border-color: rgba(16, 185, 129, 0.28);
+        background: rgba(16, 185, 129, 0.1);
+        color: #065f46;
       }
 
       .media-tab-count {
@@ -2417,16 +2043,8 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         padding: 0 6px;
       }
 
-      .toolbar-row {
-        margin-top: 10px;
-        display: flex;
-        justify-content: space-between;
-        gap: 10px;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-
       .sub-filter-row {
+        margin-top: 10px;
         display: flex;
         align-items: center;
         gap: 8px;
@@ -2447,22 +2065,10 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         gap: 8px;
       }
 
-      .theme-green .sub-filter-pill.active {
-        border-color: var(--theme-green-border);
-        background: var(--theme-green-bg);
-        color: var(--theme-green-text);
-      }
-
-      .theme-amber .sub-filter-pill.active {
-        border-color: var(--theme-amber-border);
-        background: var(--theme-amber-bg);
-        color: var(--theme-amber-text);
-      }
-
-      .theme-blue .sub-filter-pill.active {
-        border-color: var(--theme-blue-border);
-        background: var(--theme-blue-bg);
-        color: var(--theme-blue-text);
+      .sub-filter-pill.active {
+        border-color: rgba(16, 185, 129, 0.28);
+        background: rgba(16, 185, 129, 0.1);
+        color: #065f46;
       }
 
       .sub-filter-count {
@@ -2477,40 +2083,6 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         align-items: center;
         justify-content: center;
         padding: 0 5px;
-      }
-
-      .sort-wrap {
-        display: flex;
-        gap: 8px;
-      }
-
-      .sort-pill {
-        min-height: 34px;
-        border-radius: 999px;
-        border: 1px solid var(--line);
-        background: rgba(255, 255, 255, 0.92);
-        color: #374151;
-        font-size: 12px;
-        font-weight: 900;
-        padding: 0 12px;
-      }
-
-      .theme-green .sort-pill.active {
-        border-color: var(--theme-green-border);
-        background: var(--theme-green-bg);
-        color: var(--theme-green-text);
-      }
-
-      .theme-amber .sort-pill.active {
-        border-color: var(--theme-amber-border);
-        background: var(--theme-amber-bg);
-        color: var(--theme-amber-text);
-      }
-
-      .theme-blue .sort-pill.active {
-        border-color: var(--theme-blue-border);
-        background: var(--theme-blue-bg);
-        color: var(--theme-blue-text);
       }
 
       .grid-wrap {
@@ -2545,23 +2117,12 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
       }
 
       .profile-media-card {
+        text-align: left;
         border-radius: 24px;
         border: 1px solid var(--line);
         background: #fff;
         overflow: hidden;
         box-shadow: 0 14px 30px rgba(15, 23, 42, 0.06);
-      }
-
-      .profile-media-card.archived {
-        opacity: 0.84;
-      }
-
-      .profile-media-main {
-        width: 100%;
-        text-align: left;
-        background: transparent;
-        border: 0;
-        padding: 0;
       }
 
       .profile-media-frame {
@@ -2578,10 +2139,6 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         display: block;
       }
 
-      .profile-media-card.archived .profile-media-img {
-        filter: saturate(0.75) brightness(0.9);
-      }
-
       .profile-media-fallback {
         width: 100%;
         height: 100%;
@@ -2595,15 +2152,15 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
       }
 
       .profile-media-fallback.give {
-        background: linear-gradient(180deg, rgba(16, 185, 129, 0.08) 0%, #f8fafc 100%);
+        background: linear-gradient(180deg, #f8fafc 0%, #e5e7eb 100%);
       }
 
       .profile-media-fallback.request {
-        background: linear-gradient(180deg, rgba(245, 158, 11, 0.08) 0%, #f8fafc 100%);
+        background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
       }
 
       .profile-media-fallback.event {
-        background: linear-gradient(180deg, rgba(59, 130, 246, 0.08) 0%, #f8fafc 100%);
+        background: linear-gradient(180deg, #faf5ff 0%, #ede9fe 100%);
       }
 
       .media-badge-row {
@@ -2612,12 +2169,10 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         left: 10px;
         right: 10px;
         display: flex;
-        justify-content: space-between;
-        gap: 8px;
+        justify-content: flex-start;
       }
 
-      .media-type-badge,
-      .media-archived-badge {
+      .media-type-badge {
         min-height: 26px;
         border-radius: 999px;
         padding: 0 9px;
@@ -2628,10 +2183,6 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         font-weight: 900;
         display: inline-flex;
         align-items: center;
-      }
-
-      .media-archived-badge {
-        background: rgba(239, 68, 68, 0.7);
       }
 
       .media-gradient {
@@ -2708,14 +2259,7 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         padding: 12px;
       }
 
-      .profile-media-stat {
-        font-size: 12px;
-        font-weight: 900;
-        color: #111827;
-      }
-
       .profile-media-desc {
-        margin-top: 6px;
         font-size: 13px;
         color: #6b7280;
         line-height: 1.45;
@@ -2723,10 +2267,6 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
-      }
-
-      .profile-media-actions {
-        padding: 0 12px 12px;
       }
 
       .empty-grid {
@@ -2845,6 +2385,11 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         align-items: center;
         justify-content: space-between;
         gap: 12px;
+      }
+
+      .drawer-menu-row.highlight {
+        border-color: rgba(16, 185, 129, 0.28);
+        background: rgba(16, 185, 129, 0.08);
       }
 
       .drawer-menu-copy {
@@ -3260,14 +2805,19 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
         height: 92px;
       }
 
-      .skel-actions {
+      .skel-pills {
         width: 100%;
-        height: 48px;
+        height: 68px;
       }
 
       .skel-tabs {
         width: 100%;
         height: 56px;
+      }
+
+      .skel-filter {
+        width: 180px;
+        height: 34px;
       }
 
       .skel-grid {
@@ -3282,10 +2832,6 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
 
         .profile-card {
           padding: 18px;
-        }
-
-        .action-grid {
-          grid-template-columns: 1fr 1fr;
         }
 
         .listing-grid {
@@ -3328,10 +2874,6 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
           font-size: 24px;
         }
 
-        .hero-actions {
-          flex-direction: column;
-        }
-
         .mini-stats {
           gap: 6px;
         }
@@ -3368,16 +2910,12 @@ function PageStyles({ theme }: { theme: "green" | "amber" | "blue" }) {
           font-size: 10px;
         }
 
-        .toolbar-row {
-          gap: 8px;
-        }
-
         .sub-filter-row {
+          margin-top: 8px;
           gap: 6px;
         }
 
-        .sub-filter-pill,
-        .sort-pill {
+        .sub-filter-pill {
           min-height: 32px;
           font-size: 11px;
           padding: 0 10px;
