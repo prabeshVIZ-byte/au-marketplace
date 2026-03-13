@@ -71,6 +71,8 @@ type DraftState = {
   requestGroup: RequestGroup;
   requestTimeframe: RequestTimeframe;
   requestLocation: string;
+  requestWillingToPay: boolean;
+  requestBudget: string;
 
   eventCategory: EventCategory;
   eventLocation: string;
@@ -186,6 +188,8 @@ function getDefaultDraft(): DraftState {
     requestGroup: "logistics",
     requestTimeframe: "today",
     requestLocation: "",
+    requestWillingToPay: false,
+    requestBudget: "",
 
     eventCategory: "club",
     eventLocation: "",
@@ -765,6 +769,15 @@ export default function CreatePage() {
         if (!draft.requestTimeframe) {
           return { ok: false, message: "Choose a timeframe.", section: "details" };
         }
+
+        const parsedBudget = parseOptionalPrice(draft.requestBudget);
+        if (Number.isNaN(parsedBudget)) {
+          return {
+            ok: false,
+            message: "Budget must be a valid number with up to 2 decimals.",
+            section: "details",
+          };
+        }
       }
 
       if (draft.mode === "event") {
@@ -972,6 +985,7 @@ export default function CreatePage() {
       const postType: PostType = draft.mode === "give" ? "give" : "request";
       const { untilCancel, expiresAt } = computeExpiry(draft.expireChoice);
       const parsedPrice = parseOptionalPrice(draft.price);
+      const parsedRequestBudget = parseOptionalPrice(draft.requestBudget);
 
       const itemInsert: {
         owner_id: string;
@@ -990,6 +1004,8 @@ export default function CreatePage() {
         request_group?: string | null;
         request_timeframe?: string | null;
         request_location?: string | null;
+        request_willing_to_pay?: boolean | null;
+        request_budget?: number | null;
       } = {
         owner_id: userId,
         title: cleanTitle,
@@ -1010,6 +1026,8 @@ export default function CreatePage() {
         itemInsert.request_group = null;
         itemInsert.request_timeframe = null;
         itemInsert.request_location = null;
+        itemInsert.request_willing_to_pay = null;
+        itemInsert.request_budget = null;
       } else {
         itemInsert.category = "others";
         itemInsert.pickup_location = null;
@@ -1018,6 +1036,9 @@ export default function CreatePage() {
         itemInsert.request_group = draft.requestGroup;
         itemInsert.request_timeframe = draft.requestTimeframe;
         itemInsert.request_location = draft.requestLocation.trim() || null;
+        itemInsert.request_willing_to_pay = draft.requestWillingToPay;
+        itemInsert.request_budget =
+          draft.requestWillingToPay && parsedRequestBudget !== null ? parsedRequestBudget : null;
       }
 
       const { data: createdItem, error: createItemErr } = await supabase
@@ -1481,6 +1502,47 @@ export default function CreatePage() {
             />
           </div>
 
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Willing to pay?</div>
+            <div style={segmentedWrap}>
+              <button
+                type="button"
+                onClick={() => {
+                  setDraft((prev) => ({
+                    ...prev,
+                    requestWillingToPay: false,
+                    requestBudget: "",
+                  }));
+                  setMsg(null);
+                  setFieldError(null);
+                }}
+                style={segmentBtn(!draft.requestWillingToPay)}
+              >
+                No
+              </button>
+              <button
+                type="button"
+                onClick={() => patchDraft("requestWillingToPay", true)}
+                style={segmentBtn(draft.requestWillingToPay)}
+              >
+                Yes
+              </button>
+            </div>
+          </div>
+
+          {draft.requestWillingToPay && (
+            <div style={detailGroup}>
+              <div style={fieldLabelModern}>Budget (optional)</div>
+              <input
+                value={draft.requestBudget}
+                onChange={(e) => patchDraft("requestBudget", sanitizePriceInput(e.target.value))}
+                style={softInputModern}
+                placeholder="Optional budget"
+                inputMode="decimal"
+              />
+            </div>
+          )}
+
           <div style={dividerLine} />
 
           <div style={detailGroup}>
@@ -1665,7 +1727,7 @@ export default function CreatePage() {
             </div>
             <div style={previewHeadline}>{cleanTitle || "Untitled post"}</div>
             <div style={{ marginTop: 8, fontSize: 13, fontWeight: 900, color: "#9a3412" }}>
-               {formatPriceLabel(draft.price, draft.negotiable)}
+              {formatPriceLabel(draft.price, draft.negotiable)}
             </div>
             <div style={previewText}>{cleanDesc || "No description yet."}</div>
             <div style={previewFooter}>
@@ -1695,6 +1757,9 @@ export default function CreatePage() {
                 <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>
                   {requestTimeframeLabel(draft.requestTimeframe)}
                 </span>
+                {draft.requestWillingToPay && (
+                  <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>Willing to pay</span>
+                )}
               </div>
 
               <div style={{ marginTop: 16, fontWeight: 1000, fontSize: 24, lineHeight: 1.15 }}>
