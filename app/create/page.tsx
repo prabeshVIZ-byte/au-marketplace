@@ -65,6 +65,8 @@ type DraftState = {
 
   giveCategory: GiveCategory;
   pickupLocation: PickupLocation;
+  price: string;
+  negotiable: boolean;
 
   requestGroup: RequestGroup;
   requestTimeframe: RequestTimeframe;
@@ -178,6 +180,8 @@ function getDefaultDraft(): DraftState {
 
     giveCategory: "books",
     pickupLocation: "College Quad",
+    price: "",
+    negotiable: false,
 
     requestGroup: "logistics",
     requestTimeframe: "today",
@@ -344,7 +348,7 @@ function stepSubtitle(mode: Mode, stepKey: StepKey) {
   if (mode === "give") {
     if (stepKey === "media") return "Photos make posts feel real and trustworthy.";
     if (stepKey === "write") return "Tell students what it is and why it matters.";
-    if (stepKey === "details") return "Help people understand category and pickup quickly.";
+    if (stepKey === "details") return "Help people understand category, pickup, and price quickly.";
     return "Check everything once before sharing.";
   }
 
@@ -358,6 +362,42 @@ function stepSubtitle(mode: Mode, stepKey: StepKey) {
   if (stepKey === "write") return "Make the event sound worth attending.";
   if (stepKey === "details") return "Add time, host, location, and category.";
   return "Check everything once before publishing.";
+}
+
+function sanitizePriceInput(raw: string) {
+  let out = raw.replace(/[^\d.]/g, "");
+
+  const firstDot = out.indexOf(".");
+  if (firstDot !== -1) {
+    out =
+      out.slice(0, firstDot + 1) +
+      out
+        .slice(firstDot + 1)
+        .replace(/\./g, "");
+  }
+
+  const [whole, dec] = out.split(".");
+  if (dec !== undefined) {
+    return `${whole}.${dec.slice(0, 2)}`;
+  }
+
+  return out;
+}
+
+function parseOptionalPrice(raw: string) {
+  const cleaned = raw.trim();
+  if (!cleaned) return null;
+  if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return NaN;
+  const value = Number(cleaned);
+  if (!Number.isFinite(value) || value < 0) return NaN;
+  return value;
+}
+
+function formatPriceLabel(raw: string, negotiable: boolean) {
+  const parsed = parseOptionalPrice(raw);
+  if (parsed === null) return "Free";
+  if (Number.isNaN(parsed)) return "Invalid price";
+  return `$${parsed.toFixed(2)}${negotiable ? " • Negotiable" : ""}`;
 }
 
 /* =========================
@@ -712,6 +752,14 @@ export default function CreatePage() {
         if (!draft.pickupLocation) {
           return { ok: false, message: "Choose a pickup location.", section: "details" };
         }
+        const parsedPrice = parseOptionalPrice(draft.price);
+        if (Number.isNaN(parsedPrice)) {
+          return {
+            ok: false,
+            message: "Price must be a valid number with up to 2 decimals.",
+            section: "details",
+          };
+        }
       }
 
       if (draft.mode === "request") {
@@ -927,6 +975,7 @@ export default function CreatePage() {
 
       const postType: PostType = draft.mode === "give" ? "give" : "request";
       const { untilCancel, expiresAt } = computeExpiry(draft.expireChoice);
+      const parsedPrice = parseOptionalPrice(draft.price);
 
       const itemInsert: {
         owner_id: string;
@@ -938,6 +987,8 @@ export default function CreatePage() {
         expires_at: string | null;
         photo_url: string | null;
         post_type: PostType;
+        price?: number | null;
+        is_negotiable?: boolean | null;
         category?: string | null;
         pickup_location?: string | null;
         request_group?: string | null;
@@ -958,12 +1009,16 @@ export default function CreatePage() {
       if (postType === "give") {
         itemInsert.category = draft.giveCategory;
         itemInsert.pickup_location = draft.pickupLocation;
+        itemInsert.price = parsedPrice === null ? null : parsedPrice;
+        itemInsert.is_negotiable = draft.negotiable;
         itemInsert.request_group = null;
         itemInsert.request_timeframe = null;
         itemInsert.request_location = null;
       } else {
         itemInsert.category = "others";
         itemInsert.pickup_location = null;
+        itemInsert.price = null;
+        itemInsert.is_negotiable = false;
         itemInsert.request_group = draft.requestGroup;
         itemInsert.request_timeframe = draft.requestTimeframe;
         itemInsert.request_location = draft.requestLocation.trim() || null;
@@ -1004,7 +1059,7 @@ export default function CreatePage() {
           contentType: itemFile.type || undefined,
         });
 
-        if (uploadErr) {
+      if (uploadErr) {
         await supabase.from(ITEMS_TABLE).delete().eq("id", itemId);
         throw new Error(`Image upload failed: ${uploadErr.message}`);
       }
@@ -1297,6 +1352,40 @@ export default function CreatePage() {
             </div>
           </div>
 
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Price (optional)</div>
+            <input
+              value={draft.price}
+              onChange={(e) => patchDraft("price", sanitizePriceInput(e.target.value))}
+              style={softInputModern}
+              inputMode="decimal"
+              placeholder="Leave blank if free"
+            />
+            <div style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>
+              Enter only numbers, like 10 or 10.50
+            </div>
+          </div>
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Negotiation</div>
+            <div style={segmentedWrap}>
+              <button
+                type="button"
+                onClick={() => patchDraft("negotiable", false)}
+                style={segmentBtn(!draft.negotiable)}
+              >
+                Fixed price
+              </button>
+              <button
+                type="button"
+                onClick={() => patchDraft("negotiable", true)}
+                style={segmentBtn(draft.negotiable)}
+              >
+                Negotiable
+              </button>
+            </div>
+          </div>
+
           <div style={dividerLine} />
 
           <div style={detailGroup}>
@@ -1569,6 +1658,9 @@ export default function CreatePage() {
               {giveCategoryLabel(draft.giveCategory)} • {draft.pickupLocation}
             </div>
             <div style={previewHeadline}>{cleanTitle || "Untitled post"}</div>
+            <div style={{ marginTop: 8, fontSize: 13, fontWeight: 900, color: "#9a3412" }}>
+              💵 {formatPriceLabel(draft.price, draft.negotiable)}
+            </div>
             <div style={previewText}>{cleanDesc || "No description yet."}</div>
             <div style={previewFooter}>
               {draft.hideName ? "Anonymous" : "Visible name"} •{" "}
@@ -1668,6 +1760,10 @@ export default function CreatePage() {
               <div style={reviewRow}>
                 <span style={reviewLabel}>Pickup</span>
                 <span style={reviewValue}>{draft.pickupLocation}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Price</span>
+                <span style={reviewValue}>{formatPriceLabel(draft.price, draft.negotiable)}</span>
               </div>
               <div style={reviewRow}>
                 <span style={reviewLabel}>Auto-close</span>
