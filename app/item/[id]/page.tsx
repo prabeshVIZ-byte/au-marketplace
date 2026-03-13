@@ -9,7 +9,37 @@ import { ensureThread } from "@/lib/ensureThread";
 
 const LOVES_TABLE = "post_likes";
 
+/* =========================
+   TYPES
+========================= */
+
 type PostType = "give" | "request";
+
+type InterestStatus =
+  | "pending"
+  | "accepted"
+  | "reserved"
+  | "declined"
+  | "withdrawn"
+  | "expired"
+  | "completed"
+  | null;
+
+type OfferStatus =
+  | "pending"
+  | "hold"
+  | "accepted"
+  | "declined"
+  | "completed"
+  | null;
+
+type ItemStatus =
+  | "available"
+  | "reserved"
+  | "claimed"
+  | "completed"
+  | string
+  | null;
 
 type ItemRow = {
   id: string;
@@ -29,7 +59,7 @@ type ItemRow = {
   is_anonymous: boolean | null;
   expires_at: string | null;
   photo_url: string | null;
-  status: string | null;
+  status: ItemStatus;
   owner_id: string | null;
   price: number | null;
   is_negotiable: boolean | null;
@@ -47,7 +77,7 @@ type MyInterestRow = {
   id: string;
   item_id: string;
   user_id: string;
-  status: string | null;
+  status: InterestStatus;
   created_at: string | null;
 };
 
@@ -55,7 +85,7 @@ type MyOfferRow = {
   id: string;
   request_id: string;
   helper_id: string;
-  status: string | null;
+  status: OfferStatus;
   created_at: string | null;
 };
 
@@ -63,7 +93,7 @@ type CompletedInterestQueryRow = {
   id: string;
   item_id: string;
   user_id: string;
-  status: string | null;
+  status: InterestStatus;
   completed_at: string | null;
   reserved_at: string | null;
   accepted_at: string | null;
@@ -83,7 +113,7 @@ type CompletedInterestRow = {
   id: string;
   item_id: string;
   user_id: string;
-  status: string | null;
+  status: InterestStatus;
   completed_at: string | null;
   reserved_at: string | null;
   accepted_at: string | null;
@@ -93,13 +123,58 @@ type CompletedInterestRow = {
   } | null;
 };
 
+type LoadedItemDetail = {
+  item: ItemRow | null;
+  owner: OwnerProfile | null;
+  loveCount: number;
+  myLoved: boolean;
+  interestCount: number;
+  offerCount: number;
+  myInterest: MyInterestRow | null;
+  myOffer: MyOfferRow | null;
+  hasAcceptedOther: boolean;
+  completedInterest: CompletedInterestRow | null;
+};
+
+type ToastState = {
+  msg: string;
+  kind: "ok" | "err";
+} | null;
+
+type FlowConfig = {
+  kind:
+    | "owner"
+    | "login"
+    | "reserved"
+    | "accepted"
+    | "pending"
+    | "closed"
+    | "reserved_other"
+    | "waitlist"
+    | "open";
+  title: string;
+  body: string;
+  primary: string;
+  secondary: string | null;
+  primaryDisabled: boolean;
+  secondaryDisabled: boolean;
+};
+
+/* =========================
+   HELPERS
+========================= */
+
 function singleRelation<T>(value: T | T[] | null | undefined): T | null {
   if (Array.isArray(value)) return value[0] ?? null;
   return value ?? null;
 }
 
+function normStatus(v: string | null | undefined) {
+  return (v ?? "").trim().toLowerCase();
+}
+
 function requestGroupLabel(v: string | null) {
-  const k = (v ?? "").toLowerCase();
+  const k = normStatus(v);
   if (k === "logistics") return "Logistics";
   if (k === "services") return "Services";
   if (k === "urgent") return "Urgent";
@@ -109,7 +184,7 @@ function requestGroupLabel(v: string | null) {
 }
 
 function requestTimeframeLabel(v: string | null) {
-  const k = (v ?? "").toLowerCase();
+  const k = normStatus(v);
   if (k === "today") return "Today";
   if (k === "this_week") return "This week";
   if (k === "flexible") return "Flexible";
@@ -158,7 +233,10 @@ function formatPrice(price: number | null | undefined) {
   return `$${n.toFixed(2)}`;
 }
 
-function formatPriceWithNegotiable(price: number | null | undefined, isNegotiable: boolean | null | undefined) {
+function formatPriceWithNegotiable(
+  price: number | null | undefined,
+  isNegotiable: boolean | null | undefined
+) {
   const base = formatPrice(price);
   if (price === null || price === undefined) return base;
   return isNegotiable ? `${base} • Negotiable` : `${base} • Fixed`;
@@ -190,10 +268,6 @@ function initials(name: string) {
   return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
 }
 
-function normStatus(v: string | null | undefined) {
-  return (v ?? "").trim().toLowerCase();
-}
-
 function isExpired(expiresAt: string | null | undefined) {
   if (!expiresAt) return false;
   const ts = new Date(expiresAt).getTime();
@@ -213,17 +287,708 @@ function isRequestClosed(item: ItemRow | null) {
   return st === "claimed" || st === "completed" || isExpired(item.expires_at);
 }
 
-function statusChip(item: ItemRow | null) {
-  const st = normStatus(item?.status);
-
+function getStatusChip(item: ItemRow | null) {
   if (!item) return { label: "Loading", tone: "neutral" as const };
+
+  const st = normStatus(item.status);
+  const isGive = (item.post_type ?? "give") === "give";
+
   if (isExpired(item.expires_at) && st !== "claimed" && st !== "completed") {
     return { label: "Expired", tone: "closed" as const };
   }
-  if (st === "claimed" || st === "completed") return { label: "Given", tone: "closed" as const };
-  if (st === "reserved") return { label: "Reserved", tone: "warn" as const };
-  return { label: "Available", tone: "good" as const };
+
+  if (st === "reserved") {
+    return {
+      label: isGive ? "Reserved" : "In progress",
+      tone: "warn" as const,
+    };
+  }
+
+  if (st === "claimed" || st === "completed") {
+    return {
+      label: isGive ? "Given" : "Fulfilled",
+      tone: "closed" as const,
+    };
+  }
+
+  return {
+    label: isGive ? "Available" : "Open",
+    tone: "good" as const,
+  };
 }
+
+function getSubtitle(item: ItemRow | null, postType: PostType) {
+  if (!item) return "";
+
+  if (postType === "request") {
+    return [
+      requestGroupLabel(item.request_group),
+      item.request_timeframe ? requestTimeframeLabel(item.request_timeframe) : "",
+      item.request_location?.trim() ? item.request_location : "",
+    ]
+      .filter(Boolean)
+      .join(" • ");
+  }
+
+  return [
+    item.category?.trim() ? giveCategoryLabel(item.category) : "",
+    item.pickup_location?.trim() ? item.pickup_location : "",
+  ]
+    .filter(Boolean)
+    .join(" • ");
+}
+
+function getActivityLabel(args: {
+  item: ItemRow | null;
+  publicActivityHidden: boolean;
+  postType: PostType;
+  interestCount: number;
+  offerCount: number;
+}) {
+  const { item, publicActivityHidden, postType, interestCount, offerCount } = args;
+  if (!item) return "";
+
+  if (publicActivityHidden) {
+    return postType === "give" ? "Requests hidden" : "Offers hidden";
+  }
+
+  if (postType === "give") {
+    return `${interestCount} request${interestCount === 1 ? "" : "s"}`;
+  }
+
+  return `${offerCount} offer${offerCount === 1 ? "" : "s"}`;
+}
+
+function getGiveFlow(args: {
+  item: ItemRow | null;
+  isOwner: boolean;
+  isAshland: boolean;
+  myInterest: MyInterestRow | null;
+  hasAcceptedOther: boolean;
+}): FlowConfig | null {
+  const { item, isOwner, isAshland, myInterest, hasAcceptedOther } = args;
+  if (!item || (item.post_type ?? "give") !== "give") return null;
+
+  const mine = normStatus(myInterest?.status);
+
+  if (isOwner) {
+    if (isGiveClosed(item)) return null;
+
+    return {
+      kind: "owner",
+      title: "You own this item.",
+      body: "Review requests, manage pickup, or update the listing.",
+      primary: "Manage item",
+      secondary: "Edit item",
+      primaryDisabled: false,
+      secondaryDisabled: false,
+    };
+  }
+
+  if (!isAshland) {
+    return {
+      kind: "login",
+      title: "Log in to request this item.",
+      body: "Only Ashland users can request items.",
+      primary: "Log in",
+      secondary: null,
+      primaryDisabled: false,
+      secondaryDisabled: false,
+    };
+  }
+
+  if (mine === "reserved") {
+    return {
+      kind: "reserved",
+      title: "Pickup confirmed.",
+      body: "This item is reserved for you. Continue in chat.",
+      primary: "Open chat",
+      secondary: null,
+      primaryDisabled: false,
+      secondaryDisabled: false,
+    };
+  }
+
+  if (mine === "accepted") {
+    return {
+      kind: "accepted",
+      title: "Your request was accepted.",
+      body: "Open chat to continue the handoff.",
+      primary: "Open chat",
+      secondary: null,
+      primaryDisabled: false,
+      secondaryDisabled: false,
+    };
+  }
+
+  if (mine === "pending") {
+    return {
+      kind: "pending",
+      title: hasAcceptedOther ? "Waitlist only." : "Request sent.",
+      body: hasAcceptedOther
+        ? "The owner is already talking with another requester, but you are still in line."
+        : "The owner has not picked a requester yet.",
+      primary: "Requested",
+      secondary: "Withdraw",
+      primaryDisabled: true,
+      secondaryDisabled: false,
+    };
+  }
+
+  if (isGiveClosed(item)) {
+    return {
+      kind: "closed",
+      title: "This item is no longer available.",
+      body: "Requests are closed for this listing.",
+      primary: "Unavailable",
+      secondary: null,
+      primaryDisabled: true,
+      secondaryDisabled: true,
+    };
+  }
+
+  if (normStatus(item.status) === "reserved") {
+    return {
+      kind: "reserved_other",
+      title: "This item is already reserved.",
+      body: "A handoff is already in progress.",
+      primary: "Unavailable",
+      secondary: null,
+      primaryDisabled: true,
+      secondaryDisabled: true,
+    };
+  }
+
+  if (hasAcceptedOther) {
+    return {
+      kind: "waitlist",
+      title: "Waitlist only.",
+      body: "Another requester is currently being considered, but you can join the backup queue.",
+      primary: "Join waitlist",
+      secondary: null,
+      primaryDisabled: false,
+      secondaryDisabled: false,
+    };
+  }
+
+  return {
+    kind: "open",
+    title: "This item is open.",
+    body: "Send a request to start the handoff.",
+    primary: "Request item",
+    secondary: null,
+    primaryDisabled: false,
+    secondaryDisabled: false,
+  };
+}
+
+function getRequestFlow(args: {
+  item: ItemRow | null;
+  isOwner: boolean;
+  isAshland: boolean;
+  myOffer: MyOfferRow | null;
+}): FlowConfig | null {
+  const { item, isOwner, isAshland, myOffer } = args;
+  if (!item || (item.post_type ?? "give") !== "request") return null;
+
+  const mine = normStatus(myOffer?.status);
+
+  if (isOwner) {
+    if (isRequestClosed(item)) return null;
+
+    return {
+      kind: "owner",
+      title: "You own this request.",
+      body: "Review helper offers or update the request.",
+      primary: "Manage request",
+      secondary: "Edit request",
+      primaryDisabled: false,
+      secondaryDisabled: false,
+    };
+  }
+
+  if (!isAshland) {
+    return {
+      kind: "login",
+      title: "Log in to offer help.",
+      body: "Only Ashland users can respond to requests.",
+      primary: "Log in",
+      secondary: null,
+      primaryDisabled: false,
+      secondaryDisabled: false,
+    };
+  }
+
+  if (mine === "accepted" || mine === "completed") {
+    return {
+      kind: "accepted",
+      title: "Your offer was accepted.",
+      body: "Continue in chat with the requester.",
+      primary: "Open chat",
+      secondary: null,
+      primaryDisabled: false,
+      secondaryDisabled: false,
+    };
+  }
+
+  if (mine === "pending" || mine === "hold") {
+    return {
+      kind: "pending",
+      title: "Your offer is active.",
+      body:
+        mine === "hold"
+          ? "The requester placed your offer on hold."
+          : "Waiting for the requester to decide.",
+      primary: "Offer sent",
+      secondary: "Withdraw",
+      primaryDisabled: true,
+      secondaryDisabled: false,
+    };
+  }
+
+  if (isRequestClosed(item)) {
+    return {
+      kind: "closed",
+      title: "This request is closed.",
+      body: "New helper offers are not being accepted.",
+      primary: "Closed",
+      secondary: null,
+      primaryDisabled: true,
+      secondaryDisabled: true,
+    };
+  }
+
+  return {
+    kind: "open",
+    title: "You can help with this request.",
+    body: "Send an offer so the requester knows you can help.",
+    primary: mine === "declined" ? "Offer again" : "Offer help",
+    secondary: null,
+    primaryDisabled: false,
+    secondaryDisabled: false,
+  };
+}
+
+async function loadItemDetail(itemId: string, uid: string | null): Promise<LoadedItemDetail> {
+  const empty: LoadedItemDetail = {
+    item: null,
+    owner: null,
+    loveCount: 0,
+    myLoved: false,
+    interestCount: 0,
+    offerCount: 0,
+    myInterest: null,
+    myOffer: null,
+    hasAcceptedOther: false,
+    completedInterest: null,
+  };
+
+  const { data: it, error: itemErr } = await supabase
+    .from("items")
+    .select(
+      "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,request_willing_to_pay,request_budget,is_anonymous,expires_at,photo_url,status,owner_id,price,is_negotiable,hide_interest_count,reserved_interest_id,claimed_at"
+    )
+    .eq("id", itemId)
+    .single();
+
+  if (itemErr) throw new Error(itemErr.message);
+
+  const item = it as ItemRow;
+
+  let owner: OwnerProfile | null = null;
+  if (!item.is_anonymous && item.owner_id) {
+    const { data: prof, error: ownerErr } = await supabase
+      .from("profiles")
+      .select("full_name,user_role")
+      .eq("id", item.owner_id)
+      .maybeSingle();
+
+    if (ownerErr) throw new Error(ownerErr.message);
+    owner = (prof as OwnerProfile) ?? null;
+  }
+
+  const { count: lovesCount, error: loveCountErr } = await supabase
+    .from(LOVES_TABLE)
+    .select("*", { count: "exact", head: true })
+    .eq("item_id", itemId);
+
+  if (loveCountErr) throw new Error(loveCountErr.message);
+
+  let myLoved = false;
+  if (uid) {
+    const { data: mineLove, error: mineLoveErr } = await supabase
+      .from(LOVES_TABLE)
+      .select("item_id")
+      .eq("item_id", itemId)
+      .eq("user_id", uid)
+      .maybeSingle();
+
+    if (mineLoveErr) throw new Error(mineLoveErr.message);
+    myLoved = !!mineLove;
+  }
+
+  let interestCount = 0;
+  let offerCount = 0;
+  let myInterest: MyInterestRow | null = null;
+  let myOffer: MyOfferRow | null = null;
+  let hasAcceptedOther = false;
+  let completedInterest: CompletedInterestRow | null = null;
+
+  if ((item.post_type ?? "give") === "give") {
+    const { data: interestRows, error: interestErr } = await supabase
+      .from("interests")
+      .select("id,item_id,user_id,status,created_at")
+      .eq("item_id", itemId);
+
+    if (interestErr) throw new Error(interestErr.message);
+
+    const rows = ((interestRows ?? []) as MyInterestRow[]) || [];
+    const active = rows.filter((row) =>
+      ["pending", "accepted", "reserved"].includes(normStatus(row.status))
+    );
+
+    interestCount = active.length;
+    hasAcceptedOther = rows.some(
+      (row) =>
+        normStatus(row.status) === "accepted" &&
+        (!!uid ? row.user_id !== uid : true)
+    );
+
+    if (uid) {
+      myInterest =
+        rows.find((row) => row.user_id === uid && normStatus(row.status) !== "withdrawn") ||
+        rows.find((row) => row.user_id === uid) ||
+        null;
+    }
+
+    if (isGiveClosed(item)) {
+      const { data: completedRows, error: completedErr } = await supabase
+        .from("interests")
+        .select(`
+          id,
+          item_id,
+          user_id,
+          status,
+          completed_at,
+          reserved_at,
+          accepted_at,
+          requester:profiles!interests_user_id_fkey(full_name,email)
+        `)
+        .eq("item_id", itemId)
+        .in("status", ["completed", "reserved", "accepted"]);
+
+      if (completedErr) throw new Error(completedErr.message);
+
+      const normalizedCompletedRows: CompletedInterestRow[] = (
+        ((completedRows ?? []) as CompletedInterestQueryRow[])
+      ).map((row) => ({
+        id: row.id,
+        item_id: row.item_id,
+        user_id: row.user_id,
+        status: row.status,
+        completed_at: row.completed_at,
+        reserved_at: row.reserved_at,
+        accepted_at: row.accepted_at,
+        requester: singleRelation(row.requester),
+      }));
+
+      const candidates = normalizedCompletedRows.sort((a, b) => {
+        const aTs = new Date(
+          a.completed_at || a.reserved_at || a.accepted_at || "1970-01-01"
+        ).getTime();
+        const bTs = new Date(
+          b.completed_at || b.reserved_at || b.accepted_at || "1970-01-01"
+        ).getTime();
+        return bTs - aTs;
+      });
+
+      const reservedMatch = item.reserved_interest_id
+        ? candidates.find((x) => x.id === item.reserved_interest_id) ?? null
+        : null;
+
+      completedInterest = reservedMatch ?? candidates[0] ?? null;
+    }
+  } else {
+    const { data: offerRows, error: offerErr } = await supabase
+      .from("request_offers")
+      .select("id,request_id,helper_id,status,created_at")
+      .eq("request_id", itemId);
+
+    if (offerErr) throw new Error(offerErr.message);
+
+    const rows = ((offerRows ?? []) as MyOfferRow[]) || [];
+    const active = rows.filter((row) =>
+      ["pending", "hold", "accepted"].includes(normStatus(row.status))
+    );
+
+    offerCount = active.length;
+
+    if (uid) {
+      myOffer = rows.find((row) => row.helper_id === uid) || null;
+    }
+  }
+
+  return {
+    item,
+    owner,
+    loveCount: lovesCount ?? 0,
+    myLoved,
+    interestCount,
+    offerCount,
+    myInterest,
+    myOffer,
+    hasAcceptedOther,
+    completedInterest,
+  };
+}
+
+/* =========================
+   SMALL UI PARTS
+========================= */
+
+function DetailHeader(props: {
+  ownerLabel: string;
+  subtitle: string;
+  postType: PostType;
+  isOwner: boolean;
+  myLoved: boolean;
+  busy: boolean;
+  onLove: () => void;
+  menuOpen: boolean;
+  setMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  onManage: () => void;
+  onEdit: () => void;
+  onToggleCount: () => void;
+  onDelete: () => void;
+  hideCount: boolean;
+  isArchivedOwnerView: boolean;
+}) {
+  const {
+    ownerLabel,
+    subtitle,
+    postType,
+    isOwner,
+    myLoved,
+    busy,
+    onLove,
+    menuOpen,
+    setMenuOpen,
+    onManage,
+    onEdit,
+    onToggleCount,
+    onDelete,
+    hideCount,
+    isArchivedOwnerView,
+  } = props;
+
+  const manageLabel = postType === "give" ? "Manage item" : "Manage request";
+  const editLabel = postType === "give" ? "Edit item" : "Edit request";
+  const visibilityLabel =
+    postType === "give"
+      ? hideCount
+        ? "Show requests"
+        : "Hide requests"
+      : hideCount
+      ? "Show offers"
+      : "Hide offers";
+
+  return (
+    <div className="cardTop">
+      <div className="authorSide">
+        <div className={`avatar avatar-${postType}`}>{initials(ownerLabel)}</div>
+
+        <div className="authorText">
+          <div className="authorName">{ownerLabel}</div>
+          {subtitle ? <div className="authorSub">{subtitle}</div> : null}
+        </div>
+      </div>
+
+      {isOwner ? (
+        <div className="menuWrap">
+          {menuOpen ? (
+            <button
+              className="menuBackdrop"
+              aria-label="Close menu"
+              onClick={() => setMenuOpen(false)}
+              type="button"
+            />
+          ) : null}
+
+          <button
+            className="menuBtn"
+            type="button"
+            aria-label="Post options"
+            onClick={() => setMenuOpen((v) => !v)}
+          >
+            ⋯
+          </button>
+
+          {menuOpen ? (
+            <div className="menuCard">
+              {!isArchivedOwnerView ? (
+                <>
+                  <button className="menuItem" type="button" onClick={onManage}>
+                    {manageLabel}
+                  </button>
+
+                  <button className="menuItem" type="button" onClick={onEdit}>
+                    {editLabel}
+                  </button>
+
+                  <button className="menuItem" type="button" onClick={onToggleCount}>
+                    {visibilityLabel}
+                  </button>
+                </>
+              ) : null}
+
+              <button className="menuItem danger" type="button" onClick={onDelete}>
+                Delete listing
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <button
+          className={`loveBtn ${myLoved ? "active" : ""}`}
+          type="button"
+          onClick={onLove}
+          disabled={busy}
+          aria-label="Love post"
+        >
+          {myLoved ? "♥" : "♡"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function DetailMedia(props: {
+  photoUrl: string | null;
+  title: string;
+  postType: PostType;
+  onOpen: (src: string) => void;
+}) {
+  const { photoUrl, title, postType, onOpen } = props;
+
+  return (
+    <div className="mediaWrap">
+      {photoUrl ? (
+        <button className="imgBtn" type="button" onClick={() => onOpen(photoUrl)}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={photoUrl} alt={title} className="heroImg" />
+        </button>
+      ) : (
+        <div className={`noPhoto noPhoto-${postType}`}>No image</div>
+      )}
+    </div>
+  );
+}
+
+function StatRow(props: {
+  loveCount: number;
+  activityLabel: string;
+  statusLabel: string;
+  statusTone: "good" | "warn" | "closed" | "neutral";
+  postType: PostType;
+  delistLabel: string;
+}) {
+  return (
+    <div className="statsRow">
+      <span className="stat">
+        <span className="statIcon">♥</span> {props.loveCount}
+      </span>
+
+      <span className="dot">•</span>
+
+      <span className="stat">{props.activityLabel}</span>
+
+      <span className="dot">•</span>
+
+      <span className={`statusPill ${props.statusTone} ${props.postType}`}>
+        {props.statusLabel}
+      </span>
+
+      <span className="dot">•</span>
+
+      <span className="stat">Delists {props.delistLabel}</span>
+    </div>
+  );
+}
+
+function ArchivedHandoffCard(props: {
+  soldToLabel: string;
+  soldAtLabel: string | null | undefined;
+}) {
+  return (
+    <div className="archivedCard">
+      <div className="archivedTitle">Completed handoff</div>
+      <div className="archivedBody">
+        This listing has been completed and moved to archive.
+      </div>
+
+      <div className="archivedMetaGrid">
+        <div className="archivedMetaBox">
+          <div className="archivedMetaLabel">Given to</div>
+          <div className="archivedMetaValue">{props.soldToLabel}</div>
+        </div>
+
+        <div className="archivedMetaBox">
+          <div className="archivedMetaLabel">Given on</div>
+          <div className="archivedMetaValue">{formatFullWhen(props.soldAtLabel)}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FlowCard(props: {
+  postType: PostType;
+  flow: FlowConfig;
+  actionBusy: string | null;
+  onPrimary: () => void;
+  onSecondary?: () => void;
+}) {
+  const { postType, flow, actionBusy, onPrimary, onSecondary } = props;
+
+  return (
+    <div className={`flowCard flowCard-${postType}`}>
+      <div className="flowTitle">{flow.title}</div>
+      <div className="flowBody">{flow.body}</div>
+
+      <div className="flowActions">
+        <button
+          className={`primaryAction primaryAction-${postType}`}
+          type="button"
+          disabled={flow.primaryDisabled || !!actionBusy}
+          onClick={onPrimary}
+        >
+          {actionBusy === "chat"
+            ? "Opening…"
+            : actionBusy === "interest" || actionBusy === "offer"
+            ? "Sending…"
+            : flow.primary}
+        </button>
+
+        {flow.secondary ? (
+          <button
+            className="secondaryAction"
+            type="button"
+            disabled={flow.secondaryDisabled || !!actionBusy}
+            onClick={onSecondary}
+          >
+            {actionBusy === "withdraw-interest" || actionBusy === "withdraw-offer"
+              ? "Working…"
+              : flow.secondary}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/* =========================
+   PAGE
+========================= */
 
 export default function ItemDetailPage() {
   const router = useRouter();
@@ -255,9 +1020,8 @@ export default function ItemDetailPage() {
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [openImg, setOpenImg] = useState<string | null>(null);
-
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
+  const [toast, setToast] = useState<ToastState>(null);
 
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -270,7 +1034,7 @@ export default function ItemDetailPage() {
 
   const ownerLabel = useMemo(() => ownerNameLabel(item, owner), [item, owner]);
   const publicActivityHidden = !!item?.hide_interest_count && !isOwner;
-  const itemStateChip = useMemo(() => statusChip(item), [item]);
+  const itemStateChip = useMemo(() => getStatusChip(item), [item]);
 
   const isArchivedGiveOwnerView = useMemo(() => {
     return !!item && postType === "give" && isOwner && isGiveClosed(item);
@@ -281,7 +1045,7 @@ export default function ItemDetailPage() {
   }, [completedInterest]);
 
   const soldAtLabel = useMemo(() => {
-    if (!completedInterest) return "—";
+    if (!completedInterest) return item?.claimed_at || null;
     return (
       completedInterest.completed_at ||
       completedInterest.reserved_at ||
@@ -291,239 +1055,56 @@ export default function ItemDetailPage() {
     );
   }, [completedInterest, item?.claimed_at]);
 
-  const subtitle = useMemo(() => {
-    if (!item) return "";
-
-    if (postType === "request") {
-      return [
-        requestGroupLabel(item.request_group),
-        item.request_timeframe ? requestTimeframeLabel(item.request_timeframe) : "",
-        item.request_location?.trim() ? item.request_location : "",
-      ]
-        .filter(Boolean)
-        .join(" • ");
-    }
-
-    return [
-      item.category?.trim() ? giveCategoryLabel(item.category) : "",
-      item.pickup_location?.trim() ? item.pickup_location : "",
-    ]
-      .filter(Boolean)
-      .join(" • ");
-  }, [item, postType]);
+  const subtitle = useMemo(() => getSubtitle(item, postType), [item, postType]);
 
   const activityLabel = useMemo(() => {
-    if (!item) return "";
-    if (publicActivityHidden) {
-      return postType === "give" ? "Requests hidden" : "Offers hidden";
-    }
-    if (postType === "give") {
-      return `${interestCount} request${interestCount === 1 ? "" : "s"}`;
-    }
-    return `${offerCount} offer${offerCount === 1 ? "" : "s"}`;
+    return getActivityLabel({
+      item,
+      publicActivityHidden,
+      postType,
+      interestCount,
+      offerCount,
+    });
   }, [item, publicActivityHidden, postType, interestCount, offerCount]);
 
   const giveFlow = useMemo(() => {
-    if (!item || postType !== "give") return null;
-
-    const mine = normStatus(myInterest?.status);
-
-    if (isOwner) {
-      if (isGiveClosed(item)) return null;
-
-      return {
-        kind: "owner" as const,
-        title: "You own this item.",
-        body: "Use manage to handle requests, pickup flow, and completion.",
-        primary: "Manage item",
-        secondary: "Edit item",
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (!isAshland) {
-      return {
-        kind: "login" as const,
-        title: "Log in to request this item.",
-        body: "Only Ashland users can request items.",
-        primary: "Log in",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (mine === "reserved") {
-      return {
-        kind: "reserved" as const,
-        title: "Pickup confirmed.",
-        body: "This item is reserved for you. Continue in chat.",
-        primary: "Open chat",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (mine === "accepted") {
-      return {
-        kind: "accepted" as const,
-        title: "Seller accepted your request.",
-        body: "Open chat to continue the pickup flow.",
-        primary: "Open chat",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (mine === "pending") {
-      return {
-        kind: "pending" as const,
-        title: hasAcceptedOther
-          ? "You are on the waitlist."
-          : "Your request has been sent.",
-        body: hasAcceptedOther
-          ? "Someone else is currently being considered first."
-          : "The owner has not chosen a requester yet.",
-        primary: "Requested",
-        secondary: "Withdraw",
-        primaryDisabled: true,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (isGiveClosed(item)) {
-      return {
-        kind: "closed" as const,
-        title: "This item is no longer available.",
-        body: "You can still view it, but requests are closed.",
-        primary: "Unavailable",
-        secondary: null,
-        primaryDisabled: true,
-        secondaryDisabled: true,
-      };
-    }
-
-    if (normStatus(item.status) === "reserved") {
-      return {
-        kind: "reserved_other" as const,
-        title: "This item is already reserved.",
-        body: "A pickup is already in progress.",
-        primary: "Unavailable",
-        secondary: null,
-        primaryDisabled: true,
-        secondaryDisabled: true,
-      };
-    }
-
-    if (hasAcceptedOther) {
-      return {
-        kind: "waitlist" as const,
-        title: "Someone else is being considered.",
-        body: "You can still join the waitlist in case it falls through.",
-        primary: "Join waitlist",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    return {
-      kind: "open" as const,
-      title: "This item is open for requests.",
-      body: "Send your request to start the pickup process.",
-      primary: "Request item",
-      secondary: null,
-      primaryDisabled: false,
-      secondaryDisabled: false,
-    };
-  }, [item, postType, isOwner, isAshland, myInterest, hasAcceptedOther]);
+    return getGiveFlow({
+      item,
+      isOwner,
+      isAshland,
+      myInterest,
+      hasAcceptedOther,
+    });
+  }, [item, isOwner, isAshland, myInterest, hasAcceptedOther]);
 
   const requestFlow = useMemo(() => {
-    if (!item || postType !== "request") return null;
-
-    const mine = normStatus(myOffer?.status);
-
-    if (isOwner) {
-      return {
-        kind: "owner" as const,
-        title: "You own this request post.",
-        body: "Use manage to review incoming helper offers.",
-        primary: "Manage request",
-        secondary: "Edit request",
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (!isAshland) {
-      return {
-        kind: "login" as const,
-        title: "Log in to offer help.",
-        body: "Only Ashland users can respond to requests.",
-        primary: "Log in",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (mine === "accepted" || mine === "completed") {
-      return {
-        kind: "accepted" as const,
-        title: "Your help offer was accepted.",
-        body: "Continue in chat with the requester.",
-        primary: "Open chat",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (mine === "pending" || mine === "hold") {
-      return {
-        kind: "pending" as const,
-        title: "Your offer is active.",
-        body:
-          mine === "hold"
-            ? "The requester placed your offer on hold."
-            : "Waiting for the requester to decide.",
-        primary: "Offer sent",
-        secondary: "Withdraw",
-        primaryDisabled: true,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (isRequestClosed(item)) {
-      return {
-        kind: "closed" as const,
-        title: "This request is closed.",
-        body: "New helper offers are not being accepted.",
-        primary: "Closed",
-        secondary: null,
-        primaryDisabled: true,
-        secondaryDisabled: true,
-      };
-    }
-
-    return {
-      kind: "open" as const,
-      title: "You can offer help on this request.",
-      body: "Send an offer to let the requester know you can help.",
-      primary: mine === "declined" ? "Offer again" : "Offer help",
-      secondary: null,
-      primaryDisabled: false,
-      secondaryDisabled: false,
-    };
-  }, [item, postType, isOwner, isAshland, myOffer]);
+    return getRequestFlow({
+      item,
+      isOwner,
+      isAshland,
+      myOffer,
+    });
+  }, [item, isOwner, isAshland, myOffer]);
 
   function showToast(msg: string, kind: "ok" | "err" = "ok") {
     setToast({ msg, kind });
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2500);
+  }
+
+  async function applyLoadedState(detail: LoadedItemDetail, uid: string | null, email: string | null) {
+    setItem(detail.item);
+    setOwner(detail.owner);
+    setLoveCount(detail.loveCount);
+    setMyLoved(detail.myLoved);
+    setInterestCount(detail.interestCount);
+    setOfferCount(detail.offerCount);
+    setMyInterest(detail.myInterest);
+    setMyOffer(detail.myOffer);
+    setHasAcceptedOther(detail.hasAcceptedOther);
+    setCompletedInterest(detail.completedInterest);
+    setUserId(uid);
+    setUserEmail(email);
   }
 
   async function loadEverything(uid: string | null, email: string | null) {
@@ -533,161 +1114,8 @@ export default function ItemDetailPage() {
     setErr(null);
 
     try {
-      const { data: it, error: itemErr } = await supabase
-        .from("items")
-        .select(
-          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,request_willing_to_pay,request_budget,is_anonymous,expires_at,photo_url,status,owner_id,price,is_negotiable,hide_interest_count,reserved_interest_id,claimed_at"
-        )
-        .eq("id", itemId)
-        .single();
-
-      if (itemErr) throw new Error(itemErr.message);
-
-      const loaded = it as ItemRow;
-      setItem(loaded);
-
-      if (!loaded.is_anonymous && loaded.owner_id) {
-        const { data: prof } = await supabase
-          .from("profiles")
-          .select("full_name,user_role")
-          .eq("id", loaded.owner_id)
-          .maybeSingle();
-
-        setOwner((prof as OwnerProfile) ?? null);
-      } else {
-        setOwner(null);
-      }
-
-      const { count: lovesCount, error: loveCountErr } = await supabase
-        .from(LOVES_TABLE)
-        .select("*", { count: "exact", head: true })
-        .eq("item_id", itemId);
-
-      if (!loveCountErr) setLoveCount(lovesCount ?? 0);
-      else setLoveCount(0);
-
-      if (uid) {
-        const { data: mineLove, error: mineLoveErr } = await supabase
-          .from(LOVES_TABLE)
-          .select("item_id")
-          .eq("item_id", itemId)
-          .eq("user_id", uid)
-          .maybeSingle();
-
-        if (!mineLoveErr) setMyLoved(!!mineLove);
-        else setMyLoved(false);
-      } else {
-        setMyLoved(false);
-      }
-
-      setMyInterest(null);
-      setMyOffer(null);
-      setHasAcceptedOther(false);
-      setInterestCount(0);
-      setOfferCount(0);
-      setCompletedInterest(null);
-
-      if ((loaded.post_type ?? "give") === "give") {
-        const { data: interestRows, error: interestErr } = await supabase
-          .from("interests")
-          .select("id,item_id,user_id,status,created_at")
-          .eq("item_id", itemId);
-
-        if (!interestErr) {
-          const rows = (interestRows as MyInterestRow[]) || [];
-          const active = rows.filter((row) =>
-            ["pending", "accepted", "reserved"].includes(normStatus(row.status))
-          );
-
-          setInterestCount(active.length);
-          setHasAcceptedOther(
-            rows.some(
-              (row) =>
-                normStatus(row.status) === "accepted" &&
-                (!!uid ? row.user_id !== uid : true)
-            )
-          );
-
-          if (uid) {
-            const mine =
-              rows.find((row) => row.user_id === uid && normStatus(row.status) !== "withdrawn") ||
-              rows.find((row) => row.user_id === uid) ||
-              null;
-
-            setMyInterest(mine);
-          }
-        }
-
-        if (isGiveClosed(loaded)) {
-          const { data: completedRows, error: completedErr } = await supabase
-            .from("interests")
-            .select(`
-              id,
-              item_id,
-              user_id,
-              status,
-              completed_at,
-              reserved_at,
-              accepted_at,
-              requester:profiles!interests_user_id_fkey(full_name,email)
-            `)
-            .eq("item_id", itemId)
-            .in("status", ["completed", "reserved", "accepted"]);
-
-          if (!completedErr) {
-            const normalizedCompletedRows: CompletedInterestRow[] = (
-              (((completedRows ?? []) as CompletedInterestQueryRow[]))
-            ).map((row) => ({
-              id: row.id,
-              item_id: row.item_id,
-              user_id: row.user_id,
-              status: row.status,
-              completed_at: row.completed_at,
-              reserved_at: row.reserved_at,
-              accepted_at: row.accepted_at,
-              requester: singleRelation(row.requester),
-            }));
-
-            const candidates = normalizedCompletedRows.sort((a, b) => {
-              const aTs = new Date(
-                a.completed_at || a.reserved_at || a.accepted_at || "1970-01-01"
-              ).getTime();
-              const bTs = new Date(
-                b.completed_at || b.reserved_at || b.accepted_at || "1970-01-01"
-              ).getTime();
-              return bTs - aTs;
-            });
-
-            const reservedMatch = loaded.reserved_interest_id
-              ? candidates.find((x) => x.id === loaded.reserved_interest_id) ?? null
-              : null;
-
-            setCompletedInterest(reservedMatch ?? candidates[0] ?? null);
-          }
-        }
-      } else {
-        const { data: offerRows, error: offerErr } = await supabase
-          .from("request_offers")
-          .select("id,request_id,helper_id,status,created_at")
-          .eq("request_id", itemId);
-
-        if (!offerErr) {
-          const rows = (offerRows as MyOfferRow[]) || [];
-          const active = rows.filter((row) =>
-            ["pending", "hold", "accepted"].includes(normStatus(row.status))
-          );
-
-          setOfferCount(active.length);
-
-          if (uid) {
-            const mine = rows.find((row) => row.helper_id === uid) || null;
-            setMyOffer(mine);
-          }
-        }
-      }
-
-      setUserId(uid);
-      setUserEmail(email);
+      const detail = await loadItemDetail(itemId, uid);
+      await applyLoadedState(detail, uid, email);
     } catch (e: any) {
       setErr(e?.message || "Failed to load post.");
       setItem(null);
@@ -710,6 +1138,17 @@ export default function ItemDetailPage() {
     const uid = data.session?.user?.id ?? null;
     const email = data.session?.user?.email ?? null;
     await loadEverything(uid, email);
+  }
+
+  async function runAction(key: string, fn: () => Promise<void>) {
+    setActionBusy(key);
+    try {
+      await fn();
+    } catch (e: any) {
+      showToast(e?.message || "Something went wrong.", "err");
+    } finally {
+      setActionBusy(null);
+    }
   }
 
   async function toggleLove() {
@@ -760,24 +1199,22 @@ export default function ItemDetailPage() {
   }
 
   async function openConversation() {
-    if (!item || !item.owner_id || !userId) return;
+  if (!item || !item.owner_id || !userId) return;
 
-    setActionBusy("chat");
+  const itemId = item.id;
+  const ownerId = item.owner_id;
+  const requesterId = userId;
 
-    try {
-      const threadId = await ensureThread({
-        itemId: item.id,
-        ownerId: item.owner_id,
-        requesterId: userId,
-      });
+  await runAction("chat", async () => {
+    const threadId = await ensureThread({
+      itemId,
+      ownerId,
+      requesterId,
+    });
 
-      router.push(`/messages/${threadId}`);
-    } catch (e: any) {
-      showToast(e?.message || "Could not open chat.", "err");
-    } finally {
-      setActionBusy(null);
-    }
-  }
+    router.push(`/messages/${threadId}`);
+  });
+}
 
   async function submitGiveInterest() {
     if (!item || postType !== "give") return;
@@ -802,9 +1239,7 @@ export default function ItemDetailPage() {
 
     if (mine === "pending") return;
 
-    setActionBusy("interest");
-
-    try {
+    await runAction("interest", async () => {
       if (myInterest?.id && ["withdrawn", "declined"].includes(mine)) {
         const { error } = await supabase
           .from("interests")
@@ -838,23 +1273,17 @@ export default function ItemDetailPage() {
 
       await loadEverything(userId, userEmail);
       showToast(hasAcceptedOther ? "Joined waitlist." : "Request sent.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not send request.", "err");
-    } finally {
-      setActionBusy(null);
-    }
+    });
   }
 
   async function withdrawGiveInterest() {
     if (!myInterest?.id || !userId) return;
     if (normStatus(myInterest.status) !== "pending") return;
 
-    setActionBusy("withdraw-interest");
-
-    try {
+    await runAction("withdraw-interest", async () => {
       const { error } = await supabase
         .from("interests")
-        .update({ status: "withdrawn" })
+        .update({ status: "withdrawn" } as any)
         .eq("id", myInterest.id)
         .eq("user_id", userId);
 
@@ -862,11 +1291,7 @@ export default function ItemDetailPage() {
 
       await loadEverything(userId, userEmail);
       showToast("Request withdrawn.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not withdraw request.", "err");
-    } finally {
-      setActionBusy(null);
-    }
+    });
   }
 
   async function submitHelpOffer() {
@@ -892,13 +1317,11 @@ export default function ItemDetailPage() {
 
     if (mine === "pending" || mine === "hold") return;
 
-    setActionBusy("offer");
-
-    try {
+    await runAction("offer", async () => {
       if (myOffer?.id && mine === "declined") {
         const { error } = await supabase
           .from("request_offers")
-          .update({ status: "pending", updated_at: new Date().toISOString() })
+          .update({ status: "pending", updated_at: new Date().toISOString() } as any)
           .eq("id", myOffer.id)
           .eq("helper_id", userId);
 
@@ -922,11 +1345,7 @@ export default function ItemDetailPage() {
 
       await loadEverything(userId, userEmail);
       showToast("Offer sent.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not send offer.", "err");
-    } finally {
-      setActionBusy(null);
-    }
+    });
   }
 
   async function withdrawHelpOffer() {
@@ -935,9 +1354,7 @@ export default function ItemDetailPage() {
     const mine = normStatus(myOffer.status);
     if (!["pending", "hold"].includes(mine)) return;
 
-    setActionBusy("withdraw-offer");
-
-    try {
+    await runAction("withdraw-offer", async () => {
       const { error } = await supabase
         .from("request_offers")
         .delete()
@@ -948,11 +1365,7 @@ export default function ItemDetailPage() {
 
       await loadEverything(userId, userEmail);
       showToast("Offer withdrawn.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not withdraw offer.", "err");
-    } finally {
-      setActionBusy(null);
-    }
+    });
   }
 
   async function toggleCountVisibility() {
@@ -972,9 +1385,14 @@ export default function ItemDetailPage() {
       if (error) throw new Error(error.message);
 
       setItem((prev) => (prev ? { ...prev, hide_interest_count: nextValue } : prev));
-      showToast(nextValue ? "Count hidden." : "Count shown.");
+
+      if (postType === "give") {
+        showToast(nextValue ? "Requests hidden." : "Requests shown.");
+      } else {
+        showToast(nextValue ? "Offers hidden." : "Offers shown.");
+      }
     } catch (e: any) {
-      showToast(e?.message || "Could not update count visibility.", "err");
+      showToast(e?.message || "Could not update visibility.", "err");
     } finally {
       setBusy(false);
     }
@@ -987,20 +1405,35 @@ export default function ItemDetailPage() {
 
     try {
       if (postType === "give") {
-        await supabase.from("interests").delete().eq("item_id", item.id);
+        const { error: interestDeleteErr } = await supabase
+          .from("interests")
+          .delete()
+          .eq("item_id", item.id);
+
+        if (interestDeleteErr) throw new Error(interestDeleteErr.message);
       } else {
-        await supabase.from("request_offers").delete().eq("request_id", item.id);
+        const { error: offerDeleteErr } = await supabase
+          .from("request_offers")
+          .delete()
+          .eq("request_id", item.id);
+
+        if (offerDeleteErr) throw new Error(offerDeleteErr.message);
       }
 
-      await supabase.from(LOVES_TABLE).delete().eq("item_id", item.id);
+      const { error: loveDeleteErr } = await supabase
+        .from(LOVES_TABLE)
+        .delete()
+        .eq("item_id", item.id);
 
-      const { error } = await supabase
+      if (loveDeleteErr) throw new Error(loveDeleteErr.message);
+
+      const { error: itemDeleteErr } = await supabase
         .from("items")
         .delete()
         .eq("id", item.id)
         .eq("owner_id", userId);
 
-      if (error) throw new Error(error.message);
+      if (itemDeleteErr) throw new Error(itemDeleteErr.message);
 
       showToast("Listing deleted.");
       router.replace("/feed");
@@ -1063,106 +1496,45 @@ export default function ItemDetailPage() {
         {loading && <div className="alert">Loading…</div>}
         {!loading && !err && !item && <div className="alert err">Post not found.</div>}
 
-        {!loading && item && (
+        {!loading && item ? (
           <section className={`card card-${postType}`}>
-            <div className="cardTop">
-              <div className="authorSide">
-                <div className={`avatar avatar-${postType}`}>{initials(ownerLabel)}</div>
+            <DetailHeader
+              ownerLabel={ownerLabel}
+              subtitle={subtitle}
+              postType={postType}
+              isOwner={isOwner}
+              myLoved={myLoved}
+              busy={busy}
+              onLove={toggleLove}
+              menuOpen={menuOpen}
+              setMenuOpen={setMenuOpen}
+              onManage={() => {
+                setMenuOpen(false);
+                router.push(`/manage/${item.id}`);
+              }}
+              onEdit={() => {
+                setMenuOpen(false);
+                router.push(`/item/${item.id}/edit`);
+              }}
+              onToggleCount={() => {
+                void toggleCountVisibility();
+              }}
+              onDelete={() => {
+                setMenuOpen(false);
+                setConfirmDelete(true);
+              }}
+              hideCount={!!item.hide_interest_count}
+              isArchivedOwnerView={
+                isArchivedGiveOwnerView || (isOwner && postType === "request" && isRequestClosed(item))
+              }
+            />
 
-                <div className="authorText">
-                  <div className="authorName">{ownerLabel}</div>
-                  {subtitle ? <div className="authorSub">{subtitle}</div> : null}
-                </div>
-              </div>
-
-              {isOwner ? (
-                <div className="menuWrap">
-                  {menuOpen ? (
-                    <button
-                      className="menuBackdrop"
-                      aria-label="Close menu"
-                      onClick={() => setMenuOpen(false)}
-                      type="button"
-                    />
-                  ) : null}
-
-                  <button
-                    className="menuBtn"
-                    type="button"
-                    aria-label="Post options"
-                    onClick={() => setMenuOpen((v) => !v)}
-                  >
-                    ⋯
-                  </button>
-
-                  {menuOpen ? (
-                    <div className="menuCard">
-                      {!isArchivedGiveOwnerView ? (
-                        <>
-                          <button
-                            className="menuItem"
-                            type="button"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              router.push(`/manage/${item.id}`);
-                            }}
-                          >
-                            Manage post
-                          </button>
-
-                          <button
-                            className="menuItem"
-                            type="button"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              router.push(`/item/${item.id}/edit`);
-                            }}
-                          >
-                            Edit post
-                          </button>
-
-                          <button className="menuItem" type="button" onClick={toggleCountVisibility}>
-                            {item.hide_interest_count ? "Show count" : "Hide count"}
-                          </button>
-                        </>
-                      ) : null}
-
-                      <button
-                        className="menuItem danger"
-                        type="button"
-                        onClick={() => {
-                          setMenuOpen(false);
-                          setConfirmDelete(true);
-                        }}
-                      >
-                        Delete listing
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-              ) : (
-                <button
-                  className={`loveBtn ${myLoved ? "active" : ""}`}
-                  type="button"
-                  onClick={toggleLove}
-                  disabled={busy}
-                  aria-label="Love post"
-                >
-                  {myLoved ? "♥" : "♡"}
-                </button>
-              )}
-            </div>
-
-            <div className="mediaWrap">
-              {item.photo_url ? (
-                <button className="imgBtn" type="button" onClick={() => setOpenImg(item.photo_url)}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={item.photo_url} alt={item.title} className="heroImg" />
-                </button>
-              ) : (
-                <div className={`noPhoto noPhoto-${postType}`}>No image</div>
-              )}
-            </div>
+            <DetailMedia
+              photoUrl={item.photo_url}
+              title={item.title}
+              postType={postType}
+              onOpen={(src) => setOpenImg(src)}
+            />
 
             <div className="body">
               <div className="titleRow">
@@ -1183,164 +1555,97 @@ export default function ItemDetailPage() {
 
               {postType === "give" ? (
                 <div className="priceRow">
-                  <span className="pricePill">{formatPriceWithNegotiable(item.price, item.is_negotiable)}</span>
+                  <span className="pricePill">
+                    {formatPriceWithNegotiable(item.price, item.is_negotiable)}
+                  </span>
                 </div>
-              ) : null}
+              ) : (
+                <div className="priceRow">
+                  <span className="requestBudgetPill">
+                    {item.request_willing_to_pay
+                      ? item.request_budget !== null && item.request_budget !== undefined
+                        ? `Budget ${formatPrice(item.request_budget)}`
+                        : "Willing to pay"
+                      : "Unpaid help"}
+                  </span>
+                </div>
+              )}
 
-              <div className="statsRow">
-                <span className="stat">
-                  <span className="statIcon">♥</span> {loveCount}
-                </span>
-
-                <span className="dot">•</span>
-
-                <span className="stat">{activityLabel}</span>
-
-                <span className="dot">•</span>
-
-                <span className={`statusPill ${itemStateChip.tone} ${postType}`}>
-                  {itemStateChip.label}
-                </span>
-
-                <span className="dot">•</span>
-
-                <span className="stat">Delists {formatDelist(item.expires_at)}</span>
-              </div>
+              <StatRow
+                loveCount={loveCount}
+                activityLabel={activityLabel}
+                statusLabel={itemStateChip.label}
+                statusTone={itemStateChip.tone}
+                postType={postType}
+                delistLabel={formatDelist(item.expires_at)}
+              />
 
               {isArchivedGiveOwnerView ? (
-                <div className="archivedCard">
-                  <div className="archivedTitle">Archived handoff</div>
-                  <div className="archivedBody">
-                    This item has already been given away. Editing and management are disabled.
-                  </div>
-
-                  <div className="archivedMetaGrid">
-                    <div className="archivedMetaBox">
-                      <div className="archivedMetaLabel">Given to</div>
-                      <div className="archivedMetaValue">{soldToLabel}</div>
-                    </div>
-
-                    <div className="archivedMetaBox">
-                      <div className="archivedMetaLabel">Given on</div>
-                      <div className="archivedMetaValue">{formatFullWhen(soldAtLabel)}</div>
-                    </div>
-                  </div>
-                </div>
-              ) : (postType === "give" && giveFlow) || (postType === "request" && requestFlow) ? (
-                <div className={`flowCard flowCard-${postType}`}>
-                  <div className="flowTitle">
-                    {postType === "give" ? giveFlow?.title : requestFlow?.title}
-                  </div>
-                  <div className="flowBody">
-                    {postType === "give" ? giveFlow?.body : requestFlow?.body}
-                  </div>
-
-                  <div className="flowActions">
-                    {postType === "give" && giveFlow ? (
-                      <>
-                        <button
-                          className={`primaryAction primaryAction-${postType}`}
-                          type="button"
-                          disabled={giveFlow.primaryDisabled || !!actionBusy}
-                          onClick={() => {
-                            if (giveFlow.kind === "owner") {
-                              router.push(`/manage/${item.id}`);
-                              return;
-                            }
-                            if (giveFlow.kind === "login") {
-                              router.push("/me");
-                              return;
-                            }
-                            if (giveFlow.kind === "accepted" || giveFlow.kind === "reserved") {
-                              void openConversation();
-                              return;
-                            }
-                            if (giveFlow.kind === "open" || giveFlow.kind === "waitlist") {
-                              void submitGiveInterest();
-                            }
-                          }}
-                        >
-                          {actionBusy === "chat"
-                            ? "Opening…"
-                            : actionBusy === "interest"
-                            ? "Sending…"
-                            : giveFlow.primary}
-                        </button>
-
-                        {giveFlow.secondary ? (
-                          <button
-                            className="secondaryAction"
-                            type="button"
-                            disabled={giveFlow.secondaryDisabled || !!actionBusy}
-                            onClick={() => {
-                              if (giveFlow.kind === "owner") {
-                                router.push(`/item/${item.id}/edit`);
-                                return;
-                              }
-                              if (giveFlow.kind === "pending") {
-                                void withdrawGiveInterest();
-                              }
-                            }}
-                          >
-                            {actionBusy === "withdraw-interest" ? "Working…" : giveFlow.secondary}
-                          </button>
-                        ) : null}
-                      </>
-                    ) : null}
-
-                    {postType === "request" && requestFlow ? (
-                      <>
-                        <button
-                          className={`primaryAction primaryAction-${postType}`}
-                          type="button"
-                          disabled={requestFlow.primaryDisabled || !!actionBusy}
-                          onClick={() => {
-                            if (requestFlow.kind === "owner") {
-                              router.push(`/manage/${item.id}`);
-                              return;
-                            }
-                            if (requestFlow.kind === "login") {
-                              router.push("/me");
-                              return;
-                            }
-                            if (requestFlow.kind === "accepted") {
-                              void openConversation();
-                              return;
-                            }
-                            if (requestFlow.kind === "open") {
-                              void submitHelpOffer();
-                            }
-                          }}
-                        >
-                          {actionBusy === "chat"
-                            ? "Opening…"
-                            : actionBusy === "offer"
-                            ? "Sending…"
-                            : requestFlow.primary}
-                        </button>
-
-                        {requestFlow.secondary ? (
-                          <button
-                            className="secondaryAction"
-                            type="button"
-                            disabled={requestFlow.secondaryDisabled || !!actionBusy}
-                            onClick={() => {
-                              if (requestFlow.kind === "owner") {
-                                router.push(`/item/${item.id}/edit`);
-                                return;
-                              }
-                              if (requestFlow.kind === "pending") {
-                                void withdrawHelpOffer();
-                              }
-                            }}
-                          >
-                            {actionBusy === "withdraw-offer" ? "Working…" : requestFlow.secondary}
-                          </button>
-                        ) : null}
-                      </>
-                    ) : null}
-                  </div>
-                </div>
+                <ArchivedHandoffCard soldToLabel={soldToLabel} soldAtLabel={soldAtLabel} />
+              ) : postType === "give" && giveFlow ? (
+                <FlowCard
+                  postType={postType}
+                  flow={giveFlow}
+                  actionBusy={actionBusy}
+                  onPrimary={() => {
+                    if (giveFlow.kind === "owner") {
+                      router.push(`/manage/${item.id}`);
+                      return;
+                    }
+                    if (giveFlow.kind === "login") {
+                      router.push("/me");
+                      return;
+                    }
+                    if (giveFlow.kind === "accepted" || giveFlow.kind === "reserved") {
+                      void openConversation();
+                      return;
+                    }
+                    if (giveFlow.kind === "open" || giveFlow.kind === "waitlist") {
+                      void submitGiveInterest();
+                    }
+                  }}
+                  onSecondary={() => {
+                    if (giveFlow.kind === "owner") {
+                      router.push(`/item/${item.id}/edit`);
+                      return;
+                    }
+                    if (giveFlow.kind === "pending") {
+                      void withdrawGiveInterest();
+                    }
+                  }}
+                />
+              ) : postType === "request" && requestFlow ? (
+                <FlowCard
+                  postType={postType}
+                  flow={requestFlow}
+                  actionBusy={actionBusy}
+                  onPrimary={() => {
+                    if (requestFlow.kind === "owner") {
+                      router.push(`/manage/${item.id}`);
+                      return;
+                    }
+                    if (requestFlow.kind === "login") {
+                      router.push("/me");
+                      return;
+                    }
+                    if (requestFlow.kind === "accepted") {
+                      void openConversation();
+                      return;
+                    }
+                    if (requestFlow.kind === "open") {
+                      void submitHelpOffer();
+                    }
+                  }}
+                  onSecondary={() => {
+                    if (requestFlow.kind === "owner") {
+                      router.push(`/item/${item.id}/edit`);
+                      return;
+                    }
+                    if (requestFlow.kind === "pending") {
+                      void withdrawHelpOffer();
+                    }
+                  }}
+                />
               ) : null}
 
               {item.description?.trim() ? (
@@ -1351,15 +1656,22 @@ export default function ItemDetailPage() {
 
               {postType === "request" ? (
                 <div className="requestInfo">
+                  {item.request_group ? (
+                    <span className="infoPill">{requestGroupLabel(item.request_group)}</span>
+                  ) : null}
+
                   {item.request_timeframe ? (
                     <span className="infoPill">{requestTimeframeLabel(item.request_timeframe)}</span>
                   ) : null}
+
                   {item.request_location?.trim() ? (
                     <span className="infoPill">{item.request_location.trim()}</span>
                   ) : null}
+
                   {item.request_willing_to_pay ? (
                     <span className="infoPill">Willing to pay</span>
                   ) : null}
+
                   {item.request_budget !== null && item.request_budget !== undefined ? (
                     <span className="infoPill">Budget: {formatPrice(item.request_budget)}</span>
                   ) : null}
@@ -1367,7 +1679,7 @@ export default function ItemDetailPage() {
               ) : null}
             </div>
           </section>
-        )}
+        ) : null}
       </div>
 
       {confirmDelete ? (
@@ -1508,13 +1820,13 @@ export default function ItemDetailPage() {
         }
 
         .card-give {
-          border: 1px solid rgba(16, 185, 129, 0.2);
-          background: linear-gradient(180deg, rgba(16, 185, 129, 0.04), #ffffff 34%);
+          border: 1px solid rgba(16, 185, 129, 0.18);
+          background: linear-gradient(180deg, rgba(16, 185, 129, 0.035), #ffffff 32%);
         }
 
         .card-request {
-          border: 1px solid rgba(245, 158, 11, 0.22);
-          background: linear-gradient(180deg, rgba(245, 158, 11, 0.04), #ffffff 34%);
+          border: 1px solid rgba(245, 158, 11, 0.18);
+          background: linear-gradient(180deg, rgba(245, 158, 11, 0.035), #ffffff 32%);
         }
 
         .cardTop {
@@ -1693,7 +2005,7 @@ export default function ItemDetailPage() {
         }
 
         .body {
-          padding: 14px 14px 16px;
+          padding: 16px;
         }
 
         .titleRow {
@@ -1718,18 +2030,28 @@ export default function ItemDetailPage() {
           margin-top: 10px;
         }
 
-        .pricePill {
+        .pricePill,
+        .requestBudgetPill {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          min-height: 30px;
-          padding: 0 11px;
+          min-height: 32px;
+          padding: 0 12px;
           border-radius: 999px;
+          font-size: 12px;
+          font-weight: 1000;
+        }
+
+        .pricePill {
           border: 1px solid rgba(16, 185, 129, 0.22);
           background: rgba(16, 185, 129, 0.1);
           color: #065f46;
-          font-size: 12px;
-          font-weight: 1000;
+        }
+
+        .requestBudgetPill {
+          border: 1px solid rgba(245, 158, 11, 0.22);
+          background: rgba(245, 158, 11, 0.1);
+          color: #92400e;
         }
 
         .statsRow {
@@ -1793,20 +2115,20 @@ export default function ItemDetailPage() {
 
         .flowCard,
         .archivedCard {
-          margin-top: 14px;
-          padding: 14px;
+          margin-top: 16px;
+          padding: 16px;
           border-radius: 18px;
           border: 1px solid #e5e7eb;
         }
 
         .flowCard-give {
           border-color: rgba(16, 185, 129, 0.16);
-          background: linear-gradient(180deg, rgba(16, 185, 129, 0.06), #f8fafc);
+          background: linear-gradient(180deg, rgba(16, 185, 129, 0.05), #f8fafc);
         }
 
         .flowCard-request {
           border-color: rgba(245, 158, 11, 0.16);
-          background: linear-gradient(180deg, rgba(245, 158, 11, 0.06), #fffaf0);
+          background: linear-gradient(180deg, rgba(245, 158, 11, 0.05), #fffaf0);
         }
 
         .archivedCard {
@@ -1862,15 +2184,16 @@ export default function ItemDetailPage() {
         }
 
         .flowActions {
-          margin-top: 12px;
-          display: flex;
-          flex-wrap: wrap;
+          margin-top: 14px;
+          display: grid;
+          grid-template-columns: 1fr;
           gap: 10px;
         }
 
         .primaryAction,
         .secondaryAction {
-          min-height: 42px;
+          min-height: 44px;
+          width: 100%;
           padding: 0 14px;
           border-radius: 14px;
           font-size: 13px;
@@ -1903,7 +2226,7 @@ export default function ItemDetailPage() {
         }
 
         .caption {
-          margin-top: 12px;
+          margin-top: 14px;
           font-size: 13px;
           line-height: 1.58;
           color: #334155;
@@ -2074,16 +2397,6 @@ export default function ItemDetailPage() {
           }
 
           .stat {
-            width: 100%;
-          }
-
-          .flowActions {
-            display: grid;
-            grid-template-columns: 1fr;
-          }
-
-          .primaryAction,
-          .secondaryAction {
             width: 100%;
           }
 
