@@ -348,7 +348,7 @@ function stepSubtitle(mode: Mode, stepKey: StepKey) {
   if (mode === "give") {
     if (stepKey === "media") return "Photos make posts feel real and trustworthy.";
     if (stepKey === "write") return "Tell students what it is and why it matters.";
-    if (stepKey === "details") return "Help people understand category, pickup, and price quickly.";
+    if (stepKey === "details") return "Help people understand category and pickup quickly.";
     return "Check everything once before sharing.";
   }
 
@@ -366,7 +366,6 @@ function stepSubtitle(mode: Mode, stepKey: StepKey) {
 
 function sanitizePriceInput(raw: string) {
   let out = raw.replace(/[^\d.]/g, "");
-
   const firstDot = out.indexOf(".");
   if (firstDot !== -1) {
     out =
@@ -375,12 +374,8 @@ function sanitizePriceInput(raw: string) {
         .slice(firstDot + 1)
         .replace(/\./g, "");
   }
-
   const [whole, dec] = out.split(".");
-  if (dec !== undefined) {
-    return `${whole}.${dec.slice(0, 2)}`;
-  }
-
+  if (dec !== undefined) return `${whole}.${dec.slice(0, 2)}`;
   return out;
 }
 
@@ -397,7 +392,7 @@ function formatPriceLabel(raw: string, negotiable: boolean) {
   const parsed = parseOptionalPrice(raw);
   if (parsed === null) return "Free";
   if (Number.isNaN(parsed)) return "Invalid price";
-  return `$${parsed.toFixed(2)}${negotiable ? " • Negotiable" : ""}`;
+  return `$${parsed.toFixed(2)}${negotiable ? " • Negotiable" : " • Fixed"}`;
 }
 
 /* =========================
@@ -752,6 +747,7 @@ export default function CreatePage() {
         if (!draft.pickupLocation) {
           return { ok: false, message: "Choose a pickup location.", section: "details" };
         }
+
         const parsedPrice = parseOptionalPrice(draft.price);
         if (Number.isNaN(parsedPrice)) {
           return {
@@ -1010,7 +1006,7 @@ export default function CreatePage() {
         itemInsert.category = draft.giveCategory;
         itemInsert.pickup_location = draft.pickupLocation;
         itemInsert.price = parsedPrice === null ? null : parsedPrice;
-        itemInsert.is_negotiable = draft.negotiable;
+        itemInsert.is_negotiable = parsedPrice === null ? false : draft.negotiable;
         itemInsert.request_group = null;
         itemInsert.request_timeframe = null;
         itemInsert.request_location = null;
@@ -1318,6 +1314,8 @@ export default function CreatePage() {
     if (!draft.mode || currentStep !== "details") return null;
 
     if (draft.mode === "give") {
+      const hasPrice = draft.price.trim().length > 0;
+
       return (
         <section style={screenCard(fieldError === "details")}>
           <div style={detailGroup}>
@@ -1356,35 +1354,43 @@ export default function CreatePage() {
             <div style={fieldLabelModern}>Price (optional)</div>
             <input
               value={draft.price}
-              onChange={(e) => patchDraft("price", sanitizePriceInput(e.target.value))}
+              onChange={(e) => {
+                const next = sanitizePriceInput(e.target.value);
+                setDraft((prev) => ({
+                  ...prev,
+                  price: next,
+                  negotiable: next.trim().length > 0 ? prev.negotiable : false,
+                }));
+                setMsg(null);
+                setFieldError(null);
+              }}
               style={softInputModern}
-              inputMode="decimal"
               placeholder="Leave blank if free"
+              inputMode="decimal"
             />
-            <div style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>
-              Enter only numbers, like 10 or 10.50
-            </div>
           </div>
 
-          <div style={detailGroup}>
-            <div style={fieldLabelModern}>Negotiation</div>
-            <div style={segmentedWrap}>
-              <button
-                type="button"
-                onClick={() => patchDraft("negotiable", false)}
-                style={segmentBtn(!draft.negotiable)}
-              >
-                Fixed price
-              </button>
-              <button
-                type="button"
-                onClick={() => patchDraft("negotiable", true)}
-                style={segmentBtn(draft.negotiable)}
-              >
-                Negotiable
-              </button>
+          {hasPrice && (
+            <div style={detailGroup}>
+              <div style={fieldLabelModern}>Negotiation</div>
+              <div style={segmentedWrap}>
+                <button
+                  type="button"
+                  onClick={() => patchDraft("negotiable", false)}
+                  style={segmentBtn(!draft.negotiable)}
+                >
+                  Fixed price
+                </button>
+                <button
+                  type="button"
+                  onClick={() => patchDraft("negotiable", true)}
+                  style={segmentBtn(draft.negotiable)}
+                >
+                  Negotiable
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           <div style={dividerLine} />
 
