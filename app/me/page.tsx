@@ -623,50 +623,78 @@ export default function AccountPage() {
     setMyOffers(normalized);
     return normalized;
   }
+async function loadIncomingInterests(uid: string) {
+  const { data, error } = await supabase
+    .from("interests")
+    .select(`
+      id,
+      item_id,
+      user_id,
+      created_at,
+      status,
+      items:items(id,title,photo_url,status,owner_id,post_type)
+    `)
+    .eq("status", "pending")
+    .order("created_at", { ascending: false });
 
-  async function loadIncomingInterests(uid: string) {
-    const { data, error } = await supabase
-      .from("interests")
-      .select(`
-        id,
-        item_id,
-        user_id,
-        created_at,
-        status,
-        items:items(id,title,photo_url,status,owner_id,post_type),
-        requester:profiles!interests_user_id_fkey(full_name,email,user_role)
-      `)
-      .eq("status", "pending")
-      .order("created_at", { ascending: false });
+  if (!mountedRef.current) return [] as IncomingInterestRow[];
 
-    if (!mountedRef.current) return [] as IncomingInterestRow[];
-
-    if (error) {
-      setIncomingInterests([]);
-      return [];
-    }
-
-    const normalizedAll: IncomingInterestRow[] = (((data ?? []) as unknown) as IncomingInterestQueryRow[]).map(
-      (row) => ({
-        id: row.id,
-        item_id: row.item_id,
-        user_id: row.user_id,
-        created_at: row.created_at,
-        status: row.status,
-        item: singleRelation(row.items),
-        requester: singleRelation(row.requester),
-      })
-    );
-
-    const filtered = normalizedAll.filter(
-      (row) =>
-        row.item?.owner_id === uid &&
-        (row.item?.post_type === "give" || row.item?.post_type === null || row.item?.post_type === undefined)
-    );
-
-    setIncomingInterests(filtered);
-    return filtered;
+  if (error) {
+    setIncomingInterests([]);
+    return [];
   }
+
+  const baseRows = (((data ?? []) as unknown) as IncomingInterestQueryRow[]).map((row) => ({
+    id: row.id,
+    item_id: row.item_id,
+    user_id: row.user_id,
+    created_at: row.created_at,
+    status: row.status,
+    item: singleRelation(row.items),
+    requester: null,
+  }));
+
+  const filtered = baseRows.filter(
+    (row) =>
+      row.item?.owner_id === uid &&
+      (row.item?.post_type === "give" || row.item?.post_type === null || row.item?.post_type === undefined)
+  );
+
+  const requesterIds = [...new Set(filtered.map((row) => row.user_id).filter(Boolean))];
+
+  let requesterMap = new Map<
+    string,
+    { full_name: string | null; email: string | null; user_role: string | null }
+  >();
+
+  if (requesterIds.length > 0) {
+    const { data: profileRows, error: profileError } = await supabase
+      .from("profiles")
+      .select("id,full_name,email,user_role")
+      .in("id", requesterIds);
+
+    if (!profileError) {
+      requesterMap = new Map(
+        (profileRows ?? []).map((p: any) => [
+          p.id,
+          {
+            full_name: p.full_name ?? null,
+            email: p.email ?? null,
+            user_role: p.user_role ?? null,
+          },
+        ])
+      );
+    }
+  }
+
+  const normalized: IncomingInterestRow[] = filtered.map((row) => ({
+    ...row,
+    requester: requesterMap.get(row.user_id) ?? null,
+  }));
+
+  setIncomingInterests(normalized);
+  return normalized;
+}
 
   async function loadIncomingOffers(uid: string) {
     const { data, error } = await supabase
