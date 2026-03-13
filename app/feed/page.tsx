@@ -37,6 +37,7 @@ type ItemMeta = {
   request_group: string | null;
   request_timeframe: string | null;
   request_location: string | null;
+  request_willing_to_pay: boolean | null;
   status: string | null;
   hide_interest_count: boolean | null;
   price: number | null;
@@ -49,6 +50,7 @@ type FeedRow = FeedRowFromView & {
   request_group: string | null;
   request_timeframe: string | null;
   request_location: string | null;
+  request_willing_to_pay: boolean | null;
   hide_interest_count: boolean | null;
   price: number | null;
 };
@@ -371,7 +373,7 @@ export default function FeedPage() {
     const { data, error } = await supabase
       .from("items")
       .select(
-        "id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,status,hide_interest_count,price"
+        "id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,request_willing_to_pay,status,hide_interest_count,price"
       )
       .in("id", itemIds);
 
@@ -487,6 +489,7 @@ export default function FeedPage() {
           request_group: m?.request_group ?? null,
           request_timeframe: m?.request_timeframe ?? null,
           request_location: m?.request_location ?? null,
+          request_willing_to_pay: m?.request_willing_to_pay ?? null,
           status: m?.status ?? row.status ?? "available",
           interest_count: row.interest_count ?? 0,
           hide_interest_count: m?.hide_interest_count ?? null,
@@ -1737,6 +1740,7 @@ export default function FeedPage() {
                         <div className="bottomRow">
                           <div className="miniFacts">
                             <span>🆘 {group}</span>
+                            {item.request_willing_to_pay ? <span>💵 Willing to pay</span> : null}
                           </div>
 
                           <button
