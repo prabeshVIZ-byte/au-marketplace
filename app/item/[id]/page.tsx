@@ -570,19 +570,6 @@ function getRequestFlow(args: {
 }
 
 async function loadItemDetail(itemId: string, uid: string | null): Promise<LoadedItemDetail> {
-  const empty: LoadedItemDetail = {
-    item: null,
-    owner: null,
-    loveCount: 0,
-    myLoved: false,
-    interestCount: 0,
-    offerCount: 0,
-    myInterest: null,
-    myOffer: null,
-    hasAcceptedOther: false,
-    completedInterest: null,
-  };
-
   const { data: it, error: itemErr } = await supabase
     .from("items")
     .select(
@@ -1092,7 +1079,7 @@ export default function ItemDetailPage() {
     toastTimer.current = setTimeout(() => setToast(null), 2500);
   }
 
-  async function applyLoadedState(detail: LoadedItemDetail, uid: string | null, email: string | null) {
+  function applyLoadedState(detail: LoadedItemDetail, uid: string | null, email: string | null) {
     setItem(detail.item);
     setOwner(detail.owner);
     setLoveCount(detail.loveCount);
@@ -1115,7 +1102,7 @@ export default function ItemDetailPage() {
 
     try {
       const detail = await loadItemDetail(itemId, uid);
-      await applyLoadedState(detail, uid, email);
+      applyLoadedState(detail, uid, email);
     } catch (e: any) {
       setErr(e?.message || "Failed to load post.");
       setItem(null);
@@ -1154,7 +1141,10 @@ export default function ItemDetailPage() {
   async function toggleLove() {
     if (!item) return;
 
-    if (!userId) {
+    const currentItemId = item.id;
+    const currentUserId = userId;
+
+    if (!currentUserId) {
       router.push("/me");
       return;
     }
@@ -1166,8 +1156,8 @@ export default function ItemDetailPage() {
         const { error } = await supabase
           .from(LOVES_TABLE)
           .delete()
-          .eq("item_id", item.id)
-          .eq("user_id", userId);
+          .eq("item_id", currentItemId)
+          .eq("user_id", currentUserId);
 
         if (error) throw new Error(error.message);
 
@@ -1176,8 +1166,8 @@ export default function ItemDetailPage() {
       } else {
         const { error } = await supabase.from(LOVES_TABLE).insert([
           {
-            item_id: item.id,
-            user_id: userId,
+            item_id: currentItemId,
+            user_id: currentUserId,
           },
         ]);
 
@@ -1199,38 +1189,42 @@ export default function ItemDetailPage() {
   }
 
   async function openConversation() {
-  if (!item || !item.owner_id || !userId) return;
+    if (!item || !item.owner_id || !userId) return;
 
-  const itemId = item.id;
-  const ownerId = item.owner_id;
-  const requesterId = userId;
+    const currentItemId = item.id;
+    const currentOwnerId = item.owner_id;
+    const currentRequesterId = userId;
 
-  await runAction("chat", async () => {
-    const threadId = await ensureThread({
-      itemId,
-      ownerId,
-      requesterId,
+    await runAction("chat", async () => {
+      const threadId = await ensureThread({
+        itemId: currentItemId,
+        ownerId: currentOwnerId,
+        requesterId: currentRequesterId,
+      });
+
+      router.push(`/messages/${threadId}`);
     });
-
-    router.push(`/messages/${threadId}`);
-  });
-}
+  }
 
   async function submitGiveInterest() {
     if (!item || postType !== "give") return;
 
-    if (!userId) {
+    const currentUserId = userId;
+    const currentUserEmail = userEmail;
+    const currentItem = item;
+    const currentInterest = myInterest;
+    const mine = normStatus(currentInterest?.status);
+
+    if (!currentUserId) {
       router.push("/me");
       return;
     }
 
     if (isOwner) return;
-    if (isGiveClosed(item) || normStatus(item.status) === "reserved") {
+    if (isGiveClosed(currentItem) || normStatus(currentItem.status) === "reserved") {
       showToast("This item is not accepting new requests.", "err");
       return;
     }
-
-    const mine = normStatus(myInterest?.status);
 
     if (mine === "accepted" || mine === "reserved") {
       await openConversation();
@@ -1240,7 +1234,7 @@ export default function ItemDetailPage() {
     if (mine === "pending") return;
 
     await runAction("interest", async () => {
-      if (myInterest?.id && ["withdrawn", "declined"].includes(mine)) {
+      if (currentInterest?.id && ["withdrawn", "declined"].includes(mine)) {
         const { error } = await supabase
           .from("interests")
           .update({
@@ -1250,15 +1244,15 @@ export default function ItemDetailPage() {
             reserved_at: null,
             completed_at: null,
           } as any)
-          .eq("id", myInterest.id)
-          .eq("user_id", userId);
+          .eq("id", currentInterest.id)
+          .eq("user_id", currentUserId);
 
         if (error) throw new Error(error.message);
       } else {
         const { error } = await supabase.from("interests").insert([
           {
-            item_id: item.id,
-            user_id: userId,
+            item_id: currentItem.id,
+            user_id: currentUserId,
             status: "pending",
           },
         ]);
@@ -1271,7 +1265,7 @@ export default function ItemDetailPage() {
         }
       }
 
-      await loadEverything(userId, userEmail);
+      await loadEverything(currentUserId, currentUserEmail);
       showToast(hasAcceptedOther ? "Joined waitlist." : "Request sent.");
     });
   }
@@ -1280,16 +1274,20 @@ export default function ItemDetailPage() {
     if (!myInterest?.id || !userId) return;
     if (normStatus(myInterest.status) !== "pending") return;
 
+    const interestId = myInterest.id;
+    const currentUserId = userId;
+    const currentUserEmail = userEmail;
+
     await runAction("withdraw-interest", async () => {
       const { error } = await supabase
         .from("interests")
         .update({ status: "withdrawn" } as any)
-        .eq("id", myInterest.id)
-        .eq("user_id", userId);
+        .eq("id", interestId)
+        .eq("user_id", currentUserId);
 
       if (error) throw new Error(error.message);
 
-      await loadEverything(userId, userEmail);
+      await loadEverything(currentUserId, currentUserEmail);
       showToast("Request withdrawn.");
     });
   }
@@ -1297,18 +1295,22 @@ export default function ItemDetailPage() {
   async function submitHelpOffer() {
     if (!item || postType !== "request") return;
 
-    if (!userId) {
+    const currentUserId = userId;
+    const currentUserEmail = userEmail;
+    const currentItem = item;
+    const currentOffer = myOffer;
+    const mine = normStatus(currentOffer?.status);
+
+    if (!currentUserId) {
       router.push("/me");
       return;
     }
 
     if (isOwner) return;
-    if (isRequestClosed(item)) {
+    if (isRequestClosed(currentItem)) {
       showToast("This request is closed.", "err");
       return;
     }
-
-    const mine = normStatus(myOffer?.status);
 
     if (mine === "accepted" || mine === "completed") {
       await openConversation();
@@ -1318,19 +1320,19 @@ export default function ItemDetailPage() {
     if (mine === "pending" || mine === "hold") return;
 
     await runAction("offer", async () => {
-      if (myOffer?.id && mine === "declined") {
+      if (currentOffer?.id && mine === "declined") {
         const { error } = await supabase
           .from("request_offers")
           .update({ status: "pending", updated_at: new Date().toISOString() } as any)
-          .eq("id", myOffer.id)
-          .eq("helper_id", userId);
+          .eq("id", currentOffer.id)
+          .eq("helper_id", currentUserId);
 
         if (error) throw new Error(error.message);
       } else {
         const { error } = await supabase.from("request_offers").insert([
           {
-            request_id: item.id,
-            helper_id: userId,
+            request_id: currentItem.id,
+            helper_id: currentUserId,
             status: "pending",
           },
         ]);
@@ -1343,7 +1345,7 @@ export default function ItemDetailPage() {
         }
       }
 
-      await loadEverything(userId, userEmail);
+      await loadEverything(currentUserId, currentUserEmail);
       showToast("Offer sent.");
     });
   }
@@ -1354,16 +1356,20 @@ export default function ItemDetailPage() {
     const mine = normStatus(myOffer.status);
     if (!["pending", "hold"].includes(mine)) return;
 
+    const offerId = myOffer.id;
+    const currentUserId = userId;
+    const currentUserEmail = userEmail;
+
     await runAction("withdraw-offer", async () => {
       const { error } = await supabase
         .from("request_offers")
         .delete()
-        .eq("id", myOffer.id)
-        .eq("helper_id", userId);
+        .eq("id", offerId)
+        .eq("helper_id", currentUserId);
 
       if (error) throw new Error(error.message);
 
-      await loadEverything(userId, userEmail);
+      await loadEverything(currentUserId, currentUserEmail);
       showToast("Offer withdrawn.");
     });
   }
@@ -1372,6 +1378,9 @@ export default function ItemDetailPage() {
     if (!item || !isOwner || !userId || isArchivedGiveOwnerView) return;
 
     const nextValue = !item.hide_interest_count;
+    const currentItemId = item.id;
+    const currentUserId = userId;
+
     setBusy(true);
     setMenuOpen(false);
 
@@ -1379,8 +1388,8 @@ export default function ItemDetailPage() {
       const { error } = await supabase
         .from("items")
         .update({ hide_interest_count: nextValue })
-        .eq("id", item.id)
-        .eq("owner_id", userId);
+        .eq("id", currentItemId)
+        .eq("owner_id", currentUserId);
 
       if (error) throw new Error(error.message);
 
@@ -1401,6 +1410,9 @@ export default function ItemDetailPage() {
   async function deleteListing() {
     if (!item || !isOwner || !userId) return;
 
+    const currentItemId = item.id;
+    const currentUserId = userId;
+
     setBusy(true);
 
     try {
@@ -1408,14 +1420,14 @@ export default function ItemDetailPage() {
         const { error: interestDeleteErr } = await supabase
           .from("interests")
           .delete()
-          .eq("item_id", item.id);
+          .eq("item_id", currentItemId);
 
         if (interestDeleteErr) throw new Error(interestDeleteErr.message);
       } else {
         const { error: offerDeleteErr } = await supabase
           .from("request_offers")
           .delete()
-          .eq("request_id", item.id);
+          .eq("request_id", currentItemId);
 
         if (offerDeleteErr) throw new Error(offerDeleteErr.message);
       }
@@ -1423,15 +1435,15 @@ export default function ItemDetailPage() {
       const { error: loveDeleteErr } = await supabase
         .from(LOVES_TABLE)
         .delete()
-        .eq("item_id", item.id);
+        .eq("item_id", currentItemId);
 
       if (loveDeleteErr) throw new Error(loveDeleteErr.message);
 
       const { error: itemDeleteErr } = await supabase
         .from("items")
         .delete()
-        .eq("id", item.id)
-        .eq("owner_id", userId);
+        .eq("id", currentItemId)
+        .eq("owner_id", currentUserId);
 
       if (itemDeleteErr) throw new Error(itemDeleteErr.message);
 
@@ -2408,5 +2420,3 @@ export default function ItemDetailPage() {
     </div>
   );
 }
-
-//
