@@ -23,6 +23,8 @@ type ItemRow = {
   photo_url: string | null;
   status: string | null;
   owner_id: string | null;
+  price: number | null;
+  is_negotiable: boolean | null;
   reserved_interest_id?: string | null;
 };
 
@@ -127,6 +129,31 @@ function requestTimeframeLabel(v: string | null) {
   return "—";
 }
 
+function sanitizePriceInput(v: string) {
+  const cleaned = v.replace(/[^\d.]/g, "");
+  const firstDot = cleaned.indexOf(".");
+  if (firstDot === -1) return cleaned;
+  const left = cleaned.slice(0, firstDot + 1);
+  const right = cleaned
+    .slice(firstDot + 1)
+    .replace(/\./g, "")
+    .slice(0, 2);
+  return left + right;
+}
+
+function parsePrice(v: string) {
+  const raw = v.trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return NaN;
+  return Number(n.toFixed(2));
+}
+
+function formatPrice(price: number | null, isNegotiable: boolean) {
+  if (price == null) return "Free";
+  return `$${price.toFixed(2)}${isNegotiable ? " • Negotiable" : ""}`;
+}
+
 export default function EditItemPage() {
   const router = useRouter();
   const params = useParams();
@@ -154,6 +181,8 @@ export default function EditItemPage() {
   const [photoUrl, setPhotoUrl] = useState("");
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [expiresAtLocal, setExpiresAtLocal] = useState("");
+  const [priceInput, setPriceInput] = useState("");
+  const [isNegotiable, setIsNegotiable] = useState(false);
 
   const postType: PostType = (item?.post_type ?? "give") as PostType;
 
@@ -181,7 +210,9 @@ export default function EditItemPage() {
       return (
         sharedChanged ||
         category !== ((item.category as GiveCategory) ?? "books") ||
-        pickupLocation !== ((item.pickup_location as PickupLocation) ?? "College Quad")
+        pickupLocation !== ((item.pickup_location as PickupLocation) ?? "College Quad") ||
+        priceInput !== (item.price == null ? "" : String(item.price)) ||
+        isNegotiable !== !!item.is_negotiable
       );
     }
 
@@ -204,6 +235,8 @@ export default function EditItemPage() {
     photoUrl,
     isAnonymous,
     expiresAtLocal,
+    priceInput,
+    isNegotiable,
   ]);
 
   function hydrateForm(row: ItemRow) {
@@ -217,6 +250,8 @@ export default function EditItemPage() {
     setPhotoUrl(row.photo_url ?? "");
     setIsAnonymous(!!row.is_anonymous);
     setExpiresAtLocal(toInputDateTime(row.expires_at));
+    setPriceInput(row.price == null ? "" : String(row.price));
+    setIsNegotiable(!!row.is_negotiable);
   }
 
   async function bootstrap() {
@@ -240,7 +275,7 @@ export default function EditItemPage() {
       const { data, error } = await supabase
         .from("items")
         .select(
-          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id,reserved_interest_id"
+          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id,price,is_negotiable,reserved_interest_id"
         )
         .eq("id", id)
         .maybeSingle();
@@ -267,12 +302,67 @@ export default function EditItemPage() {
     if (postType === "give") {
       if (!category) return "Choose a category.";
       if (!pickupLocation) return "Choose a pickup location.";
+      const parsedPrice = parsePrice(priceInput);
+      if (Number.isNaN(parsedPrice)) return "Price must be a valid number.";
     } else {
       if (!requestGroup) return "Choose a request type.";
       if (!requestTimeframe) return "Choose a timeframe.";
     }
 
     return null;
+  }
+
+  async function sendUpdateNotifications(itemId: string, ownerId: string, nextTitle: string) {
+    const recipientIds = new Set<string>();
+
+    if (postType === "give") {
+      const { data: interests } = await supabase
+        .from("interests")
+        .select("user_id,status")
+        .eq("item_id", itemId);
+
+      for (const row of (interests as Array<{ user_id: string | null; status: string | null }>) || []) {
+        const st = (row.status ?? "").toLowerCase().trim();
+        if (!row.user_id) continue;
+        if (row.user_id === ownerId) continue;
+        if (["pending", "accepted", "reserved"].includes(st)) recipientIds.add(row.user_id);
+      }
+    } else {
+      const { data: offers } = await supabase
+        .from("request_offers")
+        .select("helper_id,status")
+        .eq("request_id", itemId);
+
+      for (const row of (offers as Array<{ helper_id: string | null; status: string | null }>) || []) {
+        const st = (row.status ?? "").toLowerCase().trim();
+        if (!row.helper_id) continue;
+        if (row.helper_id === ownerId) continue;
+        if (["pending", "hold", "accepted"].includes(st)) recipientIds.add(row.helper_id);
+      }
+    }
+
+    if (recipientIds.size === 0) return;
+
+    const notifications = Array.from(recipientIds).map((recipientId) => ({
+      recipient_id: recipientId,
+      actor_id: ownerId,
+      type: "system_notice",
+      category: postType,
+      entity_type: "item",
+      entity_id: itemId,
+      parent_entity_type: null,
+      parent_entity_id: null,
+      title: "Post updated",
+      body: `"${nextTitle}" was updated.`,
+      image_url: null,
+      action_url: `/item/${itemId}`,
+      is_read: false,
+      read_at: null,
+      is_hidden: false,
+      hidden_at: null,
+    }));
+
+    await supabase.from("notifications").insert(notifications);
   }
 
   async function save() {
@@ -292,6 +382,8 @@ export default function EditItemPage() {
       const validationError = validate();
       if (validationError) throw new Error(validationError);
 
+      const parsedPrice = parsePrice(priceInput);
+
       const payload =
         postType === "give"
           ? {
@@ -305,6 +397,8 @@ export default function EditItemPage() {
               photo_url: photoUrl.trim() ? photoUrl.trim() : null,
               is_anonymous: isAnonymous,
               expires_at: fromInputDateTime(expiresAtLocal),
+              price: parsedPrice,
+              is_negotiable: parsedPrice == null ? false : isNegotiable,
             }
           : {
               title: title.trim(),
@@ -326,6 +420,8 @@ export default function EditItemPage() {
         .eq("owner_id", userId);
 
       if (error) throw new Error(error.message);
+
+      await sendUpdateNotifications(item.id, userId, title.trim());
 
       setOk("Saved successfully.");
       await bootstrap();
@@ -502,6 +598,46 @@ export default function EditItemPage() {
                   ))}
                 </div>
               </div>
+
+              <div className="fieldBlock">
+                <label className="fieldLabel">Price (optional)</label>
+                <input
+                  value={priceInput}
+                  onChange={(e) => {
+                    const next = sanitizePriceInput(e.target.value);
+                    setPriceInput(next);
+                    if (!next.trim()) setIsNegotiable(false);
+                  }}
+                  className="softInput"
+                  placeholder="Leave blank if free"
+                  disabled={!canEdit}
+                  inputMode="decimal"
+                />
+              </div>
+
+              {priceInput.trim() ? (
+                <div className="fieldBlock">
+                  <div className="fieldLabel">Negotiation</div>
+                  <div className="segmentRow two">
+                    <button
+                      type="button"
+                      className={`segment ${!isNegotiable ? "active" : ""}`}
+                      onClick={() => setIsNegotiable(false)}
+                      disabled={!canEdit}
+                    >
+                      Fixed price
+                    </button>
+                    <button
+                      type="button"
+                      className={`segment ${isNegotiable ? "active" : ""}`}
+                      onClick={() => setIsNegotiable(true)}
+                      disabled={!canEdit}
+                    >
+                      Negotiable
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </>
           ) : (
             <>
@@ -626,6 +762,12 @@ export default function EditItemPage() {
                 <div className="reviewRow">
                   <span className="reviewKey">Pickup</span>
                   <span className="reviewValue">{pickupLocation}</span>
+                </div>
+                <div className="reviewRow">
+                  <span className="reviewKey">Price</span>
+                  <span className="reviewValue">
+                    {formatPrice(parsePrice(priceInput) as number | null, isNegotiable)}
+                  </span>
                 </div>
               </>
             ) : (
