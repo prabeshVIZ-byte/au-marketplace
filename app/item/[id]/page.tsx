@@ -5,139 +5,66 @@ export const dynamic = "force-dynamic";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
-import { ensureThread } from "@/lib/ensureThread";
 
-const LOVES_TABLE = "post_likes";
-
-type PostType = "give" | "request";
-
-type ItemRow = {
+type EventRow = {
   id: string;
   title: string;
   description: string | null;
-
+  host_org: string | null;
   category: string | null;
-  pickup_location: string | null;
-
-  post_type: PostType | null;
-  request_group: string | null;
-  request_timeframe: string | null;
-  request_location: string | null;
-
-  is_anonymous: boolean | null;
-  expires_at: string | null;
+  location: string | null;
+  starts_at: string | null;
+  ends_at: string | null;
+  link_url: string | null;
   photo_url: string | null;
-  status: string | null;
+  is_anonymous: boolean | null;
+  is_cancelled: boolean | null;
+  created_by: string | null;
   owner_id: string | null;
-  hide_interest_count?: boolean | null;
-  reserved_interest_id?: string | null;
-  claimed_at?: string | null;
+  price: number | null;
+  is_negotiable: boolean | null;
 };
 
-type OwnerProfile = {
-  full_name: string | null;
-  user_role: string | null;
-};
+type StepKey = "write" | "details" | "review";
 
-type MyInterestRow = {
-  id: string;
-  item_id: string;
-  user_id: string;
-  status: string | null;
-  created_at: string | null;
-};
+const APP_NAV_HEIGHT_PX = 86;
+const ACTION_BAR_HEIGHT_PX = 84;
 
-type MyOfferRow = {
-  id: string;
-  request_id: string;
-  helper_id: string;
-  status: string | null;
-  created_at: string | null;
-};
+const EVENT_CATEGORY_OPTIONS = [
+  "career",
+  "club",
+  "sports",
+  "music",
+  "arts",
+  "volunteering",
+  "academic",
+  "social",
+  "other",
+] as const;
 
-type CompletedInterestQueryRow = {
-  id: string;
-  item_id: string;
-  user_id: string;
-  status: string | null;
-  completed_at: string | null;
-  reserved_at: string | null;
-  accepted_at: string | null;
-  requester:
-    | {
-        full_name: string | null;
-        email: string | null;
-      }
-    | {
-        full_name: string | null;
-        email: string | null;
-      }[]
-    | null;
-};
+type EventCategory = (typeof EVENT_CATEGORY_OPTIONS)[number];
 
-type CompletedInterestRow = {
-  id: string;
-  item_id: string;
-  user_id: string;
-  status: string | null;
-  completed_at: string | null;
-  reserved_at: string | null;
-  accepted_at: string | null;
-  requester: {
-    full_name: string | null;
-    email: string | null;
-  } | null;
-};
-
-function singleRelation<T>(value: T | T[] | null | undefined): T | null {
-  if (Array.isArray(value)) return value[0] ?? null;
-  return value ?? null;
+function toInputDateTime(iso: string | null) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
 }
 
-function requestGroupLabel(v: string | null) {
-  const k = (v ?? "").toLowerCase();
-  if (k === "logistics") return "Logistics";
-  if (k === "services") return "Services";
-  if (k === "urgent") return "Urgent";
-  if (k === "collaboration") return "Collaboration";
-  if (k === "lost & found") return "Lost & Found";
-  return "Request";
+function fromInputDateTime(v: string) {
+  if (!v.trim()) return null;
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
 }
 
-function requestTimeframeLabel(v: string | null) {
-  const k = (v ?? "").toLowerCase();
-  if (k === "today") return "Today";
-  if (k === "this_week") return "This week";
-  if (k === "flexible") return "Flexible";
-  return "";
-}
-
-function giveCategoryLabel(v: string | null) {
-  return (v ?? "")
-    .split(" ")
-    .filter(Boolean)
-    .map((x) => x.charAt(0).toUpperCase() + x.slice(1))
-    .join(" ");
-}
-
-function formatDelist(expiresAt: string | null) {
-  if (!expiresAt) return "Open-ended";
-  const d = new Date(expiresAt);
-  if (Number.isNaN(d.getTime())) return "Open-ended";
-
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function formatFullWhen(ts: string | null | undefined) {
-  if (!ts) return "—";
-  const d = new Date(ts);
+function formatDateTime(iso: string | null) {
+  if (!iso) return "—";
+  const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-
   return d.toLocaleString(undefined, {
     month: "short",
     day: "numeric",
@@ -147,1904 +74,1249 @@ function formatFullWhen(ts: string | null | undefined) {
   });
 }
 
-function ownerNameLabel(item: ItemRow | null, owner: OwnerProfile | null) {
-  if (!item) return "Ashland user";
-  if (item.is_anonymous) return "Anonymous";
-  const name = (owner?.full_name ?? "").trim();
-  return name || "Ashland user";
+function eventCategoryLabel(v: string | null) {
+  const raw = (v ?? "").trim();
+  if (!raw) return "Event";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
-function readableName(
-  p: { full_name: string | null; email?: string | null } | null | undefined,
-  fallback = "Ashland user"
-) {
-  const name = (p?.full_name ?? "").trim();
-  if (name) return name;
-  const email = (p?.email ?? "").trim();
-  if (email) return email.split("@")[0];
-  return fallback;
+function isValidHttpUrlMaybeEmpty(raw: string) {
+  const v = raw.trim();
+  if (!v) return true;
+  return /^https?:\/\//i.test(v);
 }
 
-function initials(name: string) {
-  const clean = name.trim();
-  if (!clean) return "A";
-  const parts = clean.split(/\s+/).filter(Boolean);
-  if (parts.length === 1) return parts[0].slice(0, 1).toUpperCase();
-  return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
-}
-
-function normStatus(v: string | null | undefined) {
-  return (v ?? "").trim().toLowerCase();
-}
-
-function isExpired(expiresAt: string | null | undefined) {
-  if (!expiresAt) return false;
-  const ts = new Date(expiresAt).getTime();
+function isEnded(startsAt: string | null, endsAt: string | null) {
+  const endIso = endsAt ?? startsAt;
+  if (!endIso) return false;
+  const ts = new Date(endIso).getTime();
   if (Number.isNaN(ts)) return false;
-  return ts <= Date.now();
+  return ts < Date.now();
 }
 
-function isGiveClosed(item: ItemRow | null) {
-  if (!item) return false;
-  const st = normStatus(item.status);
-  return st === "claimed" || st === "completed" || isExpired(item.expires_at);
-}
-
-function isRequestClosed(item: ItemRow | null) {
-  if (!item) return false;
-  const st = normStatus(item.status);
-  return st === "claimed" || st === "completed" || isExpired(item.expires_at);
-}
-
-function statusChip(item: ItemRow | null) {
-  const st = normStatus(item?.status);
-
-  if (!item) return { label: "Loading", tone: "neutral" as const };
-  if (isExpired(item.expires_at) && st !== "claimed" && st !== "completed") {
-    return { label: "Expired", tone: "closed" as const };
+function sanitizePriceInput(raw: string) {
+  let out = raw.replace(/[^\d.]/g, "");
+  const firstDot = out.indexOf(".");
+  if (firstDot !== -1) {
+    out =
+      out.slice(0, firstDot + 1) +
+      out
+        .slice(firstDot + 1)
+        .replace(/\./g, "");
   }
-  if (st === "claimed" || st === "completed") return { label: "Given", tone: "closed" as const };
-  if (st === "reserved") return { label: "Reserved", tone: "warn" as const };
-  return { label: "Available", tone: "good" as const };
+  const [whole, dec] = out.split(".");
+  if (dec !== undefined) return `${whole}.${dec.slice(0, 2)}`;
+  return out;
 }
 
-export default function ItemDetailPage() {
+function parseOptionalPrice(raw: string) {
+  const cleaned = raw.trim();
+  if (!cleaned) return null;
+  if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return NaN;
+  const value = Number(cleaned);
+  if (!Number.isFinite(value) || value < 0) return NaN;
+  return value;
+}
+
+function formatPriceLabel(raw: string, negotiable: boolean) {
+  const parsed = parseOptionalPrice(raw);
+  if (parsed === null) return "Free";
+  if (Number.isNaN(parsed)) return "Invalid price";
+  return `$${parsed.toFixed(2)}${negotiable ? " • Negotiable" : " • Fixed"}`;
+}
+
+export default function EditEventPage() {
   const router = useRouter();
   const params = useParams();
-  const itemId = (params?.id as string) || "";
-
-  const [userId, setUserId] = useState<string | null>(null);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const id = (params?.id as string) || "";
+  const topRef = useRef<HTMLDivElement | null>(null);
 
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
   const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState<string | null>(null);
 
-  const [item, setItem] = useState<ItemRow | null>(null);
-  const [owner, setOwner] = useState<OwnerProfile | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [event, setEvent] = useState<EventRow | null>(null);
 
-  const [loveCount, setLoveCount] = useState(0);
-  const [myLoved, setMyLoved] = useState(false);
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const steps: StepKey[] = ["write", "details", "review"];
+  const currentStep = steps[currentStepIndex];
 
-  const [interestCount, setInterestCount] = useState(0);
-  const [offerCount, setOfferCount] = useState(0);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
 
-  const [myInterest, setMyInterest] = useState<MyInterestRow | null>(null);
-  const [myOffer, setMyOffer] = useState<MyOfferRow | null>(null);
-  const [hasAcceptedOther, setHasAcceptedOther] = useState(false);
+  const [hostOrg, setHostOrg] = useState("");
+  const [category, setCategory] = useState<EventCategory>("club");
+  const [location, setLocation] = useState("");
 
-  const [completedInterest, setCompletedInterest] = useState<CompletedInterestRow | null>(null);
+  const [startsAtLocal, setStartsAtLocal] = useState("");
+  const [endsAtLocal, setEndsAtLocal] = useState("");
 
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [openImg, setOpenImg] = useState<string | null>(null);
+  const [linkUrl, setLinkUrl] = useState("");
+  const [photoUrl, setPhotoUrl] = useState("");
 
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
+  const [price, setPrice] = useState("");
+  const [isNegotiable, setIsNegotiable] = useState(false);
 
-  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isAnonymous, setIsAnonymous] = useState(false);
+  const [isCancelled, setIsCancelled] = useState(false);
 
-  const postType: PostType = (item?.post_type ?? "give") as PostType;
-  const isAshland = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
+  const organizerId = useMemo(() => {
+    return event?.owner_id ?? event?.created_by ?? null;
+  }, [event?.owner_id, event?.created_by]);
 
   const isOwner = useMemo(() => {
-    return !!userId && !!item?.owner_id && userId === item.owner_id;
-  }, [userId, item?.owner_id]);
+    return !!userId && !!organizerId && userId === organizerId;
+  }, [userId, organizerId]);
 
-  const ownerLabel = useMemo(() => ownerNameLabel(item, owner), [item, owner]);
-  const publicActivityHidden = !!item?.hide_interest_count && !isOwner;
-  const itemStateChip = useMemo(() => statusChip(item), [item]);
+  const editingLocked = useMemo(() => {
+    if (!event) return false;
+    return false;
+  }, [event]);
 
-  const isArchivedGiveOwnerView = useMemo(() => {
-    return !!item && postType === "give" && isOwner && isGiveClosed(item);
-  }, [item, postType, isOwner]);
+  const startIso = useMemo(() => fromInputDateTime(startsAtLocal), [startsAtLocal]);
+  const endIso = useMemo(() => fromInputDateTime(endsAtLocal), [endsAtLocal]);
 
-  const soldToLabel = useMemo(() => {
-    return readableName(completedInterest?.requester, "Recipient");
-  }, [completedInterest]);
+  const dirty = useMemo(() => {
+    if (!event) return false;
 
-  const soldAtLabel = useMemo(() => {
-    if (!completedInterest) return "—";
     return (
-      completedInterest.completed_at ||
-      completedInterest.reserved_at ||
-      completedInterest.accepted_at ||
-      item?.claimed_at ||
-      null
+      title !== (event.title ?? "") ||
+      description !== (event.description ?? "") ||
+      hostOrg !== (event.host_org ?? "") ||
+      category !== ((event.category as EventCategory) ?? "club") ||
+      location !== (event.location ?? "") ||
+      startsAtLocal !== toInputDateTime(event.starts_at ?? null) ||
+      endsAtLocal !== toInputDateTime(event.ends_at ?? null) ||
+      linkUrl !== (event.link_url ?? "") ||
+      photoUrl !== (event.photo_url ?? "") ||
+      price !== (event.price == null ? "" : String(event.price)) ||
+      isNegotiable !== !!event.is_negotiable ||
+      isAnonymous !== !!event.is_anonymous ||
+      isCancelled !== !!event.is_cancelled
     );
-  }, [completedInterest, item?.claimed_at]);
+  }, [
+    event,
+    title,
+    description,
+    hostOrg,
+    category,
+    location,
+    startsAtLocal,
+    endsAtLocal,
+    linkUrl,
+    photoUrl,
+    price,
+    isNegotiable,
+    isAnonymous,
+    isCancelled,
+  ]);
 
-  const subtitle = useMemo(() => {
-    if (!item) return "";
-
-    if (postType === "request") {
-      return [
-        requestGroupLabel(item.request_group),
-        item.request_timeframe ? requestTimeframeLabel(item.request_timeframe) : "",
-        item.request_location?.trim() ? item.request_location : "",
-      ]
-        .filter(Boolean)
-        .join(" • ");
-    }
-
-    return [
-      item.category?.trim() ? giveCategoryLabel(item.category) : "",
-      item.pickup_location?.trim() ? item.pickup_location : "",
-    ]
-      .filter(Boolean)
-      .join(" • ");
-  }, [item, postType]);
-
-  const activityLabel = useMemo(() => {
-    if (!item) return "";
-    if (publicActivityHidden) {
-      return postType === "give" ? "Requests hidden" : "Offers hidden";
-    }
-    if (postType === "give") {
-      return `${interestCount} request${interestCount === 1 ? "" : "s"}`;
-    }
-    return `${offerCount} offer${offerCount === 1 ? "" : "s"}`;
-  }, [item, publicActivityHidden, postType, interestCount, offerCount]);
-
-  const giveFlow = useMemo(() => {
-    if (!item || postType !== "give") return null;
-
-    const mine = normStatus(myInterest?.status);
-
-    if (isOwner) {
-      if (isGiveClosed(item)) return null;
-
-      return {
-        kind: "owner" as const,
-        title: "You own this item.",
-        body: "Use manage to handle requests, pickup flow, and completion.",
-        primary: "Manage item",
-        secondary: "Edit item",
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (!isAshland) {
-      return {
-        kind: "login" as const,
-        title: "Log in to request this item.",
-        body: "Only Ashland users can request items.",
-        primary: "Log in",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (mine === "reserved") {
-      return {
-        kind: "reserved" as const,
-        title: "Pickup confirmed.",
-        body: "This item is reserved for you. Continue in chat.",
-        primary: "Open chat",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (mine === "accepted") {
-      return {
-        kind: "accepted" as const,
-        title: "Seller accepted your request.",
-        body: "Open chat to continue the pickup flow.",
-        primary: "Open chat",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (mine === "pending") {
-      return {
-        kind: "pending" as const,
-        title: hasAcceptedOther
-          ? "You are on the waitlist."
-          : "Your request has been sent.",
-        body: hasAcceptedOther
-          ? "Someone else is currently being considered first."
-          : "The owner has not chosen a requester yet.",
-        primary: "Requested",
-        secondary: "Withdraw",
-        primaryDisabled: true,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (isGiveClosed(item)) {
-      return {
-        kind: "closed" as const,
-        title: "This item is no longer available.",
-        body: "You can still view it, but requests are closed.",
-        primary: "Unavailable",
-        secondary: null,
-        primaryDisabled: true,
-        secondaryDisabled: true,
-      };
-    }
-
-    if (normStatus(item.status) === "reserved") {
-      return {
-        kind: "reserved_other" as const,
-        title: "This item is already reserved.",
-        body: "A pickup is already in progress.",
-        primary: "Unavailable",
-        secondary: null,
-        primaryDisabled: true,
-        secondaryDisabled: true,
-      };
-    }
-
-    if (hasAcceptedOther) {
-      return {
-        kind: "waitlist" as const,
-        title: "Someone else is being considered.",
-        body: "You can still join the waitlist in case it falls through.",
-        primary: "Join waitlist",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    return {
-      kind: "open" as const,
-      title: "This item is open for requests.",
-      body: "Send your request to start the pickup process.",
-      primary: "Request item",
-      secondary: null,
-      primaryDisabled: false,
-      secondaryDisabled: false,
-    };
-  }, [item, postType, isOwner, isAshland, myInterest, hasAcceptedOther]);
-
-  const requestFlow = useMemo(() => {
-    if (!item || postType !== "request") return null;
-
-    const mine = normStatus(myOffer?.status);
-
-    if (isOwner) {
-      return {
-        kind: "owner" as const,
-        title: "You own this request post.",
-        body: "Use manage to review incoming helper offers.",
-        primary: "Manage request",
-        secondary: "Edit request",
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (!isAshland) {
-      return {
-        kind: "login" as const,
-        title: "Log in to offer help.",
-        body: "Only Ashland users can respond to requests.",
-        primary: "Log in",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (mine === "accepted" || mine === "completed") {
-      return {
-        kind: "accepted" as const,
-        title: "Your help offer was accepted.",
-        body: "Continue in chat with the requester.",
-        primary: "Open chat",
-        secondary: null,
-        primaryDisabled: false,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (mine === "pending" || mine === "hold") {
-      return {
-        kind: "pending" as const,
-        title: "Your offer is active.",
-        body:
-          mine === "hold"
-            ? "The requester placed your offer on hold."
-            : "Waiting for the requester to decide.",
-        primary: "Offer sent",
-        secondary: "Withdraw",
-        primaryDisabled: true,
-        secondaryDisabled: false,
-      };
-    }
-
-    if (isRequestClosed(item)) {
-      return {
-        kind: "closed" as const,
-        title: "This request is closed.",
-        body: "New helper offers are not being accepted.",
-        primary: "Closed",
-        secondary: null,
-        primaryDisabled: true,
-        secondaryDisabled: true,
-      };
-    }
-
-    return {
-      kind: "open" as const,
-      title: "You can offer help on this request.",
-      body: "Send an offer to let the requester know you can help.",
-      primary: mine === "declined" ? "Offer again" : "Offer help",
-      secondary: null,
-      primaryDisabled: false,
-      secondaryDisabled: false,
-    };
-  }, [item, postType, isOwner, isAshland, myOffer]);
-
-  function showToast(msg: string, kind: "ok" | "err" = "ok") {
-    setToast({ msg, kind });
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 2500);
+  async function syncAuth() {
+    const { data } = await supabase.auth.getSession();
+    setUserId(data.session?.user?.id ?? null);
   }
 
-  async function loadEverything(uid: string | null, email: string | null) {
-    if (!itemId) return;
+  async function loadEvent() {
+    if (!id) return;
 
     setLoading(true);
     setErr(null);
+    setOk(null);
 
     try {
-      const { data: it, error: itemErr } = await supabase
-        .from("items")
+      const { data, error } = await supabase
+        .from("events")
         .select(
-          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id,hide_interest_count,reserved_interest_id,claimed_at"
+          "id,title,description,host_org,category,location,starts_at,ends_at,link_url,photo_url,is_anonymous,is_cancelled,created_by,owner_id,price,is_negotiable"
         )
-        .eq("id", itemId)
+        .eq("id", id)
         .single();
 
-      if (itemErr) throw new Error(itemErr.message);
+      if (error) throw new Error(error.message);
 
-      const loaded = it as ItemRow;
-      setItem(loaded);
+      const row = data as EventRow;
 
-      if (!loaded.is_anonymous && loaded.owner_id) {
-        const { data: prof } = await supabase
-          .from("profiles")
-          .select("full_name,user_role")
-          .eq("id", loaded.owner_id)
-          .maybeSingle();
+      setEvent(row);
 
-        setOwner((prof as OwnerProfile) ?? null);
-      } else {
-        setOwner(null);
-      }
-
-      const { count: lovesCount, error: loveCountErr } = await supabase
-        .from(LOVES_TABLE)
-        .select("*", { count: "exact", head: true })
-        .eq("item_id", itemId);
-
-      if (!loveCountErr) setLoveCount(lovesCount ?? 0);
-      else setLoveCount(0);
-
-      if (uid) {
-        const { data: mineLove, error: mineLoveErr } = await supabase
-          .from(LOVES_TABLE)
-          .select("item_id")
-          .eq("item_id", itemId)
-          .eq("user_id", uid)
-          .maybeSingle();
-
-        if (!mineLoveErr) setMyLoved(!!mineLove);
-        else setMyLoved(false);
-      } else {
-        setMyLoved(false);
-      }
-
-      setMyInterest(null);
-      setMyOffer(null);
-      setHasAcceptedOther(false);
-      setInterestCount(0);
-      setOfferCount(0);
-      setCompletedInterest(null);
-
-      if ((loaded.post_type ?? "give") === "give") {
-        const { data: interestRows, error: interestErr } = await supabase
-          .from("interests")
-          .select("id,item_id,user_id,status,created_at")
-          .eq("item_id", itemId);
-
-        if (!interestErr) {
-          const rows = (interestRows as MyInterestRow[]) || [];
-          const active = rows.filter((row) =>
-            ["pending", "accepted", "reserved"].includes(normStatus(row.status))
-          );
-
-          setInterestCount(active.length);
-          setHasAcceptedOther(
-            rows.some(
-              (row) =>
-                normStatus(row.status) === "accepted" &&
-                (!!uid ? row.user_id !== uid : true)
-            )
-          );
-
-          if (uid) {
-            const mine =
-              rows.find((row) => row.user_id === uid && normStatus(row.status) !== "withdrawn") ||
-              rows.find((row) => row.user_id === uid) ||
-              null;
-
-            setMyInterest(mine);
-          }
-        }
-
-        if (isGiveClosed(loaded)) {
-          const { data: completedRows, error: completedErr } = await supabase
-            .from("interests")
-            .select(`
-              id,
-              item_id,
-              user_id,
-              status,
-              completed_at,
-              reserved_at,
-              accepted_at,
-              requester:profiles!interests_user_id_fkey(full_name,email)
-            `)
-            .eq("item_id", itemId)
-            .in("status", ["completed", "reserved", "accepted"]);
-
-          if (!completedErr) {
-            const normalizedCompletedRows: CompletedInterestRow[] = (
-              (((completedRows ?? []) as CompletedInterestQueryRow[]))
-            ).map((row) => ({
-              id: row.id,
-              item_id: row.item_id,
-              user_id: row.user_id,
-              status: row.status,
-              completed_at: row.completed_at,
-              reserved_at: row.reserved_at,
-              accepted_at: row.accepted_at,
-              requester: singleRelation(row.requester),
-            }));
-
-            const candidates = normalizedCompletedRows.sort((a, b) => {
-              const aTs = new Date(
-                a.completed_at || a.reserved_at || a.accepted_at || "1970-01-01"
-              ).getTime();
-              const bTs = new Date(
-                b.completed_at || b.reserved_at || b.accepted_at || "1970-01-01"
-              ).getTime();
-              return bTs - aTs;
-            });
-
-            const reservedMatch = loaded.reserved_interest_id
-              ? candidates.find((x) => x.id === loaded.reserved_interest_id) ?? null
-              : null;
-
-            setCompletedInterest(reservedMatch ?? candidates[0] ?? null);
-          }
-        }
-      } else {
-        const { data: offerRows, error: offerErr } = await supabase
-          .from("request_offers")
-          .select("id,request_id,helper_id,status,created_at")
-          .eq("request_id", itemId);
-
-        if (!offerErr) {
-          const rows = (offerRows as MyOfferRow[]) || [];
-          const active = rows.filter((row) =>
-            ["pending", "hold", "accepted"].includes(normStatus(row.status))
-          );
-
-          setOfferCount(active.length);
-
-          if (uid) {
-            const mine = rows.find((row) => row.helper_id === uid) || null;
-            setMyOffer(mine);
-          }
-        }
-      }
-
-      setUserId(uid);
-      setUserEmail(email);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load post.");
-      setItem(null);
-      setOwner(null);
-      setLoveCount(0);
-      setMyLoved(false);
-      setInterestCount(0);
-      setOfferCount(0);
-      setMyInterest(null);
-      setMyOffer(null);
-      setHasAcceptedOther(false);
-      setCompletedInterest(null);
+      setTitle(row.title ?? "");
+      setDescription(row.description ?? "");
+      setHostOrg(row.host_org ?? "");
+      setCategory(((row.category as EventCategory) ?? "club") as EventCategory);
+      setLocation(row.location ?? "");
+      setStartsAtLocal(toInputDateTime(row.starts_at ?? null));
+      setEndsAtLocal(toInputDateTime(row.ends_at ?? null));
+      setLinkUrl(row.link_url ?? "");
+      setPhotoUrl(row.photo_url ?? "");
+      setPrice(row.price == null ? "" : String(row.price));
+      setIsNegotiable(!!row.is_negotiable);
+      setIsAnonymous(!!row.is_anonymous);
+      setIsCancelled(!!row.is_cancelled);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to load event.";
+      setErr(message);
+      setEvent(null);
     } finally {
       setLoading(false);
     }
   }
 
-  async function syncAuthAndLoad() {
-    const { data } = await supabase.auth.getSession();
-    const uid = data.session?.user?.id ?? null;
-    const email = data.session?.user?.email ?? null;
-    await loadEverything(uid, email);
+  function stepTitle(step: StepKey) {
+    if (step === "write") return "Edit your event";
+    if (step === "details") return "Update event details";
+    return "Review changes";
   }
 
-  async function toggleLove() {
-    if (!item) return;
+  function stepSubtitle(step: StepKey) {
+    if (step === "write") return "Fix the title, description, and flyer link.";
+    if (step === "details") return "Update host, category, location, time, and visibility.";
+    return "Check everything before saving.";
+  }
 
-    if (!userId) {
-      router.push("/me");
+  function validateStep(step: StepKey) {
+    if (!title.trim()) return "Title is required.";
+    if (step === "write" && description.trim().length < 3) return "Description is required.";
+
+    if (step === "details") {
+      if (!hostOrg.trim()) return "Host is required.";
+      if (!category) return "Choose a category.";
+      if (!location.trim()) return "Location is required.";
+      if (!startsAtLocal.trim()) return "Start time is required.";
+      if (!startIso) return "Start time is invalid.";
+      if (!isValidHttpUrlMaybeEmpty(linkUrl)) return "Link must start with http:// or https://";
+      if (!isValidHttpUrlMaybeEmpty(photoUrl)) return "Flyer URL must start with http:// or https://";
+
+      const parsedPrice = parseOptionalPrice(price);
+      if (Number.isNaN(parsedPrice)) return "Price must be a valid number with up to 2 decimals.";
+
+      if (endsAtLocal.trim() && endIso && startIso) {
+        if (new Date(endIso).getTime() < new Date(startIso).getTime()) {
+          return "End time cannot be before start time.";
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function goNext() {
+    setErr(null);
+    setOk(null);
+
+    const problem = validateStep(currentStep);
+    if (problem) {
+      setErr(problem);
       return;
     }
 
-    setBusy(true);
-
-    try {
-      if (myLoved) {
-        const { error } = await supabase
-          .from(LOVES_TABLE)
-          .delete()
-          .eq("item_id", item.id)
-          .eq("user_id", userId);
-
-        if (error) throw new Error(error.message);
-
-        setMyLoved(false);
-        setLoveCount((c) => Math.max(0, c - 1));
-      } else {
-        const { error } = await supabase.from(LOVES_TABLE).insert([
-          {
-            item_id: item.id,
-            user_id: userId,
-          },
-        ]);
-
-        if (error) {
-          const msg = error.message.toLowerCase();
-          if (!msg.includes("duplicate") && !msg.includes("unique")) {
-            throw new Error(error.message);
-          }
-        }
-
-        setMyLoved(true);
-        setLoveCount((c) => c + 1);
-      }
-    } catch (e: any) {
-      showToast(e?.message || "Could not update love.", "err");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function openConversation() {
-    if (!item || !item.owner_id || !userId) return;
-
-    setActionBusy("chat");
-
-    try {
-      const threadId = await ensureThread({
-        itemId: item.id,
-        ownerId: item.owner_id,
-        requesterId: userId,
+    if (currentStepIndex < steps.length - 1) {
+      setCurrentStepIndex((p) => p + 1);
+      requestAnimationFrame(() => {
+        topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       });
-
-      router.push(`/messages/${threadId}`);
-    } catch (e: any) {
-      showToast(e?.message || "Could not open chat.", "err");
-    } finally {
-      setActionBusy(null);
     }
   }
 
-  async function submitGiveInterest() {
-    if (!item || postType !== "give") return;
+  function goPrev() {
+    setErr(null);
+    setOk(null);
 
-    if (!userId) {
-      router.push("/me");
+    if (currentStepIndex <= 0) {
+      router.back();
       return;
     }
 
-    if (isOwner) return;
-    if (isGiveClosed(item) || normStatus(item.status) === "reserved") {
-      showToast("This item is not accepting new requests.", "err");
-      return;
-    }
-
-    const mine = normStatus(myInterest?.status);
-
-    if (mine === "accepted" || mine === "reserved") {
-      await openConversation();
-      return;
-    }
-
-    if (mine === "pending") return;
-
-    setActionBusy("interest");
-
-    try {
-      if (myInterest?.id && ["withdrawn", "declined"].includes(mine)) {
-        const { error } = await supabase
-          .from("interests")
-          .update({
-            status: "pending",
-            accepted_at: null,
-            accepted_expires_at: null,
-            reserved_at: null,
-            completed_at: null,
-          } as any)
-          .eq("id", myInterest.id)
-          .eq("user_id", userId);
-
-        if (error) throw new Error(error.message);
-      } else {
-        const { error } = await supabase.from("interests").insert([
-          {
-            item_id: item.id,
-            user_id: userId,
-            status: "pending",
-          },
-        ]);
-
-        if (error) {
-          const msg = error.message.toLowerCase();
-          if (!msg.includes("duplicate") && !msg.includes("unique")) {
-            throw new Error(error.message);
-          }
-        }
-      }
-
-      await loadEverything(userId, userEmail);
-      showToast(hasAcceptedOther ? "Joined waitlist." : "Request sent.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not send request.", "err");
-    } finally {
-      setActionBusy(null);
-    }
+    setCurrentStepIndex((p) => Math.max(0, p - 1));
+    requestAnimationFrame(() => {
+      topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   }
 
-  async function withdrawGiveInterest() {
-    if (!myInterest?.id || !userId) return;
-    if (normStatus(myInterest.status) !== "pending") return;
+  async function save() {
+    if (!event) return;
 
-    setActionBusy("withdraw-interest");
+    setSaving(true);
+    setErr(null);
+    setOk(null);
 
     try {
-      const { error } = await supabase
-        .from("interests")
-        .update({ status: "withdrawn" })
-        .eq("id", myInterest.id)
-        .eq("user_id", userId);
+      if (!isOwner) throw new Error("You are not allowed to edit this event.");
+      if (editingLocked) throw new Error("Editing is currently locked for this event.");
 
+      const finalProblem =
+        validateStep("write") || validateStep("details") || validateStep("review");
+      if (finalProblem) throw new Error(finalProblem);
+
+      const parsedPrice = parseOptionalPrice(price);
+
+      const payload = {
+        title: title.trim(),
+        description: description.trim() ? description.trim() : null,
+        host_org: hostOrg.trim() ? hostOrg.trim() : null,
+        category,
+        location: location.trim() ? location.trim() : null,
+        starts_at: startIso,
+        ends_at: endsAtLocal.trim() ? endIso : null,
+        link_url: linkUrl.trim() ? linkUrl.trim() : null,
+        photo_url: photoUrl.trim() ? photoUrl.trim() : null,
+        price: parsedPrice === null ? null : parsedPrice,
+        is_negotiable: parsedPrice === null ? false : isNegotiable,
+        is_anonymous: isAnonymous,
+        is_cancelled: isCancelled,
+      };
+
+      const { error } = await supabase.from("events").update(payload).eq("id", event.id);
       if (error) throw new Error(error.message);
 
-      await loadEverything(userId, userEmail);
-      showToast("Request withdrawn.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not withdraw request.", "err");
+      setOk("Saved successfully ✅");
+      await loadEvent();
+      setCurrentStepIndex(2);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to save.";
+      setErr(message);
     } finally {
-      setActionBusy(null);
-    }
-  }
-
-  async function submitHelpOffer() {
-    if (!item || postType !== "request") return;
-
-    if (!userId) {
-      router.push("/me");
-      return;
-    }
-
-    if (isOwner) return;
-    if (isRequestClosed(item)) {
-      showToast("This request is closed.", "err");
-      return;
-    }
-
-    const mine = normStatus(myOffer?.status);
-
-    if (mine === "accepted" || mine === "completed") {
-      await openConversation();
-      return;
-    }
-
-    if (mine === "pending" || mine === "hold") return;
-
-    setActionBusy("offer");
-
-    try {
-      if (myOffer?.id && mine === "declined") {
-        const { error } = await supabase
-          .from("request_offers")
-          .update({ status: "pending", updated_at: new Date().toISOString() })
-          .eq("id", myOffer.id)
-          .eq("helper_id", userId);
-
-        if (error) throw new Error(error.message);
-      } else {
-        const { error } = await supabase.from("request_offers").insert([
-          {
-            request_id: item.id,
-            helper_id: userId,
-            status: "pending",
-          },
-        ]);
-
-        if (error) {
-          const msg = error.message.toLowerCase();
-          if (!msg.includes("duplicate") && !msg.includes("unique")) {
-            throw new Error(error.message);
-          }
-        }
-      }
-
-      await loadEverything(userId, userEmail);
-      showToast("Offer sent.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not send offer.", "err");
-    } finally {
-      setActionBusy(null);
-    }
-  }
-
-  async function withdrawHelpOffer() {
-    if (!myOffer?.id || !userId) return;
-
-    const mine = normStatus(myOffer.status);
-    if (!["pending", "hold"].includes(mine)) return;
-
-    setActionBusy("withdraw-offer");
-
-    try {
-      const { error } = await supabase
-        .from("request_offers")
-        .delete()
-        .eq("id", myOffer.id)
-        .eq("helper_id", userId);
-
-      if (error) throw new Error(error.message);
-
-      await loadEverything(userId, userEmail);
-      showToast("Offer withdrawn.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not withdraw offer.", "err");
-    } finally {
-      setActionBusy(null);
-    }
-  }
-
-  async function toggleCountVisibility() {
-    if (!item || !isOwner || !userId || isArchivedGiveOwnerView) return;
-
-    const nextValue = !item.hide_interest_count;
-    setBusy(true);
-    setMenuOpen(false);
-
-    try {
-      const { error } = await supabase
-        .from("items")
-        .update({ hide_interest_count: nextValue })
-        .eq("id", item.id)
-        .eq("owner_id", userId);
-
-      if (error) throw new Error(error.message);
-
-      setItem((prev) => (prev ? { ...prev, hide_interest_count: nextValue } : prev));
-      showToast(nextValue ? "Count hidden." : "Count shown.");
-    } catch (e: any) {
-      showToast(e?.message || "Could not update count visibility.", "err");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteListing() {
-    if (!item || !isOwner || !userId) return;
-
-    setBusy(true);
-
-    try {
-      if (postType === "give") {
-        await supabase.from("interests").delete().eq("item_id", item.id);
-      } else {
-        await supabase.from("request_offers").delete().eq("request_id", item.id);
-      }
-
-      await supabase.from(LOVES_TABLE).delete().eq("item_id", item.id);
-
-      const { error } = await supabase
-        .from("items")
-        .delete()
-        .eq("id", item.id)
-        .eq("owner_id", userId);
-
-      if (error) throw new Error(error.message);
-
-      showToast("Listing deleted.");
-      router.replace("/feed");
-    } catch (e: any) {
-      showToast(e?.message || "Could not delete listing.", "err");
-    } finally {
-      setBusy(false);
-      setConfirmDelete(false);
+      setSaving(false);
     }
   }
 
   useEffect(() => {
-    void syncAuthAndLoad();
+    syncAuth();
+    loadEvent();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
-      const uid = session?.user?.id ?? null;
-      const email = session?.user?.email ?? null;
-      await loadEverything(uid, email);
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      syncAuth();
+      loadEvent();
     });
 
     return () => sub.subscription.unsubscribe();
-  }, [itemId]);
+  }, [id]);
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        setMenuOpen(false);
-        setOpenImg(null);
-        setConfirmDelete(false);
-      }
-    }
+  const pageBottomPad = `calc(${APP_NAV_HEIGHT_PX}px + ${ACTION_BAR_HEIGHT_PX}px + env(safe-area-inset-bottom) + 22px)`;
+  const bottomOffset = `calc(${APP_NAV_HEIGHT_PX}px + env(safe-area-inset-bottom) + 10px)`;
 
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (toastTimer.current) clearTimeout(toastTimer.current);
-    };
-  }, []);
-
-  return (
-    <div className={`page page-${postType}`}>
-      <div className="shell">
-        <header className="topBar">
-          <button className="iconBtn" onClick={() => router.back()} aria-label="Back" type="button">
-            ←
-          </button>
-
-          <div className="topCenter">
-            <div className="topTitle">Post</div>
-            <div className="topSub">scholarswap</div>
+  if (loading) {
+    return (
+      <div className="page">
+        <div className="shell">
+          <div className="statusCard">
+            <div className="statusTitle">Loading…</div>
+            <div className="statusText">Getting your event ready for editing.</div>
           </div>
 
-          <div className="topRightSpace" />
-        </header>
+          <style jsx>{baseStyles}</style>
+        </div>
+      </div>
+    );
+  }
 
-        {err && <div className="alert err">{err}</div>}
-        {loading && <div className="alert">Loading…</div>}
-        {!loading && !err && !item && <div className="alert err">Post not found.</div>}
+  return (
+    <div className="page" style={{ paddingBottom: pageBottomPad as string }}>
+      <div className="shell" ref={topRef}>
+        <div className="topBar">
+          <button className="topBtn" onClick={() => router.push(`/event/${id}`)} type="button">
+            ← View event
+          </button>
 
-        {!loading && item && (
-          <section className={`card card-${postType}`}>
-            <div className="cardTop">
-              <div className="authorSide">
-                <div className={`avatar avatar-${postType}`}>{initials(ownerLabel)}</div>
+          <div className="topRight">
+            <button className="topBtn" onClick={() => router.push("/me")} type="button">
+              My profile
+            </button>
+          </div>
+        </div>
 
-                <div className="authorText">
-                  <div className="authorName">{ownerLabel}</div>
-                  {subtitle ? <div className="authorSub">{subtitle}</div> : null}
+        <div className="heroHeader">
+          <div className="eyebrow">EDIT</div>
+          <div className="heroTitle">{stepTitle(currentStep)}</div>
+          <div className="heroSubtitle">{stepSubtitle(currentStep)}</div>
+        </div>
+
+        {!isOwner && (
+          <div className="errorBanner">You are not the owner of this event. Editing is disabled.</div>
+        )}
+
+        {editingLocked && (
+          <div className="warningBanner">
+            Editing is currently locked for this event.
+          </div>
+        )}
+
+        {err && <div className="errorBanner">{err}</div>}
+        {ok && <div className="okBanner">{ok}</div>}
+
+        <div className="stepper">
+          {steps.map((step, index) => {
+            const active = index === currentStepIndex;
+            const done = index < currentStepIndex;
+            const label = step === "write" ? "Write" : step === "details" ? "Details" : "Review";
+
+            return (
+              <div className="stepItem" key={step}>
+                <div className={`stepDot ${active ? "active" : ""} ${done ? "done" : ""}`}>
+                  {done ? "✓" : index + 1}
                 </div>
+                <div className={`stepLabel ${active ? "active" : ""}`}>{label}</div>
               </div>
+            );
+          })}
+        </div>
 
-              {isOwner ? (
-                <div className="menuWrap">
-                  {menuOpen ? (
-                    <button
-                      className="menuBackdrop"
-                      aria-label="Close menu"
-                      onClick={() => setMenuOpen(false)}
-                      type="button"
-                    />
-                  ) : null}
+        {event && (
+          <>
+            {currentStep === "write" && (
+              <section className="card">
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Title</label>
+                  <input
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    className="titleInput"
+                    placeholder="What’s your event called?"
+                    disabled={!isOwner || saving || editingLocked}
+                    autoFocus
+                  />
+                </div>
 
-                  <button
-                    className="menuBtn"
-                    type="button"
-                    aria-label="Post options"
-                    onClick={() => setMenuOpen((v) => !v)}
-                  >
-                    ⋯
-                  </button>
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Description</label>
+                  <textarea
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    className="textArea"
+                    rows={7}
+                    placeholder="Update the event description"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
 
-                  {menuOpen ? (
-                    <div className="menuCard">
-                      {!isArchivedGiveOwnerView ? (
-                        <>
-                          <button
-                            className="menuItem"
-                            type="button"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              router.push(`/manage/${item.id}`);
-                            }}
-                          >
-                            Manage post
-                          </button>
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Flyer URL</label>
+                  <input
+                    value={photoUrl}
+                    onChange={(e) => setPhotoUrl(e.target.value)}
+                    className="softInput"
+                    placeholder="https://..."
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
 
-                          <button
-                            className="menuItem"
-                            type="button"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              router.push(`/item/${item.id}/edit`);
-                            }}
-                          >
-                            Edit post
-                          </button>
+                <div className="previewCard">
+                  <div className="previewMedia">
+                    {photoUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={photoUrl} alt="Preview" className="previewImg" />
+                    ) : (
+                      <div className="previewEmpty">No flyer preview</div>
+                    )}
+                  </div>
 
-                          <button className="menuItem" type="button" onClick={toggleCountVisibility}>
-                            {item.hide_interest_count ? "Show count" : "Hide count"}
-                          </button>
-                        </>
-                      ) : null}
+                  <div className="previewBody">
+                    <div className="previewMeta">EVENT</div>
+                    <div className="previewHeadline">{title.trim() || "Untitled event"}</div>
+                    <div className="previewText">{description.trim() || "No description yet."}</div>
+                  </div>
+                </div>
+              </section>
+            )}
 
+            {currentStep === "details" && (
+              <section className="card">
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Host</label>
+                  <input
+                    value={hostOrg}
+                    onChange={(e) => setHostOrg(e.target.value)}
+                    className="softInput"
+                    placeholder="Host club / organization"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                <div className="fieldBlock">
+                  <div className="fieldLabel">Category</div>
+                  <div className="choiceGrid">
+                    {EVENT_CATEGORY_OPTIONS.map((v) => (
                       <button
-                        className="menuItem danger"
+                        key={v}
                         type="button"
-                        onClick={() => {
-                          setMenuOpen(false);
-                          setConfirmDelete(true);
-                        }}
+                        className={`choice ${category === v ? "selected purple" : ""}`}
+                        onClick={() => setCategory(v)}
+                        disabled={!isOwner || saving || editingLocked}
                       >
-                        Delete listing
+                        {eventCategoryLabel(v)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Location</label>
+                  <input
+                    value={location}
+                    onChange={(e) => setLocation(e.target.value)}
+                    className="softInput"
+                    placeholder="Where is it happening?"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Start time</label>
+                  <input
+                    type="datetime-local"
+                    value={startsAtLocal}
+                    onChange={(e) => setStartsAtLocal(e.target.value)}
+                    className="softInput"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">End time</label>
+                  <input
+                    type="datetime-local"
+                    value={endsAtLocal}
+                    onChange={(e) => setEndsAtLocal(e.target.value)}
+                    className="softInput"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                  <div className="helperText">Leave blank if no end time is needed.</div>
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Event link</label>
+                  <input
+                    value={linkUrl}
+                    onChange={(e) => setLinkUrl(e.target.value)}
+                    className="softInput"
+                    placeholder="https://..."
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                <div className="fieldBlock">
+                  <label className="fieldLabel">Price (optional)</label>
+                  <input
+                    value={price}
+                    onChange={(e) => {
+                      const next = sanitizePriceInput(e.target.value);
+                      setPrice(next);
+                      if (!next.trim()) setIsNegotiable(false);
+                    }}
+                    className="softInput"
+                    placeholder="Leave blank if free"
+                    inputMode="decimal"
+                    disabled={!isOwner || saving || editingLocked}
+                  />
+                </div>
+
+                {price.trim().length > 0 && (
+                  <div className="fieldBlock">
+                    <div className="fieldLabel">Negotiation</div>
+                    <div className="segmentRow two">
+                      <button
+                        type="button"
+                        className={`segment ${!isNegotiable ? "active" : ""}`}
+                        onClick={() => setIsNegotiable(false)}
+                        disabled={!isOwner || saving || editingLocked}
+                      >
+                        Fixed price
+                      </button>
+                      <button
+                        type="button"
+                        className={`segment ${isNegotiable ? "active" : ""}`}
+                        onClick={() => setIsNegotiable(true)}
+                        disabled={!isOwner || saving || editingLocked}
+                      >
+                        Negotiable
                       </button>
                     </div>
-                  ) : null}
-                </div>
-              ) : (
-                <button
-                  className={`loveBtn ${myLoved ? "active" : ""}`}
-                  type="button"
-                  onClick={toggleLove}
-                  disabled={busy}
-                  aria-label="Love post"
-                >
-                  {myLoved ? "♥" : "♡"}
-                </button>
-              )}
-            </div>
-
-            <div className="mediaWrap">
-              {item.photo_url ? (
-                <button className="imgBtn" type="button" onClick={() => setOpenImg(item.photo_url)}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={item.photo_url} alt={item.title} className="heroImg" />
-                </button>
-              ) : (
-                <div className={`noPhoto noPhoto-${postType}`}>No image</div>
-              )}
-            </div>
-
-            <div className="body">
-              <div className="titleRow">
-                <h1 className="title">{item.title}</h1>
-
-                {!isOwner ? (
-                  <button
-                    className={`loveBtn small ${myLoved ? "active" : ""}`}
-                    type="button"
-                    onClick={toggleLove}
-                    disabled={busy}
-                    aria-label="Love post"
-                  >
-                    {myLoved ? "♥" : "♡"}
-                  </button>
-                ) : null}
-              </div>
-
-              <div className="statsRow">
-                <span className="stat">
-                  <span className="statIcon">♥</span> {loveCount}
-                </span>
-
-                <span className="dot">•</span>
-
-                <span className="stat">{activityLabel}</span>
-
-                <span className="dot">•</span>
-
-                <span className={`statusPill ${itemStateChip.tone} ${postType}`}>
-                  {itemStateChip.label}
-                </span>
-
-                <span className="dot">•</span>
-
-                <span className="stat">Delists {formatDelist(item.expires_at)}</span>
-              </div>
-
-              {isArchivedGiveOwnerView ? (
-                <div className="archivedCard">
-                  <div className="archivedTitle">Archived handoff</div>
-                  <div className="archivedBody">
-                    This item has already been given away. Editing and management are disabled.
                   </div>
+                )}
 
-                  <div className="archivedMetaGrid">
-                    <div className="archivedMetaBox">
-                      <div className="archivedMetaLabel">Given to</div>
-                      <div className="archivedMetaValue">{soldToLabel}</div>
-                    </div>
+                {!isValidHttpUrlMaybeEmpty(linkUrl) && (
+                  <div className="warningBanner">Link must start with http:// or https://</div>
+                )}
 
-                    <div className="archivedMetaBox">
-                      <div className="archivedMetaLabel">Given on</div>
-                      <div className="archivedMetaValue">{formatFullWhen(soldAtLabel)}</div>
-                    </div>
+                {!isValidHttpUrlMaybeEmpty(photoUrl) && (
+                  <div className="warningBanner">Flyer URL must start with http:// or https://</div>
+                )}
+
+                {!!startsAtLocal &&
+                  !!endsAtLocal &&
+                  !!startIso &&
+                  !!endIso &&
+                  new Date(endIso).getTime() < new Date(startIso).getTime() && (
+                    <div className="warningBanner">End time cannot be before start time.</div>
+                  )}
+
+                <div className="divider" />
+
+                <div className="fieldBlock">
+                  <div className="fieldLabel">Visibility</div>
+                  <div className="segmentRow two">
+                    <button
+                      type="button"
+                      className={`segment ${!isAnonymous ? "active" : ""}`}
+                      onClick={() => setIsAnonymous(false)}
+                      disabled={!isOwner || saving || editingLocked}
+                    >
+                      Show my name
+                    </button>
+                    <button
+                      type="button"
+                      className={`segment ${isAnonymous ? "active" : ""}`}
+                      onClick={() => setIsAnonymous(true)}
+                      disabled={!isOwner || saving || editingLocked}
+                    >
+                      Anonymous
+                    </button>
                   </div>
                 </div>
-              ) : (postType === "give" && giveFlow) || (postType === "request" && requestFlow) ? (
-                <div className={`flowCard flowCard-${postType}`}>
-                  <div className="flowTitle">
-                    {postType === "give" ? giveFlow?.title : requestFlow?.title}
+
+                <div className="fieldBlock">
+                  <div className="fieldLabel">Event status</div>
+                  <div className="segmentRow two">
+                    <button
+                      type="button"
+                      className={`segment ${!isCancelled ? "active" : ""}`}
+                      onClick={() => setIsCancelled(false)}
+                      disabled={!isOwner || saving || editingLocked}
+                    >
+                      Active
+                    </button>
+                    <button
+                      type="button"
+                      className={`segment ${isCancelled ? "active cancel" : "cancel"}`}
+                      onClick={() => setIsCancelled(true)}
+                      disabled={!isOwner || saving || editingLocked}
+                    >
+                      Cancelled
+                    </button>
                   </div>
-                  <div className="flowBody">
-                    {postType === "give" ? giveFlow?.body : requestFlow?.body}
-                  </div>
-
-                  <div className="flowActions">
-                    {postType === "give" && giveFlow ? (
-                      <>
-                        <button
-                          className={`primaryAction primaryAction-${postType}`}
-                          type="button"
-                          disabled={giveFlow.primaryDisabled || !!actionBusy}
-                          onClick={() => {
-                            if (giveFlow.kind === "owner") {
-                              router.push(`/manage/${item.id}`);
-                              return;
-                            }
-                            if (giveFlow.kind === "login") {
-                              router.push("/me");
-                              return;
-                            }
-                            if (giveFlow.kind === "accepted" || giveFlow.kind === "reserved") {
-                              void openConversation();
-                              return;
-                            }
-                            if (giveFlow.kind === "open" || giveFlow.kind === "waitlist") {
-                              void submitGiveInterest();
-                            }
-                          }}
-                        >
-                          {actionBusy === "chat"
-                            ? "Opening…"
-                            : actionBusy === "interest"
-                            ? "Sending…"
-                            : giveFlow.primary}
-                        </button>
-
-                        {giveFlow.secondary ? (
-                          <button
-                            className="secondaryAction"
-                            type="button"
-                            disabled={giveFlow.secondaryDisabled || !!actionBusy}
-                            onClick={() => {
-                              if (giveFlow.kind === "owner") {
-                                router.push(`/item/${item.id}/edit`);
-                                return;
-                              }
-                              if (giveFlow.kind === "pending") {
-                                void withdrawGiveInterest();
-                              }
-                            }}
-                          >
-                            {actionBusy === "withdraw-interest" ? "Working…" : giveFlow.secondary}
-                          </button>
-                        ) : null}
-                      </>
-                    ) : null}
-
-                    {postType === "request" && requestFlow ? (
-                      <>
-                        <button
-                          className={`primaryAction primaryAction-${postType}`}
-                          type="button"
-                          disabled={requestFlow.primaryDisabled || !!actionBusy}
-                          onClick={() => {
-                            if (requestFlow.kind === "owner") {
-                              router.push(`/manage/${item.id}`);
-                              return;
-                            }
-                            if (requestFlow.kind === "login") {
-                              router.push("/me");
-                              return;
-                            }
-                            if (requestFlow.kind === "accepted") {
-                              void openConversation();
-                              return;
-                            }
-                            if (requestFlow.kind === "open") {
-                              void submitHelpOffer();
-                            }
-                          }}
-                        >
-                          {actionBusy === "chat"
-                            ? "Opening…"
-                            : actionBusy === "offer"
-                            ? "Sending…"
-                            : requestFlow.primary}
-                        </button>
-
-                        {requestFlow.secondary ? (
-                          <button
-                            className="secondaryAction"
-                            type="button"
-                            disabled={requestFlow.secondaryDisabled || !!actionBusy}
-                            onClick={() => {
-                              if (requestFlow.kind === "owner") {
-                                router.push(`/item/${item.id}/edit`);
-                                return;
-                              }
-                              if (requestFlow.kind === "pending") {
-                                void withdrawHelpOffer();
-                              }
-                            }}
-                          >
-                            {actionBusy === "withdraw-offer" ? "Working…" : requestFlow.secondary}
-                          </button>
-                        ) : null}
-                      </>
-                    ) : null}
+                  <div className="helperText">
+                    Canceling the event will later trigger attendee notifications.
                   </div>
                 </div>
-              ) : null}
+              </section>
+            )}
 
-              {item.description?.trim() ? (
-                <div className="caption">
-                  <span className="captionName">{ownerLabel}</span> {item.description.trim()}
-                </div>
-              ) : null}
+            {currentStep === "review" && (
+              <section className="card">
+                <div className="reviewPreview">
+                  <div className="reviewPreviewMedia">
+                    {photoUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={photoUrl} alt={title || "Preview"} className="reviewPreviewImg" />
+                    ) : (
+                      <div className="previewEmpty">No flyer preview</div>
+                    )}
+                  </div>
 
-              {postType === "request" ? (
-                <div className="requestInfo">
-                  {item.request_timeframe ? (
-                    <span className="infoPill">{requestTimeframeLabel(item.request_timeframe)}</span>
-                  ) : null}
-                  {item.request_location?.trim() ? (
-                    <span className="infoPill">{item.request_location.trim()}</span>
-                  ) : null}
+                  <div className="reviewPreviewBody">
+                    <div className="previewMeta">EVENT</div>
+                    <div className="previewHeadline">{title.trim() || "Untitled event"}</div>
+                    <div className="previewText">{description.trim() || "No description yet."}</div>
+                  </div>
                 </div>
-              ) : null}
-            </div>
-          </section>
+
+                <div className="reviewList">
+                  <div className="reviewRow">
+                    <span className="reviewKey">Type</span>
+                    <span className="reviewValue">Event</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Host</span>
+                    <span className="reviewValue">{hostOrg.trim() || "None"}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Category</span>
+                    <span className="reviewValue">{eventCategoryLabel(category)}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Location</span>
+                    <span className="reviewValue">{location.trim() || "None"}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Starts</span>
+                    <span className="reviewValue">{formatDateTime(startIso)}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Ends</span>
+                    <span className="reviewValue">{formatDateTime(endsAtLocal ? endIso : null)}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Link</span>
+                    <span className="reviewValue">{linkUrl.trim() || "None"}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Price</span>
+                    <span className="reviewValue">{formatPriceLabel(price, isNegotiable)}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Visibility</span>
+                    <span className="reviewValue">{isAnonymous ? "Anonymous" : "Show my name"}</span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Status</span>
+                    <span className="reviewValue">
+                      {isCancelled ? "Cancelled" : isEnded(startIso, endIso) ? "Ended / scheduled in past" : "Active"}
+                    </span>
+                  </div>
+
+                  <div className="reviewRow">
+                    <span className="reviewKey">Changed</span>
+                    <span className="reviewValue">{dirty ? "Yes" : "No changes yet"}</span>
+                  </div>
+                </div>
+              </section>
+            )}
+          </>
         )}
       </div>
 
-      {confirmDelete ? (
-        <div className="modal" onClick={() => setConfirmDelete(false)}>
-          <div className="modalCard" onClick={(e) => e.stopPropagation()}>
-            <div className="modalTitle">Delete listing?</div>
-            <div className="modalText">This permanently removes the post.</div>
-
-            <div className="modalActions">
-              <button className="ghostBtn" onClick={() => setConfirmDelete(false)} type="button">
-                Cancel
-              </button>
-              <button className="dangerBtn" onClick={deleteListing} disabled={busy} type="button">
-                {busy ? "Deleting..." : "Delete"}
-              </button>
+      <div className="stickyBar" style={{ bottom: bottomOffset as string }}>
+        <div className="stickyInner">
+          <div className="stickyText">
+            <div className="stickyMini">Edit flow</div>
+            <div className="stickyMain">
+              {!isOwner
+                ? "Owner access required"
+                : editingLocked
+                ? "Editing locked"
+                : currentStep === "review"
+                ? dirty
+                  ? "Ready to save changes"
+                  : "No changes yet"
+                : `Step ${currentStepIndex + 1} of ${steps.length}`}
             </div>
           </div>
+
+          <button className="secondaryBtn" onClick={goPrev} disabled={saving} type="button">
+            {currentStepIndex === 0 ? "Back" : "Previous"}
+          </button>
+
+          {currentStep !== "review" ? (
+            <button
+              className="primaryBtn"
+              onClick={goNext}
+              disabled={!isOwner || saving || editingLocked}
+              type="button"
+            >
+              Continue
+            </button>
+          ) : (
+            <button
+              className="primaryBtn"
+              onClick={save}
+              disabled={!isOwner || saving || editingLocked || !dirty}
+              type="button"
+            >
+              {saving ? "Saving..." : "Save changes"}
+            </button>
+          )}
         </div>
-      ) : null}
+      </div>
 
-      {openImg && item ? (
-        <div className="imgModal" onClick={() => setOpenImg(null)}>
-          <div className="imgCard" onClick={(e) => e.stopPropagation()}>
-            <div className="imgTop">
-              <div className="imgTitle">{item.title}</div>
-              <button className="iconGhost" onClick={() => setOpenImg(null)} type="button">
-                ✕
-              </button>
-            </div>
-
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={openImg} alt={item.title} className="imgFull" />
-          </div>
-        </div>
-      ) : null}
-
-      {toast ? <div className={`toast ${toast.kind === "err" ? "err" : "ok"}`}>{toast.msg}</div> : null}
-
+      <style jsx>{baseStyles}</style>
       <style jsx>{`
-        .page {
-          min-height: 100vh;
-          color: #0f172a;
-          padding: 12px 12px 28px;
+        .heroHeader {
+          margin-bottom: 16px;
         }
 
-        .page-give {
-          background: #f7f8f7;
+        .eyebrow {
+          font-size: 12px;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: #64748b;
+          font-weight: 1000;
         }
 
-        .page-request {
-          background: #fbf8f3;
+        .heroTitle {
+          margin-top: 6px;
+          font-size: 31px;
+          line-height: 1.04;
+          font-weight: 1000;
+          letter-spacing: -0.045em;
         }
 
-        .shell {
-          max-width: 760px;
-          margin: 0 auto;
+        .heroSubtitle {
+          margin-top: 8px;
+          font-size: 14px;
+          color: #64748b;
+          font-weight: 600;
         }
 
-        .topBar {
-          position: sticky;
-          top: 0;
-          z-index: 20;
+        .stepper {
           display: grid;
-          grid-template-columns: 42px 1fr 42px;
-          align-items: center;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 10px;
-          padding: 6px 0 12px;
-          backdrop-filter: blur(12px);
+          margin-bottom: 16px;
         }
 
-        .page-give .topBar {
-          background: rgba(247, 248, 247, 0.9);
+        .stepItem {
+          min-width: 0;
+          text-align: center;
         }
 
-        .page-request .topBar {
-          background: rgba(251, 248, 243, 0.9);
-        }
-
-        .iconBtn,
-        .iconGhost {
-          width: 42px;
-          height: 42px;
+        .stepDot {
+          width: 30px;
+          height: 30px;
           border-radius: 999px;
+          display: grid;
+          place-items: center;
+          margin: 0 auto;
+          font-size: 12px;
+          font-weight: 1000;
+          background: #fff;
+          color: #64748b;
+          border: 1px solid #e5e7eb;
+        }
+
+        .stepDot.active {
+          background: #ede9fe;
+          color: #6d28d9;
+          border-color: #c4b5fd;
+        }
+
+        .stepDot.done {
+          background: #03133d;
+          color: #fff;
+          border-color: #03133d;
+        }
+
+        .stepLabel {
+          margin-top: 8px;
+          font-size: 12px;
+          color: #64748b;
+          font-weight: 900;
+        }
+
+        .stepLabel.active {
+          color: #0f172a;
+        }
+
+        .card {
+          background: rgba(255, 255, 255, 0.94);
+          border: 1px solid #e5e7eb;
+          border-radius: 28px;
+          padding: 18px;
+          box-shadow: 0 20px 50px rgba(15, 23, 42, 0.05);
+        }
+
+        .fieldBlock {
+          display: grid;
+          gap: 8px;
+          margin-bottom: 18px;
+        }
+
+        .fieldLabel {
+          font-size: 13px;
+          color: #475569;
+          font-weight: 900;
+        }
+
+        .titleInput {
+          width: 100%;
+          border: none;
+          outline: none;
+          background: transparent;
+          padding: 8px 0 12px 0;
+          font-size: 30px;
+          line-height: 1.05;
+          font-weight: 1000;
+          letter-spacing: -0.045em;
+          border-bottom: 1px solid #e5e7eb;
+        }
+
+        .textArea {
+          width: 100%;
+          border: 1px solid #e5e7eb;
+          outline: none;
+          background: #fff;
+          padding: 16px;
+          border-radius: 20px;
+          resize: vertical;
+          font-size: 15px;
+          line-height: 1.65;
+          color: #0f172a;
+        }
+
+        .softInput {
+          width: 100%;
+          padding: 14px 15px;
+          border-radius: 18px;
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          outline: none;
+          font-size: 14px;
+          color: #0f172a;
+        }
+
+        .choiceGrid {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+
+        .choice {
+          padding: 12px 14px;
+          border-radius: 18px;
           border: 1px solid #e5e7eb;
           background: #fff;
           color: #0f172a;
-          font-size: 18px;
+          font-weight: 900;
+          font-size: 14px;
+          cursor: pointer;
+        }
+
+        .choice.selected.purple {
+          background: #ede9fe;
+          border-color: #8b5cf6;
+          color: #6d28d9;
+        }
+
+        .segmentRow {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 10px;
+        }
+
+        .segmentRow.two {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .segment {
+          border: 1px solid #e5e7eb;
+          background: #fff;
+          color: #0f172a;
+          border-radius: 18px;
+          padding: 13px 14px;
           font-weight: 900;
           cursor: pointer;
         }
 
-        .topCenter {
-          text-align: center;
-          min-width: 0;
+        .segment.active {
+          border-color: #03133d;
+          background: #03133d;
+          color: #fff;
         }
 
-        .topTitle {
-          font-size: 16px;
-          font-weight: 1000;
-          line-height: 1.1;
+        .segment.cancel.active {
+          border-color: #b91c1c;
+          background: #b91c1c;
+          color: #fff;
         }
 
-        .topSub {
-          margin-top: 2px;
+        .divider {
+          height: 1px;
+          background: #eef2f7;
+          margin: 6px 0 18px 0;
+        }
+
+        .helperText {
           font-size: 12px;
           color: #64748b;
           font-weight: 700;
+          line-height: 1.4;
         }
 
-        .topRightSpace {
-          width: 42px;
-          height: 42px;
-        }
-
-        .alert {
-          margin: 8px 0 0;
+        .previewCard,
+        .reviewPreview {
+          background: rgba(255, 255, 255, 0.98);
           border: 1px solid #e5e7eb;
-          background: #fff;
-          padding: 11px 13px;
-          border-radius: 16px;
-          font-size: 13px;
-          font-weight: 800;
-          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
-        }
-
-        .alert.err {
-          border-color: #fecdd3;
-          background: #fff1f2;
-          color: #9f1239;
-        }
-
-        .card {
-          margin-top: 8px;
-          background: #fff;
           border-radius: 24px;
           overflow: hidden;
           box-shadow: 0 16px 40px rgba(15, 23, 42, 0.05);
         }
 
-        .card-give {
-          border: 1px solid rgba(16, 185, 129, 0.2);
-          background: linear-gradient(180deg, rgba(16, 185, 129, 0.04), #ffffff 34%);
-        }
-
-        .card-request {
-          border: 1px solid rgba(245, 158, 11, 0.22);
-          background: linear-gradient(180deg, rgba(245, 158, 11, 0.04), #ffffff 34%);
-        }
-
-        .cardTop {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          padding: 12px;
-          border-bottom: 1px solid #eef2f7;
-        }
-
-        .authorSide {
-          min-width: 0;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-        }
-
-        .avatar {
-          width: 38px;
-          height: 38px;
-          border-radius: 999px;
-          display: grid;
-          place-items: center;
-          font-size: 12px;
-          font-weight: 1000;
-          flex: 0 0 auto;
-        }
-
-        .avatar-give {
-          border: 1px solid rgba(16, 185, 129, 0.18);
-          background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), #f0fdf4 100%);
-          color: #065f46;
-        }
-
-        .avatar-request {
-          border: 1px solid rgba(245, 158, 11, 0.18);
-          background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), #fffbeb 100%);
-          color: #92400e;
-        }
-
-        .authorText {
-          min-width: 0;
-        }
-
-        .authorName {
-          font-size: 13px;
-          font-weight: 1000;
-          line-height: 1.1;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .authorSub {
-          margin-top: 4px;
-          font-size: 11px;
-          color: #64748b;
-          font-weight: 700;
-          line-height: 1.3;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .menuWrap {
+        .previewMedia,
+        .reviewPreviewMedia {
           position: relative;
-          flex: 0 0 auto;
-        }
-
-        .menuBtn,
-        .loveBtn {
-          width: 38px;
-          height: 38px;
-          border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-          font-size: 22px;
-          line-height: 1;
-          font-weight: 900;
-          cursor: pointer;
-          display: grid;
-          place-items: center;
-        }
-
-        .loveBtn.active {
-          color: #dc2626;
-          border-color: #fecaca;
-          background: #fff5f5;
-        }
-
-        .loveBtn.small {
-          width: 34px;
-          height: 34px;
-          font-size: 19px;
-        }
-
-        .menuBackdrop {
-          position: fixed;
-          inset: 0;
-          background: transparent;
-          border: 0;
-          padding: 0;
-          margin: 0;
-        }
-
-        .menuCard {
-          position: absolute;
-          top: calc(100% + 8px);
-          right: 0;
-          width: 200px;
-          border: 1px solid #e5e7eb;
-          background: rgba(255, 255, 255, 0.98);
-          border-radius: 16px;
-          overflow: hidden;
-          box-shadow: 0 20px 44px rgba(15, 23, 42, 0.14);
-          z-index: 30;
-        }
-
-        .menuItem {
-          width: 100%;
-          border: 0;
-          background: #fff;
-          text-align: left;
-          padding: 12px 14px;
-          font-size: 13px;
-          font-weight: 900;
-          color: #0f172a;
-          cursor: pointer;
-        }
-
-        .menuItem + .menuItem {
-          border-top: 1px solid #eef2f7;
-        }
-
-        .menuItem.danger {
-          color: #b91c1c;
-        }
-
-        .mediaWrap {
+          height: 220px;
           background: #f8fafc;
+          border-bottom: 1px solid #eef2f7;
+          overflow: hidden;
         }
 
-        .imgBtn {
-          display: block;
+        .previewImg,
+        .reviewPreviewImg {
           width: 100%;
-          border: 0;
-          padding: 0;
-          background: transparent;
-          cursor: zoom-in;
-        }
-
-        .heroImg {
-          width: 100%;
-          height: 420px;
+          height: 100%;
           object-fit: cover;
           display: block;
         }
 
-        .noPhoto {
-          height: 220px;
+        .previewEmpty {
+          width: 100%;
+          height: 100%;
           display: grid;
           place-items: center;
+          text-align: center;
           color: #64748b;
-          font-size: 13px;
           font-weight: 800;
+          padding: 20px;
         }
 
-        .noPhoto-give {
-          background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), #f8fafc);
+        .previewBody,
+        .reviewPreviewBody {
+          padding: 16px;
         }
 
-        .noPhoto-request {
-          background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), #f8fafc);
+        .previewMeta {
+          font-size: 12px;
+          color: #64748b;
+          font-weight: 900;
         }
 
-        .body {
-          padding: 14px 14px 16px;
+        .previewHeadline {
+          margin-top: 8px;
+          font-size: 24px;
+          line-height: 1.14;
+          font-weight: 1000;
+          letter-spacing: -0.03em;
         }
 
-        .titleRow {
+        .previewText {
+          margin-top: 12px;
+          font-size: 14px;
+          color: #334155;
+          line-height: 1.55;
+        }
+
+        .reviewList {
+          margin-top: 18px;
+          display: grid;
+          gap: 0;
+        }
+
+        .reviewRow {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
-          gap: 10px;
-        }
-
-        .title {
-          margin: 0;
-          font-size: 22px;
-          line-height: 1.08;
-          font-weight: 1000;
-          letter-spacing: -0.04em;
-          overflow-wrap: anywhere;
-          flex: 1;
-          min-width: 0;
-        }
-
-        .statsRow {
-          margin-top: 10px;
-          display: flex;
-          align-items: center;
-          flex-wrap: wrap;
-          gap: 8px;
-          color: #475569;
-          font-size: 12px;
-          font-weight: 900;
-          line-height: 1.4;
-        }
-
-        .stat {
-          display: inline-flex;
-          align-items: center;
-          gap: 5px;
-        }
-
-        .statIcon {
-          color: #dc2626;
-        }
-
-        .dot {
-          color: #cbd5e1;
-        }
-
-        .statusPill {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 24px;
-          padding: 0 9px;
-          border-radius: 999px;
-          font-size: 11px;
-          font-weight: 900;
-          border: 1px solid #e5e7eb;
-        }
-
-        .statusPill.good.give,
-        .statusPill.good.request {
-          color: #166534;
-          border-color: #bbf7d0;
-          background: #ecfdf5;
-        }
-
-        .statusPill.warn.give,
-        .statusPill.warn.request {
-          color: #92400e;
-          border-color: #fde68a;
-          background: #fffbeb;
-        }
-
-        .statusPill.closed,
-        .statusPill.neutral {
-          color: #475569;
-          border-color: #e5e7eb;
-          background: #f8fafc;
-        }
-
-        .flowCard,
-        .archivedCard {
-          margin-top: 14px;
-          padding: 14px;
-          border-radius: 18px;
-          border: 1px solid #e5e7eb;
-        }
-
-        .flowCard-give {
-          border-color: rgba(16, 185, 129, 0.16);
-          background: linear-gradient(180deg, rgba(16, 185, 129, 0.06), #f8fafc);
-        }
-
-        .flowCard-request {
-          border-color: rgba(245, 158, 11, 0.16);
-          background: linear-gradient(180deg, rgba(245, 158, 11, 0.06), #fffaf0);
-        }
-
-        .archivedCard {
-          border-color: #dbe4ee;
-          background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
-        }
-
-        .flowTitle,
-        .archivedTitle {
-          font-size: 14px;
-          font-weight: 1000;
-          color: #0f172a;
-        }
-
-        .flowBody,
-        .archivedBody {
-          margin-top: 5px;
-          font-size: 13px;
-          line-height: 1.5;
-          color: #475569;
-          font-weight: 700;
-        }
-
-        .archivedMetaGrid {
-          margin-top: 12px;
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
-        }
-
-        .archivedMetaBox {
-          border-radius: 14px;
-          border: 1px solid #e2e8f0;
-          background: #ffffff;
-          padding: 12px;
-        }
-
-        .archivedMetaLabel {
-          font-size: 11px;
-          font-weight: 900;
-          color: #64748b;
-          text-transform: uppercase;
-          letter-spacing: 0.03em;
-        }
-
-        .archivedMetaValue {
-          margin-top: 6px;
-          font-size: 14px;
-          line-height: 1.4;
-          font-weight: 900;
-          color: #0f172a;
-          overflow-wrap: anywhere;
-        }
-
-        .flowActions {
-          margin-top: 12px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 10px;
-        }
-
-        .primaryAction,
-        .secondaryAction {
-          min-height: 42px;
-          padding: 0 14px;
-          border-radius: 14px;
-          font-size: 13px;
-          font-weight: 900;
-          cursor: pointer;
-        }
-
-        .primaryAction-give {
-          border: 1px solid rgba(16, 185, 129, 0.26);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
-        }
-
-        .primaryAction-request {
-          border: 1px solid rgba(245, 158, 11, 0.26);
-          background: rgba(245, 158, 11, 0.12);
-          color: #92400e;
-        }
-
-        .secondaryAction {
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-        }
-
-        .primaryAction:disabled,
-        .secondaryAction:disabled {
-          opacity: 0.58;
-          cursor: not-allowed;
-        }
-
-        .caption {
-          margin-top: 12px;
-          font-size: 13px;
-          line-height: 1.58;
-          color: #334155;
-          white-space: pre-wrap;
-        }
-
-        .captionName {
-          color: #0f172a;
-          font-weight: 1000;
-        }
-
-        .requestInfo {
-          margin-top: 12px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .infoPill {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          padding: 7px 10px;
-          border-radius: 999px;
-          border: 1px solid rgba(245, 158, 11, 0.2);
-          background: rgba(245, 158, 11, 0.1);
-          color: #92400e;
-          font-size: 11px;
-          font-weight: 900;
-        }
-
-        .modal,
-        .imgModal {
-          position: fixed;
-          inset: 0;
-          z-index: 100;
-          background: rgba(15, 23, 42, 0.5);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 16px;
-        }
-
-        .modalCard,
-        .imgCard {
-          width: 100%;
-          max-width: 520px;
-          border-radius: 22px;
-          background: #fff;
-          border: 1px solid #e5e7eb;
-          box-shadow: 0 30px 80px rgba(15, 23, 42, 0.18);
-        }
-
-        .modalCard {
-          padding: 16px;
-        }
-
-        .modalTitle {
-          font-size: 16px;
-          font-weight: 1000;
-          color: #0f172a;
-        }
-
-        .modalText {
-          margin-top: 8px;
-          font-size: 13px;
-          color: #475569;
-          font-weight: 700;
-          line-height: 1.45;
-        }
-
-        .modalActions {
-          margin-top: 14px;
-          display: flex;
-          justify-content: flex-end;
-          gap: 10px;
-        }
-
-        .ghostBtn,
-        .dangerBtn {
-          border-radius: 14px;
-          padding: 10px 13px;
-          font-size: 13px;
-          font-weight: 900;
-          cursor: pointer;
-        }
-
-        .ghostBtn {
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-        }
-
-        .dangerBtn {
-          border: 1px solid #fecdd3;
-          background: #fff1f2;
-          color: #b91c1c;
-        }
-
-        .imgTop {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          padding: 12px 14px;
+          gap: 12px;
+          padding: 12px 0;
           border-bottom: 1px solid #eef2f7;
         }
 
-        .imgTitle {
+        .reviewKey {
           font-size: 13px;
-          font-weight: 1000;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .imgFull {
-          display: block;
-          width: 100%;
-          max-height: 80vh;
-          object-fit: contain;
-          background: #111827;
-        }
-
-        .toast {
-          position: fixed;
-          top: 16px;
-          left: 50%;
-          transform: translateX(-50%);
-          z-index: 120;
-          max-width: calc(100vw - 24px);
-          padding: 10px 13px;
-          border-radius: 14px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          font-size: 13px;
+          color: #64748b;
           font-weight: 900;
-          box-shadow: 0 16px 42px rgba(15, 23, 42, 0.14);
         }
 
-        .toast.ok {
-          border-color: #bbf7d0;
+        .reviewValue {
+          font-size: 14px;
+          color: #0f172a;
+          font-weight: 900;
+          text-align: right;
+          line-height: 1.45;
         }
 
-        .toast.err {
-          border-color: #fecdd3;
-        }
-
-        @media (max-width: 560px) {
-          .heroImg {
-            height: 320px;
+        @media (max-width: 520px) {
+          .heroTitle {
+            font-size: 27px;
           }
 
-          .title {
-            font-size: 20px;
+          .titleInput {
+            font-size: 27px;
           }
 
-          .authorSub {
-            white-space: normal;
-          }
-
-          .statsRow {
-            gap: 6px;
-          }
-
-          .dot {
-            display: none;
-          }
-
-          .stat {
-            width: 100%;
-          }
-
-          .flowActions {
-            display: grid;
+          .segmentRow {
             grid-template-columns: 1fr;
           }
 
-          .primaryAction,
-          .secondaryAction {
-            width: 100%;
-          }
-
-          .archivedMetaGrid {
-            grid-template-columns: 1fr;
+          .previewMedia,
+          .reviewPreviewMedia {
+            height: 190px;
           }
         }
       `}</style>
     </div>
   );
 }
+
+const baseStyles = `
+  .page {
+    min-height: 100vh;
+    background: linear-gradient(180deg, #f8fafc 0%, #f6f7fb 42%, #f8fafc 100%);
+    color: #0f172a;
+    padding: 16px;
+  }
+
+  .shell {
+    max-width: 980px;
+    margin: 0 auto;
+  }
+
+  .topBar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .topRight {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .topBtn {
+    border: 1px solid #e5e7eb;
+    background: rgba(255,255,255,0.88);
+    color: #0f172a;
+    padding: 10px 14px;
+    border-radius: 999px;
+    font-weight: 900;
+    cursor: pointer;
+    box-shadow: 0 10px 24px rgba(15,23,42,0.04);
+  }
+
+  .statusCard {
+    background: rgba(255,255,255,0.95);
+    border: 1px solid #e5e7eb;
+    border-radius: 26px;
+    padding: 22px;
+    box-shadow: 0 24px 60px rgba(15,23,42,0.06);
+  }
+
+  .statusTitle {
+    font-weight: 1000;
+    font-size: 22px;
+  }
+
+  .statusText {
+    margin-top: 8px;
+    color: #64748b;
+    font-weight: 700;
+  }
+
+  .errorBanner,
+  .warningBanner,
+  .okBanner {
+    margin-bottom: 14px;
+    padding: 14px 16px;
+    border-radius: 18px;
+    font-weight: 900;
+  }
+
+  .errorBanner {
+    background: #fff1f2;
+    border: 1px solid #fecdd3;
+    color: #9f1239;
+  }
+
+  .warningBanner {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #92400e;
+  }
+
+  .okBanner {
+    background: #ecfdf5;
+    border: 1px solid #bbf7d0;
+    color: #166534;
+  }
+
+  .stickyBar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    z-index: 9999;
+    padding: 10px 12px;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+  }
+
+  .stickyInner {
+    width: 100%;
+    max-width: 980px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(255,255,255,0.92);
+    border: 1px solid rgba(226,232,240,0.95);
+    border-radius: 24px;
+    padding: 14px 16px;
+    box-shadow: 0 18px 50px rgba(15,23,42,0.14);
+    backdrop-filter: blur(16px);
+    pointer-events: auto;
+  }
+
+  .stickyText {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .stickyMini {
+    font-size: 12px;
+    color: #64748b;
+    font-weight: 800;
+  }
+
+  .stickyMain {
+    margin-top: 3px;
+    font-size: 14px;
+    color: #0f172a;
+    font-weight: 1000;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .secondaryBtn {
+    border: 1px solid #e5e7eb;
+    background: #fff;
+    color: #0f172a;
+    padding: 12px 15px;
+    border-radius: 16px;
+    cursor: pointer;
+    font-weight: 900;
+    white-space: nowrap;
+  }
+
+  .primaryBtn {
+    border: none;
+    background: #03133d;
+    color: #fff;
+    padding: 13px 18px;
+    border-radius: 18px;
+    cursor: pointer;
+    font-weight: 1000;
+    min-width: 142px;
+    box-shadow: 0 18px 35px rgba(3,19,61,0.22);
+    white-space: nowrap;
+  }
+
+  .primaryBtn:disabled,
+  .secondaryBtn:disabled {
+    opacity: 0.58;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  @media (max-width: 560px) {
+    .stickyInner {
+      flex-wrap: wrap;
+    }
+
+    .secondaryBtn,
+    .primaryBtn {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+`;
