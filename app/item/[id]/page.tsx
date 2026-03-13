@@ -23,6 +23,8 @@ type ItemRow = {
   request_group: string | null;
   request_timeframe: string | null;
   request_location: string | null;
+  request_willing_to_pay: boolean | null;
+  request_budget: number | null;
 
   is_anonymous: boolean | null;
   expires_at: string | null;
@@ -534,7 +536,7 @@ export default function ItemDetailPage() {
       const { data: it, error: itemErr } = await supabase
         .from("items")
         .select(
-          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,is_anonymous,expires_at,photo_url,status,owner_id,price,is_negotiable,hide_interest_count,reserved_interest_id,claimed_at"
+          "id,title,description,category,pickup_location,post_type,request_group,request_timeframe,request_location,request_willing_to_pay,request_budget,is_anonymous,expires_at,photo_url,status,owner_id,price,is_negotiable,hide_interest_count,reserved_interest_id,claimed_at"
         )
         .eq("id", itemId)
         .single();
@@ -1354,6 +1356,12 @@ export default function ItemDetailPage() {
                   ) : null}
                   {item.request_location?.trim() ? (
                     <span className="infoPill">{item.request_location.trim()}</span>
+                  ) : null}
+                  {item.request_willing_to_pay ? (
+                    <span className="infoPill">Willing to pay</span>
+                  ) : null}
+                  {item.request_budget !== null && item.request_budget !== undefined ? (
+                    <span className="infoPill">Budget: {formatPrice(item.request_budget)}</span>
                   ) : null}
                 </div>
               ) : null}
