@@ -1665,7 +1665,7 @@ export default function CreatePage() {
             </div>
             <div style={previewHeadline}>{cleanTitle || "Untitled post"}</div>
             <div style={{ marginTop: 8, fontSize: 13, fontWeight: 900, color: "#9a3412" }}>
-              💵 {formatPriceLabel(draft.price, draft.negotiable)}
+               {formatPriceLabel(draft.price, draft.negotiable)}
             </div>
             <div style={previewText}>{cleanDesc || "No description yet."}</div>
             <div style={previewFooter}>

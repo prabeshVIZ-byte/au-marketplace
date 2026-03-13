@@ -39,6 +39,7 @@ type ItemMeta = {
   request_location: string | null;
   status: string | null;
   hide_interest_count: boolean | null;
+  price: number | null;
 };
 
 type FeedRow = FeedRowFromView & {
@@ -49,6 +50,7 @@ type FeedRow = FeedRowFromView & {
   request_timeframe: string | null;
   request_location: string | null;
   hide_interest_count: boolean | null;
+  price: number | null;
 };
 
 type EventCategory =
@@ -276,6 +278,13 @@ function isInteractiveDoubleTapTarget(target: EventTarget | null) {
   );
 }
 
+function formatPriceTag(price: number | null | undefined) {
+  if (price === null || price === undefined) return "Free";
+  const n = Number(price);
+  if (!Number.isFinite(n)) return "Free";
+  return `$${n.toFixed(2)}`;
+}
+
 async function getAuthState(): Promise<AuthState> {
   const { data } = await supabase.auth.getSession();
   const session = data.session;
@@ -362,7 +371,7 @@ export default function FeedPage() {
     const { data, error } = await supabase
       .from("items")
       .select(
-        "id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,status,hide_interest_count"
+        "id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,status,hide_interest_count,price"
       )
       .in("id", itemIds);
 
@@ -481,6 +490,7 @@ export default function FeedPage() {
           status: m?.status ?? row.status ?? "available",
           interest_count: row.interest_count ?? 0,
           hide_interest_count: m?.hide_interest_count ?? null,
+          price: m?.price ?? null,
         };
       });
 
@@ -1765,6 +1775,10 @@ export default function FeedPage() {
                         {badge}
                       </div>
 
+                      <div className="priceBadge">
+                        {formatPriceTag(item.price)}
+                      </div>
+
                       <button
                         className={`tinyLike ${loved ? "active" : ""}`}
                         type="button"
@@ -2642,6 +2656,26 @@ export default function FeedPage() {
         .badgeEvent {
           border-color: rgba(59, 130, 246, 0.2);
           color: #1d4ed8;
+        }
+
+        .priceBadge {
+          position: absolute;
+          left: 12px;
+          bottom: 12px;
+          z-index: 3;
+          min-height: 34px;
+          padding: 0 12px;
+          border-radius: 999px;
+          border: 1px solid rgba(16, 185, 129, 0.2);
+          background: rgba(255, 255, 255, 0.92);
+          color: #065f46;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 12px;
+          font-weight: 900;
+          backdrop-filter: blur(8px);
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
         }
 
         .tinyLike {
