@@ -376,7 +376,7 @@ function getGiveFlow(args: {
 
     return {
       kind: "owner",
-      title: "You own this item.",
+      title: "You own this item",
       body: "Review requests, manage pickup, or update the listing.",
       primary: "Manage item",
       secondary: "Edit item",
@@ -388,7 +388,7 @@ function getGiveFlow(args: {
   if (!isAshland) {
     return {
       kind: "login",
-      title: "Log in to request this item.",
+      title: "Log in to request this item",
       body: "Only Ashland users can request items.",
       primary: "Log in",
       secondary: null,
@@ -400,7 +400,7 @@ function getGiveFlow(args: {
   if (mine === "reserved") {
     return {
       kind: "reserved",
-      title: "Pickup confirmed.",
+      title: "Pickup confirmed",
       body: "This item is reserved for you. Continue in chat.",
       primary: "Open chat",
       secondary: null,
@@ -412,7 +412,7 @@ function getGiveFlow(args: {
   if (mine === "accepted") {
     return {
       kind: "accepted",
-      title: "Your request was accepted.",
+      title: "Your request was accepted",
       body: "Open chat to continue the handoff.",
       primary: "Open chat",
       secondary: null,
@@ -424,9 +424,9 @@ function getGiveFlow(args: {
   if (mine === "pending") {
     return {
       kind: "pending",
-      title: hasAcceptedOther ? "Waitlist only." : "Request sent.",
+      title: hasAcceptedOther ? "You are on the waitlist" : "Request sent",
       body: hasAcceptedOther
-        ? "The owner is already talking with another requester, but you are still in line."
+        ? "The owner is already working with another requester, but you are still in line."
         : "The owner has not picked a requester yet.",
       primary: "Requested",
       secondary: "Withdraw",
@@ -438,7 +438,7 @@ function getGiveFlow(args: {
   if (isGiveClosed(item)) {
     return {
       kind: "closed",
-      title: "This item is no longer available.",
+      title: "This item is no longer available",
       body: "Requests are closed for this listing.",
       primary: "Unavailable",
       secondary: null,
@@ -450,7 +450,7 @@ function getGiveFlow(args: {
   if (normStatus(item.status) === "reserved") {
     return {
       kind: "reserved_other",
-      title: "This item is already reserved.",
+      title: "This item is already reserved",
       body: "A handoff is already in progress.",
       primary: "Unavailable",
       secondary: null,
@@ -462,8 +462,8 @@ function getGiveFlow(args: {
   if (hasAcceptedOther) {
     return {
       kind: "waitlist",
-      title: "Waitlist only.",
-      body: "Another requester is currently being considered, but you can join the backup queue.",
+      title: "Waitlist only",
+      body: "Another requester is currently being considered, but you can still join the backup queue.",
       primary: "Join waitlist",
       secondary: null,
       primaryDisabled: false,
@@ -473,7 +473,7 @@ function getGiveFlow(args: {
 
   return {
     kind: "open",
-    title: "This item is open.",
+    title: "This item is available",
     body: "Send a request to start the handoff.",
     primary: "Request item",
     secondary: null,
@@ -498,7 +498,7 @@ function getRequestFlow(args: {
 
     return {
       kind: "owner",
-      title: "You own this request.",
+      title: "You own this request",
       body: "Review helper offers or update the request.",
       primary: "Manage request",
       secondary: "Edit request",
@@ -510,7 +510,7 @@ function getRequestFlow(args: {
   if (!isAshland) {
     return {
       kind: "login",
-      title: "Log in to offer help.",
+      title: "Log in to offer help",
       body: "Only Ashland users can respond to requests.",
       primary: "Log in",
       secondary: null,
@@ -522,7 +522,7 @@ function getRequestFlow(args: {
   if (mine === "accepted" || mine === "completed") {
     return {
       kind: "accepted",
-      title: "Your offer was accepted.",
+      title: "Your offer was accepted",
       body: "Continue in chat with the requester.",
       primary: "Open chat",
       secondary: null,
@@ -534,7 +534,7 @@ function getRequestFlow(args: {
   if (mine === "pending" || mine === "hold") {
     return {
       kind: "pending",
-      title: "Your offer is active.",
+      title: "Your offer is active",
       body:
         mine === "hold"
           ? "The requester placed your offer on hold."
@@ -549,7 +549,7 @@ function getRequestFlow(args: {
   if (isRequestClosed(item)) {
     return {
       kind: "closed",
-      title: "This request is closed.",
+      title: "This request is closed",
       body: "New helper offers are not being accepted.",
       primary: "Closed",
       secondary: null,
@@ -560,7 +560,7 @@ function getRequestFlow(args: {
 
   return {
     kind: "open",
-    title: "You can help with this request.",
+    title: "You can help with this request",
     body: "Send an offer so the requester knows you can help.",
     primary: mine === "declined" ? "Offer again" : "Offer help",
     secondary: null,
@@ -730,250 +730,6 @@ async function loadItemDetail(itemId: string, uid: string | null): Promise<Loade
 }
 
 /* =========================
-   SMALL UI PARTS
-========================= */
-
-function DetailHeader(props: {
-  ownerLabel: string;
-  subtitle: string;
-  postType: PostType;
-  isOwner: boolean;
-  myLoved: boolean;
-  busy: boolean;
-  onLove: () => void;
-  menuOpen: boolean;
-  setMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  onManage: () => void;
-  onEdit: () => void;
-  onToggleCount: () => void;
-  onDelete: () => void;
-  hideCount: boolean;
-  isArchivedOwnerView: boolean;
-}) {
-  const {
-    ownerLabel,
-    subtitle,
-    postType,
-    isOwner,
-    myLoved,
-    busy,
-    onLove,
-    menuOpen,
-    setMenuOpen,
-    onManage,
-    onEdit,
-    onToggleCount,
-    onDelete,
-    hideCount,
-    isArchivedOwnerView,
-  } = props;
-
-  const manageLabel = postType === "give" ? "Manage item" : "Manage request";
-  const editLabel = postType === "give" ? "Edit item" : "Edit request";
-  const visibilityLabel =
-    postType === "give"
-      ? hideCount
-        ? "Show requests"
-        : "Hide requests"
-      : hideCount
-      ? "Show offers"
-      : "Hide offers";
-
-  return (
-    <div className="cardTop">
-      <div className="authorSide">
-        <div className={`avatar avatar-${postType}`}>{initials(ownerLabel)}</div>
-
-        <div className="authorText">
-          <div className="authorName">{ownerLabel}</div>
-          {subtitle ? <div className="authorSub">{subtitle}</div> : null}
-        </div>
-      </div>
-
-      {isOwner ? (
-        <div className="menuWrap">
-          {menuOpen ? (
-            <button
-              className="menuBackdrop"
-              aria-label="Close menu"
-              onClick={() => setMenuOpen(false)}
-              type="button"
-            />
-          ) : null}
-
-          <button
-            className="menuBtn"
-            type="button"
-            aria-label="Post options"
-            onClick={() => setMenuOpen((v) => !v)}
-          >
-            ⋯
-          </button>
-
-          {menuOpen ? (
-            <div className="menuCard">
-              {!isArchivedOwnerView ? (
-                <>
-                  <button className="menuItem" type="button" onClick={onManage}>
-                    {manageLabel}
-                  </button>
-
-                  <button className="menuItem" type="button" onClick={onEdit}>
-                    {editLabel}
-                  </button>
-
-                  <button className="menuItem" type="button" onClick={onToggleCount}>
-                    {visibilityLabel}
-                  </button>
-                </>
-              ) : null}
-
-              <button className="menuItem danger" type="button" onClick={onDelete}>
-                Delete listing
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : (
-        <button
-          className={`loveBtn ${myLoved ? "active" : ""}`}
-          type="button"
-          onClick={onLove}
-          disabled={busy}
-          aria-label="Love post"
-        >
-          {myLoved ? "♥" : "♡"}
-        </button>
-      )}
-    </div>
-  );
-}
-
-function DetailMedia(props: {
-  photoUrl: string | null;
-  title: string;
-  postType: PostType;
-  onOpen: (src: string) => void;
-}) {
-  const { photoUrl, title, postType, onOpen } = props;
-
-  return (
-    <div className="mediaWrap">
-      {photoUrl ? (
-        <button className="imgBtn" type="button" onClick={() => onOpen(photoUrl)}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={photoUrl} alt={title} className="heroImg" />
-        </button>
-      ) : (
-        <div className={`noPhoto noPhoto-${postType}`}>No image</div>
-      )}
-    </div>
-  );
-}
-
-function StatRow(props: {
-  loveCount: number;
-  activityLabel: string;
-  statusLabel: string;
-  statusTone: "good" | "warn" | "closed" | "neutral";
-  postType: PostType;
-  delistLabel: string;
-}) {
-  return (
-    <div className="statsRow">
-      <span className="stat">
-        <span className="statIcon">♥</span> {props.loveCount}
-      </span>
-
-      <span className="dot">•</span>
-
-      <span className="stat">{props.activityLabel}</span>
-
-      <span className="dot">•</span>
-
-      <span className={`statusPill ${props.statusTone} ${props.postType}`}>
-        {props.statusLabel}
-      </span>
-
-      <span className="dot">•</span>
-
-      <span className="stat">Delists {props.delistLabel}</span>
-    </div>
-  );
-}
-
-function ArchivedHandoffCard(props: {
-  soldToLabel: string;
-  soldAtLabel: string | null | undefined;
-}) {
-  return (
-    <div className="archivedCard">
-      <div className="archivedTitle">Completed handoff</div>
-      <div className="archivedBody">
-        This listing has been completed and moved to archive.
-      </div>
-
-      <div className="archivedMetaGrid">
-        <div className="archivedMetaBox">
-          <div className="archivedMetaLabel">Given to</div>
-          <div className="archivedMetaValue">{props.soldToLabel}</div>
-        </div>
-
-        <div className="archivedMetaBox">
-          <div className="archivedMetaLabel">Given on</div>
-          <div className="archivedMetaValue">{formatFullWhen(props.soldAtLabel)}</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function FlowCard(props: {
-  postType: PostType;
-  flow: FlowConfig;
-  actionBusy: string | null;
-  onPrimary: () => void;
-  onSecondary?: () => void;
-}) {
-  const { postType, flow, actionBusy, onPrimary, onSecondary } = props;
-
-  return (
-    <div className={`flowCard flowCard-${postType}`}>
-      <div className="flowTitle">{flow.title}</div>
-      <div className="flowBody">{flow.body}</div>
-
-      <div className="flowActions">
-        <button
-          className={`primaryAction primaryAction-${postType}`}
-          type="button"
-          disabled={flow.primaryDisabled || !!actionBusy}
-          onClick={onPrimary}
-        >
-          {actionBusy === "chat"
-            ? "Opening…"
-            : actionBusy === "interest" || actionBusy === "offer"
-            ? "Sending…"
-            : flow.primary}
-        </button>
-
-        {flow.secondary ? (
-          <button
-            className="secondaryAction"
-            type="button"
-            disabled={flow.secondaryDisabled || !!actionBusy}
-            onClick={onSecondary}
-          >
-            {actionBusy === "withdraw-interest" || actionBusy === "withdraw-offer"
-              ? "Working…"
-              : flow.secondary}
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-/* =========================
    PAGE
 ========================= */
 
@@ -1076,7 +832,7 @@ export default function ItemDetailPage() {
   function showToast(msg: string, kind: "ok" | "err" = "ok") {
     setToast({ msg, kind });
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 2500);
+    toastTimer.current = setTimeout(() => setToast(null), 2400);
   }
 
   function applyLoadedState(detail: LoadedItemDetail, uid: string | null, email: string | null) {
@@ -1375,7 +1131,7 @@ export default function ItemDetailPage() {
   }
 
   async function toggleCountVisibility() {
-    if (!item || !isOwner || !userId || isArchivedGiveOwnerView) return;
+    if (!item || !isOwner || !userId || (postType === "give" && isArchivedGiveOwnerView)) return;
 
     const nextValue = !item.hide_interest_count;
     const currentItemId = item.id;
@@ -1394,12 +1150,15 @@ export default function ItemDetailPage() {
       if (error) throw new Error(error.message);
 
       setItem((prev) => (prev ? { ...prev, hide_interest_count: nextValue } : prev));
-
-      if (postType === "give") {
-        showToast(nextValue ? "Requests hidden." : "Requests shown.");
-      } else {
-        showToast(nextValue ? "Offers hidden." : "Offers shown.");
-      }
+      showToast(
+        postType === "give"
+          ? nextValue
+            ? "Requests hidden."
+            : "Requests shown."
+          : nextValue
+          ? "Offers hidden."
+          : "Offers shown."
+      );
     } catch (e: any) {
       showToast(e?.message || "Could not update visibility.", "err");
     } finally {
@@ -1488,207 +1247,335 @@ export default function ItemDetailPage() {
     };
   }, []);
 
+  const isRequestArchivedOwnerView =
+    !!item && postType === "request" && isOwner && isRequestClosed(item);
+
+  const budgetLabel =
+    item?.request_willing_to_pay
+      ? item.request_budget !== null && item.request_budget !== undefined
+        ? `Budget ${formatPrice(item.request_budget)}`
+        : "Willing to pay"
+      : "Unpaid help";
+
   return (
     <div className={`page page-${postType}`}>
       <div className="shell">
         <header className="topBar">
-          <button className="iconBtn" onClick={() => router.back()} aria-label="Back" type="button">
-            ←
-          </button>
-
-          <div className="topCenter">
-            <div className="topTitle">Post</div>
-            <div className="topSub">scholarswap</div>
+          <div className="topLeft">
+            <button className="iconBtn" onClick={() => router.back()} aria-label="Back" type="button">
+              ←
+            </button>
           </div>
 
-          <div className="topRightSpace" />
-        </header>
+          <div className="topCenter">
+            <div className="topTitle">Post details</div>
+            <div className="topSub">ScholarSwap</div>
+          </div>
 
-        {err && <div className="alert err">{err}</div>}
-        {loading && <div className="alert">Loading…</div>}
-        {!loading && !err && !item && <div className="alert err">Post not found.</div>}
-
-        {!loading && item ? (
-          <section className={`card card-${postType}`}>
-            <DetailHeader
-              ownerLabel={ownerLabel}
-              subtitle={subtitle}
-              postType={postType}
-              isOwner={isOwner}
-              myLoved={myLoved}
-              busy={busy}
-              onLove={toggleLove}
-              menuOpen={menuOpen}
-              setMenuOpen={setMenuOpen}
-              onManage={() => {
-                setMenuOpen(false);
-                router.push(`/manage/${item.id}`);
-              }}
-              onEdit={() => {
-                setMenuOpen(false);
-                router.push(`/item/${item.id}/edit`);
-              }}
-              onToggleCount={() => {
-                void toggleCountVisibility();
-              }}
-              onDelete={() => {
-                setMenuOpen(false);
-                setConfirmDelete(true);
-              }}
-              hideCount={!!item.hide_interest_count}
-              isArchivedOwnerView={
-                isArchivedGiveOwnerView || (isOwner && postType === "request" && isRequestClosed(item))
-              }
-            />
-
-            <DetailMedia
-              photoUrl={item.photo_url}
-              title={item.title}
-              postType={postType}
-              onOpen={(src) => setOpenImg(src)}
-            />
-
-            <div className="body">
-              <div className="titleRow">
-                <h1 className="title">{item.title}</h1>
-
-                {!isOwner ? (
+          <div className="topRight">
+            {isOwner ? (
+              <div className="menuWrap">
+                {menuOpen ? (
                   <button
-                    className={`loveBtn small ${myLoved ? "active" : ""}`}
+                    className="menuBackdrop"
+                    aria-label="Close menu"
+                    onClick={() => setMenuOpen(false)}
                     type="button"
-                    onClick={toggleLove}
-                    disabled={busy}
-                    aria-label="Love post"
-                  >
-                    {myLoved ? "♥" : "♡"}
-                  </button>
+                  />
+                ) : null}
+
+                <button
+                  className="iconBtn"
+                  type="button"
+                  aria-label="Post options"
+                  onClick={() => setMenuOpen((v) => !v)}
+                >
+                  ⋯
+                </button>
+
+                {menuOpen ? (
+                  <div className="menuCard">
+                    {!isArchivedGiveOwnerView && !isRequestArchivedOwnerView ? (
+                      <>
+                        <button
+                          className="menuItem"
+                          type="button"
+                          onClick={() => {
+                            setMenuOpen(false);
+                            router.push(`/manage/${item?.id}`);
+                          }}
+                        >
+                          {postType === "give" ? "Manage item" : "Manage request"}
+                        </button>
+
+                        <button
+                          className="menuItem"
+                          type="button"
+                          onClick={() => {
+                            setMenuOpen(false);
+                            router.push(`/item/${item?.id}/edit`);
+                          }}
+                        >
+                          {postType === "give" ? "Edit item" : "Edit request"}
+                        </button>
+
+                        <button className="menuItem" type="button" onClick={() => void toggleCountVisibility()}>
+                          {postType === "give"
+                            ? item?.hide_interest_count
+                              ? "Show requests"
+                              : "Hide requests"
+                            : item?.hide_interest_count
+                            ? "Show offers"
+                            : "Hide offers"}
+                        </button>
+                      </>
+                    ) : null}
+
+                    <button
+                      className="menuItem danger"
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setConfirmDelete(true);
+                      }}
+                    >
+                      Delete listing
+                    </button>
+                  </div>
                 ) : null}
               </div>
+            ) : (
+              <button
+                className={`iconBtn loveTop ${myLoved ? "active" : ""}`}
+                onClick={toggleLove}
+                disabled={busy}
+                aria-label="Love post"
+                type="button"
+              >
+                {myLoved ? "♥" : "♡"}
+              </button>
+            )}
+          </div>
+        </header>
 
-              {postType === "give" ? (
-                <div className="priceRow">
-                  <span className="pricePill">
-                    {formatPriceWithNegotiable(item.price, item.is_negotiable)}
-                  </span>
+        {err ? <div className="notice error">{err}</div> : null}
+        {loading ? <div className="notice">Loading…</div> : null}
+        {!loading && !err && !item ? <div className="notice error">Post not found.</div> : null}
+
+        {!loading && !err && item ? (
+          <section className="detailCard">
+            <div className="detailGrid">
+              <div className="mediaCol">
+                {item.photo_url ? (
+                  <button className="mediaButton" type="button" onClick={() => setOpenImg(item.photo_url!)}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={item.photo_url} alt={item.title} className="heroImg" />
+                  </button>
+                ) : (
+                  <div className={`noPhoto noPhoto-${postType}`}>No image</div>
+                )}
+              </div>
+
+              <div className="infoCol">
+                <div className="ownerRow">
+                  <div className={`avatar avatar-${postType}`}>{initials(ownerLabel)}</div>
+
+                  <div className="ownerText">
+                    <div className="ownerName">{ownerLabel}</div>
+                    {subtitle ? <div className="ownerSub">{subtitle}</div> : null}
+                  </div>
                 </div>
-              ) : (
-                <div className="priceRow">
-                  <span className="requestBudgetPill">
-                    {item.request_willing_to_pay
-                      ? item.request_budget !== null && item.request_budget !== undefined
-                        ? `Budget ${formatPrice(item.request_budget)}`
-                        : "Willing to pay"
-                      : "Unpaid help"}
-                  </span>
+
+                <div className="titleRow">
+                  <h1 className="title">{item.title}</h1>
                 </div>
-              )}
 
-              <StatRow
-                loveCount={loveCount}
-                activityLabel={activityLabel}
-                statusLabel={itemStateChip.label}
-                statusTone={itemStateChip.tone}
-                postType={postType}
-                delistLabel={formatDelist(item.expires_at)}
-              />
+                <div className="pillRow">
+                  {postType === "give" ? (
+                    <span className="pricePill">
+                      {formatPriceWithNegotiable(item.price, item.is_negotiable)}
+                    </span>
+                  ) : (
+                    <span className="budgetPill">{budgetLabel}</span>
+                  )}
 
-              {isArchivedGiveOwnerView ? (
-                <ArchivedHandoffCard soldToLabel={soldToLabel} soldAtLabel={soldAtLabel} />
-              ) : postType === "give" && giveFlow ? (
-                <FlowCard
-                  postType={postType}
-                  flow={giveFlow}
-                  actionBusy={actionBusy}
-                  onPrimary={() => {
-                    if (giveFlow.kind === "owner") {
-                      router.push(`/manage/${item.id}`);
-                      return;
-                    }
-                    if (giveFlow.kind === "login") {
-                      router.push("/me");
-                      return;
-                    }
-                    if (giveFlow.kind === "accepted" || giveFlow.kind === "reserved") {
-                      void openConversation();
-                      return;
-                    }
-                    if (giveFlow.kind === "open" || giveFlow.kind === "waitlist") {
-                      void submitGiveInterest();
-                    }
-                  }}
-                  onSecondary={() => {
-                    if (giveFlow.kind === "owner") {
-                      router.push(`/item/${item.id}/edit`);
-                      return;
-                    }
-                    if (giveFlow.kind === "pending") {
-                      void withdrawGiveInterest();
-                    }
-                  }}
-                />
-              ) : postType === "request" && requestFlow ? (
-                <FlowCard
-                  postType={postType}
-                  flow={requestFlow}
-                  actionBusy={actionBusy}
-                  onPrimary={() => {
-                    if (requestFlow.kind === "owner") {
-                      router.push(`/manage/${item.id}`);
-                      return;
-                    }
-                    if (requestFlow.kind === "login") {
-                      router.push("/me");
-                      return;
-                    }
-                    if (requestFlow.kind === "accepted") {
-                      void openConversation();
-                      return;
-                    }
-                    if (requestFlow.kind === "open") {
-                      void submitHelpOffer();
-                    }
-                  }}
-                  onSecondary={() => {
-                    if (requestFlow.kind === "owner") {
-                      router.push(`/item/${item.id}/edit`);
-                      return;
-                    }
-                    if (requestFlow.kind === "pending") {
-                      void withdrawHelpOffer();
-                    }
-                  }}
-                />
-              ) : null}
-
-              {item.description?.trim() ? (
-                <div className="caption">
-                  <span className="captionName">{ownerLabel}</span> {item.description.trim()}
+                  <span className={`statusPill ${itemStateChip.tone}`}>{itemStateChip.label}</span>
                 </div>
-              ) : null}
 
-              {postType === "request" ? (
-                <div className="requestInfo">
-                  {item.request_group ? (
-                    <span className="infoPill">{requestGroupLabel(item.request_group)}</span>
-                  ) : null}
-
-                  {item.request_timeframe ? (
-                    <span className="infoPill">{requestTimeframeLabel(item.request_timeframe)}</span>
-                  ) : null}
-
-                  {item.request_location?.trim() ? (
-                    <span className="infoPill">{item.request_location.trim()}</span>
-                  ) : null}
-
-                  {item.request_willing_to_pay ? (
-                    <span className="infoPill">Willing to pay</span>
-                  ) : null}
-
-                  {item.request_budget !== null && item.request_budget !== undefined ? (
-                    <span className="infoPill">Budget: {formatPrice(item.request_budget)}</span>
-                  ) : null}
+                <div className="metaRow">
+                  <span>♥ {loveCount}</span>
+                  <span>•</span>
+                  <span>{activityLabel}</span>
+                  <span>•</span>
+                  <span>Delists {formatDelist(item.expires_at)}</span>
                 </div>
-              ) : null}
+
+                {isArchivedGiveOwnerView ? (
+                  <div className="archivePanel">
+                    <div className="panelTitle">Completed handoff</div>
+                    <div className="panelBody">
+                      This listing has been completed and moved to archive.
+                    </div>
+
+                    <div className="archiveGrid">
+                      <div className="archiveBox">
+                        <div className="archiveLabel">Given to</div>
+                        <div className="archiveValue">{soldToLabel}</div>
+                      </div>
+                      <div className="archiveBox">
+                        <div className="archiveLabel">Given on</div>
+                        <div className="archiveValue">{formatFullWhen(soldAtLabel)}</div>
+                      </div>
+                    </div>
+                  </div>
+                ) : postType === "give" && giveFlow ? (
+                  <div className="actionPanel">
+                    <div className="panelTitle">{giveFlow.title}</div>
+                    <div className="panelBody">{giveFlow.body}</div>
+
+                    <div className="buttonRow">
+                      <button
+                        className={`primaryBtn primaryBtn-${postType}`}
+                        type="button"
+                        disabled={giveFlow.primaryDisabled || !!actionBusy}
+                        onClick={() => {
+                          if (giveFlow.kind === "owner") {
+                            router.push(`/manage/${item.id}`);
+                            return;
+                          }
+                          if (giveFlow.kind === "login") {
+                            router.push("/me");
+                            return;
+                          }
+                          if (giveFlow.kind === "accepted" || giveFlow.kind === "reserved") {
+                            void openConversation();
+                            return;
+                          }
+                          if (giveFlow.kind === "open" || giveFlow.kind === "waitlist") {
+                            void submitGiveInterest();
+                          }
+                        }}
+                      >
+                        {actionBusy === "chat"
+                          ? "Opening..."
+                          : actionBusy === "interest"
+                          ? "Sending..."
+                          : giveFlow.primary}
+                      </button>
+
+                      {giveFlow.secondary ? (
+                        <button
+                          className="secondaryBtn"
+                          type="button"
+                          disabled={giveFlow.secondaryDisabled || !!actionBusy}
+                          onClick={() => {
+                            if (giveFlow.kind === "owner") {
+                              router.push(`/item/${item.id}/edit`);
+                              return;
+                            }
+                            if (giveFlow.kind === "pending") {
+                              void withdrawGiveInterest();
+                            }
+                          }}
+                        >
+                          {actionBusy === "withdraw-interest" ? "Working..." : giveFlow.secondary}
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : postType === "request" && requestFlow ? (
+                  <div className="actionPanel">
+                    <div className="panelTitle">{requestFlow.title}</div>
+                    <div className="panelBody">{requestFlow.body}</div>
+
+                    <div className="buttonRow">
+                      <button
+                        className={`primaryBtn primaryBtn-${postType}`}
+                        type="button"
+                        disabled={requestFlow.primaryDisabled || !!actionBusy}
+                        onClick={() => {
+                          if (requestFlow.kind === "owner") {
+                            router.push(`/manage/${item.id}`);
+                            return;
+                          }
+                          if (requestFlow.kind === "login") {
+                            router.push("/me");
+                            return;
+                          }
+                          if (requestFlow.kind === "accepted") {
+                            void openConversation();
+                            return;
+                          }
+                          if (requestFlow.kind === "open") {
+                            void submitHelpOffer();
+                          }
+                        }}
+                      >
+                        {actionBusy === "chat"
+                          ? "Opening..."
+                          : actionBusy === "offer"
+                          ? "Sending..."
+                          : requestFlow.primary}
+                      </button>
+
+                      {requestFlow.secondary ? (
+                        <button
+                          className="secondaryBtn"
+                          type="button"
+                          disabled={requestFlow.secondaryDisabled || !!actionBusy}
+                          onClick={() => {
+                            if (requestFlow.kind === "owner") {
+                              router.push(`/item/${item.id}/edit`);
+                              return;
+                            }
+                            if (requestFlow.kind === "pending") {
+                              void withdrawHelpOffer();
+                            }
+                          }}
+                        >
+                          {actionBusy === "withdraw-offer" ? "Working..." : requestFlow.secondary}
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
+                {item.description?.trim() ? (
+                  <div className="descriptionCard">
+                    <div className="sectionLabel">Description</div>
+                    <div className="descriptionText">{item.description.trim()}</div>
+                  </div>
+                ) : null}
+
+                {postType === "request" ? (
+                  <div className="detailChips">
+                    {item.request_group ? (
+                      <span className="infoPill">{requestGroupLabel(item.request_group)}</span>
+                    ) : null}
+                    {item.request_timeframe ? (
+                      <span className="infoPill">{requestTimeframeLabel(item.request_timeframe)}</span>
+                    ) : null}
+                    {item.request_location?.trim() ? (
+                      <span className="infoPill">{item.request_location.trim()}</span>
+                    ) : null}
+                    {item.request_willing_to_pay ? (
+                      <span className="infoPill">Willing to pay</span>
+                    ) : null}
+                    {item.request_budget !== null && item.request_budget !== undefined ? (
+                      <span className="infoPill">Budget: {formatPrice(item.request_budget)}</span>
+                    ) : null}
+                  </div>
+                ) : item.category?.trim() || item.pickup_location?.trim() ? (
+                  <div className="detailChips">
+                    {item.category?.trim() ? (
+                      <span className="infoPill givePill">{giveCategoryLabel(item.category)}</span>
+                    ) : null}
+                    {item.pickup_location?.trim() ? (
+                      <span className="infoPill givePill">{item.pickup_location.trim()}</span>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
             </div>
           </section>
         ) : null}
@@ -1713,40 +1600,40 @@ export default function ItemDetailPage() {
       ) : null}
 
       {openImg && item ? (
-        <div className="imgModal" onClick={() => setOpenImg(null)}>
-          <div className="imgCard" onClick={(e) => e.stopPropagation()}>
-            <div className="imgTop">
-              <div className="imgTitle">{item.title}</div>
-              <button className="iconGhost" onClick={() => setOpenImg(null)} type="button">
+        <div className="modal imageModal" onClick={() => setOpenImg(null)}>
+          <div className="imageCard" onClick={(e) => e.stopPropagation()}>
+            <div className="imageTop">
+              <div className="imageTitle">{item.title}</div>
+              <button className="iconBtn" onClick={() => setOpenImg(null)} type="button">
                 ✕
               </button>
             </div>
 
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={openImg} alt={item.title} className="imgFull" />
+            <img src={openImg} alt={item.title} className="imageFull" />
           </div>
         </div>
       ) : null}
 
-      {toast ? <div className={`toast ${toast.kind === "err" ? "err" : "ok"}`}>{toast.msg}</div> : null}
+      {toast ? <div className={`toast ${toast.kind}`}>{toast.msg}</div> : null}
 
       <style jsx>{`
         .page {
           min-height: 100vh;
+          padding: 24px;
           color: #0f172a;
-          padding: 12px 12px 28px;
         }
 
         .page-give {
-          background: #f7f8f7;
+          background: #f6f8f7;
         }
 
         .page-request {
-          background: #fbf8f3;
+          background: #faf8f3;
         }
 
         .shell {
-          max-width: 760px;
+          max-width: 1320px;
           margin: 0 auto;
         }
 
@@ -1755,186 +1642,431 @@ export default function ItemDetailPage() {
           top: 0;
           z-index: 20;
           display: grid;
-          grid-template-columns: 42px 1fr 42px;
+          grid-template-columns: 80px 1fr 80px;
           align-items: center;
-          gap: 10px;
-          padding: 6px 0 12px;
-          backdrop-filter: blur(12px);
+          gap: 16px;
+          padding: 8px 0 18px;
+          backdrop-filter: blur(14px);
         }
 
         .page-give .topBar {
-          background: rgba(247, 248, 247, 0.9);
+          background: rgba(246, 248, 247, 0.92);
         }
 
         .page-request .topBar {
-          background: rgba(251, 248, 243, 0.9);
+          background: rgba(250, 248, 243, 0.92);
         }
 
-        .iconBtn,
-        .iconGhost {
-          width: 42px;
-          height: 42px;
-          border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-          font-size: 18px;
-          font-weight: 900;
-          cursor: pointer;
+        .topLeft,
+        .topRight {
+          display: flex;
+          align-items: center;
+        }
+
+        .topRight {
+          justify-content: flex-end;
         }
 
         .topCenter {
           text-align: center;
-          min-width: 0;
         }
 
         .topTitle {
-          font-size: 16px;
-          font-weight: 1000;
-          line-height: 1.1;
+          font-size: 20px;
+          font-weight: 900;
+          letter-spacing: -0.03em;
         }
 
         .topSub {
-          margin-top: 2px;
+          margin-top: 3px;
           font-size: 12px;
           color: #64748b;
           font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
         }
 
-        .topRightSpace {
+        .iconBtn {
           width: 42px;
           height: 42px;
+          border-radius: 999px;
+          border: 1px solid #dbe2ea;
+          background: #ffffff;
+          color: #0f172a;
+          font-size: 18px;
+          font-weight: 900;
+          cursor: pointer;
+          display: grid;
+          place-items: center;
+          box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
         }
 
-        .alert {
-          margin: 8px 0 0;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          padding: 11px 13px;
+        .loveTop.active {
+          color: #dc2626;
+          border-color: #fecaca;
+          background: #fff1f2;
+        }
+
+        .notice {
+          padding: 14px 16px;
           border-radius: 16px;
-          font-size: 13px;
+          border: 1px solid #e2e8f0;
+          background: #ffffff;
+          font-size: 14px;
           font-weight: 800;
-          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+          box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
         }
 
-        .alert.err {
+        .notice.error {
           border-color: #fecdd3;
           background: #fff1f2;
           color: #9f1239;
         }
 
-        .card {
-          margin-top: 8px;
-          background: #fff;
-          border-radius: 24px;
+        .detailCard {
+          margin-top: 10px;
+          border-radius: 28px;
+          border: 1px solid #e2e8f0;
+          background: #ffffff;
+          box-shadow: 0 24px 60px rgba(15, 23, 42, 0.08);
           overflow: hidden;
-          box-shadow: 0 16px 40px rgba(15, 23, 42, 0.05);
         }
 
-        .card-give {
-          border: 1px solid rgba(16, 185, 129, 0.18);
-          background: linear-gradient(180deg, rgba(16, 185, 129, 0.035), #ffffff 32%);
+        .detailGrid {
+          display: grid;
+          grid-template-columns: minmax(420px, 1.05fr) minmax(420px, 1fr);
+          min-height: 680px;
         }
 
-        .card-request {
-          border: 1px solid rgba(245, 158, 11, 0.18);
-          background: linear-gradient(180deg, rgba(245, 158, 11, 0.035), #ffffff 32%);
+        .mediaCol {
+          background: #f8fafc;
+          border-right: 1px solid #eef2f7;
         }
 
-        .cardTop {
+        .mediaButton {
+          display: block;
+          width: 100%;
+          height: 100%;
+          border: 0;
+          padding: 0;
+          background: transparent;
+          cursor: zoom-in;
+        }
+
+        .heroImg {
+          width: 100%;
+          height: 100%;
+          min-height: 680px;
+          object-fit: cover;
+          display: block;
+        }
+
+        .noPhoto {
+          height: 100%;
+          min-height: 680px;
+          display: grid;
+          place-items: center;
+          font-size: 16px;
+          font-weight: 800;
+          color: #64748b;
+        }
+
+        .noPhoto-give {
+          background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), #f8fafc);
+        }
+
+        .noPhoto-request {
+          background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), #f8fafc);
+        }
+
+        .infoCol {
+          padding: 28px;
+          display: flex;
+          flex-direction: column;
+          gap: 18px;
+        }
+
+        .ownerRow {
           display: flex;
           align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          padding: 12px;
-          border-bottom: 1px solid #eef2f7;
-        }
-
-        .authorSide {
-          min-width: 0;
-          display: flex;
-          align-items: center;
-          gap: 10px;
+          gap: 14px;
         }
 
         .avatar {
-          width: 38px;
-          height: 38px;
+          width: 50px;
+          height: 50px;
           border-radius: 999px;
           display: grid;
           place-items: center;
-          font-size: 12px;
-          font-weight: 1000;
+          font-size: 14px;
+          font-weight: 900;
           flex: 0 0 auto;
         }
 
         .avatar-give {
           border: 1px solid rgba(16, 185, 129, 0.18);
-          background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), #f0fdf4 100%);
+          background: linear-gradient(135deg, rgba(16, 185, 129, 0.11), #f0fdf4 100%);
           color: #065f46;
         }
 
         .avatar-request {
           border: 1px solid rgba(245, 158, 11, 0.18);
-          background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), #fffbeb 100%);
+          background: linear-gradient(135deg, rgba(245, 158, 11, 0.11), #fffbeb 100%);
           color: #92400e;
         }
 
-        .authorText {
+        .ownerText {
           min-width: 0;
         }
 
-        .authorName {
-          font-size: 13px;
-          font-weight: 1000;
-          line-height: 1.1;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
+        .ownerName {
+          font-size: 16px;
+          font-weight: 900;
+          line-height: 1.2;
         }
 
-        .authorSub {
+        .ownerSub {
           margin-top: 4px;
-          font-size: 11px;
+          font-size: 13px;
           color: #64748b;
           font-weight: 700;
-          line-height: 1.3;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
+          line-height: 1.4;
+        }
+
+        .titleRow {
+          display: block;
+        }
+
+        .title {
+          margin: 0;
+          font-size: 40px;
+          line-height: 1.02;
+          font-weight: 1000;
+          letter-spacing: -0.05em;
+          overflow-wrap: anywhere;
+        }
+
+        .pillRow {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+
+        .pricePill,
+        .budgetPill,
+        .statusPill,
+        .infoPill {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 34px;
+          padding: 0 14px;
+          border-radius: 999px;
+          font-size: 13px;
+          font-weight: 900;
+        }
+
+        .pricePill {
+          border: 1px solid rgba(16, 185, 129, 0.22);
+          background: rgba(16, 185, 129, 0.1);
+          color: #065f46;
+        }
+
+        .budgetPill,
+        .infoPill {
+          border: 1px solid rgba(245, 158, 11, 0.2);
+          background: rgba(245, 158, 11, 0.1);
+          color: #92400e;
+        }
+
+        .infoPill.givePill {
+          border-color: rgba(16, 185, 129, 0.2);
+          background: rgba(16, 185, 129, 0.1);
+          color: #065f46;
+        }
+
+        .statusPill {
+          border: 1px solid #e5e7eb;
+          background: #f8fafc;
+          color: #475569;
+        }
+
+        .statusPill.good {
+          color: #166534;
+          border-color: #bbf7d0;
+          background: #ecfdf5;
+        }
+
+        .statusPill.warn {
+          color: #92400e;
+          border-color: #fde68a;
+          background: #fffbeb;
+        }
+
+        .statusPill.closed,
+        .statusPill.neutral {
+          color: #475569;
+          border-color: #e5e7eb;
+          background: #f8fafc;
+        }
+
+        .metaRow {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 8px;
+          color: #475569;
+          font-size: 14px;
+          font-weight: 800;
+          line-height: 1.5;
+        }
+
+        .actionPanel,
+        .archivePanel,
+        .descriptionCard {
+          border-radius: 20px;
+          border: 1px solid #e2e8f0;
+          background: #ffffff;
+          padding: 18px;
+        }
+
+        .actionPanel {
+          background: ${postType === "give"
+            ? "linear-gradient(180deg, rgba(16, 185, 129, 0.05), #ffffff)"
+            : "linear-gradient(180deg, rgba(245, 158, 11, 0.05), #ffffff)"};
+        }
+
+        .archivePanel {
+          background: linear-gradient(180deg, #f8fafc, #f1f5f9);
+        }
+
+        .panelTitle {
+          font-size: 18px;
+          font-weight: 900;
+          color: #0f172a;
+          line-height: 1.2;
+        }
+
+        .panelBody {
+          margin-top: 8px;
+          font-size: 14px;
+          line-height: 1.6;
+          color: #475569;
+          font-weight: 700;
+        }
+
+        .buttonRow {
+          margin-top: 16px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+        }
+
+        .primaryBtn,
+        .secondaryBtn,
+        .ghostBtn,
+        .dangerBtn {
+          min-height: 46px;
+          padding: 0 16px;
+          border-radius: 14px;
+          font-size: 14px;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .primaryBtn {
+          min-width: 180px;
+          border: 1px solid transparent;
+        }
+
+        .primaryBtn-give {
+          background: #0f766e;
+          border-color: #0f766e;
+          color: #ffffff;
+        }
+
+        .primaryBtn-request {
+          background: #b45309;
+          border-color: #b45309;
+          color: #ffffff;
+        }
+
+        .secondaryBtn,
+        .ghostBtn {
+          border: 1px solid #dbe2ea;
+          background: #ffffff;
+          color: #0f172a;
+        }
+
+        .dangerBtn {
+          border: 1px solid #fecdd3;
+          background: #fff1f2;
+          color: #b91c1c;
+        }
+
+        .primaryBtn:disabled,
+        .secondaryBtn:disabled,
+        .dangerBtn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .sectionLabel {
+          font-size: 12px;
+          font-weight: 900;
+          color: #64748b;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+
+        .descriptionText {
+          margin-top: 10px;
+          font-size: 15px;
+          line-height: 1.75;
+          color: #334155;
+          white-space: pre-wrap;
+        }
+
+        .detailChips {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+
+        .archiveGrid {
+          margin-top: 14px;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 12px;
+        }
+
+        .archiveBox {
+          border-radius: 16px;
+          border: 1px solid #dbe2ea;
+          background: #ffffff;
+          padding: 14px;
+        }
+
+        .archiveLabel {
+          font-size: 11px;
+          font-weight: 900;
+          color: #64748b;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+
+        .archiveValue {
+          margin-top: 8px;
+          font-size: 15px;
+          font-weight: 900;
+          line-height: 1.4;
+          color: #0f172a;
+          overflow-wrap: anywhere;
         }
 
         .menuWrap {
           position: relative;
-          flex: 0 0 auto;
-        }
-
-        .menuBtn,
-        .loveBtn {
-          width: 38px;
-          height: 38px;
-          border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-          font-size: 22px;
-          line-height: 1;
-          font-weight: 900;
-          cursor: pointer;
-          display: grid;
-          place-items: center;
-        }
-
-        .loveBtn.active {
-          color: #dc2626;
-          border-color: #fecaca;
-          background: #fff5f5;
-        }
-
-        .loveBtn.small {
-          width: 34px;
-          height: 34px;
-          font-size: 19px;
         }
 
         .menuBackdrop {
@@ -1942,30 +2074,28 @@ export default function ItemDetailPage() {
           inset: 0;
           background: transparent;
           border: 0;
-          padding: 0;
-          margin: 0;
         }
 
         .menuCard {
           position: absolute;
           top: calc(100% + 8px);
           right: 0;
-          width: 200px;
-          border: 1px solid #e5e7eb;
-          background: rgba(255, 255, 255, 0.98);
+          width: 220px;
           border-radius: 16px;
+          border: 1px solid #e2e8f0;
+          background: rgba(255, 255, 255, 0.98);
+          box-shadow: 0 18px 44px rgba(15, 23, 42, 0.14);
           overflow: hidden;
-          box-shadow: 0 20px 44px rgba(15, 23, 42, 0.14);
           z-index: 30;
         }
 
         .menuItem {
           width: 100%;
           border: 0;
-          background: #fff;
+          background: #ffffff;
           text-align: left;
-          padding: 12px 14px;
-          font-size: 13px;
+          padding: 13px 15px;
+          font-size: 14px;
           font-weight: 900;
           color: #0f172a;
           cursor: pointer;
@@ -1979,404 +2109,96 @@ export default function ItemDetailPage() {
           color: #b91c1c;
         }
 
-        .mediaWrap {
-          background: #f8fafc;
-        }
-
-        .imgBtn {
-          display: block;
-          width: 100%;
-          border: 0;
-          padding: 0;
-          background: transparent;
-          cursor: zoom-in;
-        }
-
-        .heroImg {
-          width: 100%;
-          height: 420px;
-          object-fit: cover;
-          display: block;
-        }
-
-        .noPhoto {
-          height: 220px;
-          display: grid;
-          place-items: center;
-          color: #64748b;
-          font-size: 13px;
-          font-weight: 800;
-        }
-
-        .noPhoto-give {
-          background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), #f8fafc);
-        }
-
-        .noPhoto-request {
-          background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), #f8fafc);
-        }
-
-        .body {
-          padding: 16px;
-        }
-
-        .titleRow {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 10px;
-        }
-
-        .title {
-          margin: 0;
-          font-size: 22px;
-          line-height: 1.08;
-          font-weight: 1000;
-          letter-spacing: -0.04em;
-          overflow-wrap: anywhere;
-          flex: 1;
-          min-width: 0;
-        }
-
-        .priceRow {
-          margin-top: 10px;
-        }
-
-        .pricePill,
-        .requestBudgetPill {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 32px;
-          padding: 0 12px;
-          border-radius: 999px;
-          font-size: 12px;
-          font-weight: 1000;
-        }
-
-        .pricePill {
-          border: 1px solid rgba(16, 185, 129, 0.22);
-          background: rgba(16, 185, 129, 0.1);
-          color: #065f46;
-        }
-
-        .requestBudgetPill {
-          border: 1px solid rgba(245, 158, 11, 0.22);
-          background: rgba(245, 158, 11, 0.1);
-          color: #92400e;
-        }
-
-        .statsRow {
-          margin-top: 10px;
-          display: flex;
-          align-items: center;
-          flex-wrap: wrap;
-          gap: 8px;
-          color: #475569;
-          font-size: 12px;
-          font-weight: 900;
-          line-height: 1.4;
-        }
-
-        .stat {
-          display: inline-flex;
-          align-items: center;
-          gap: 5px;
-        }
-
-        .statIcon {
-          color: #dc2626;
-        }
-
-        .dot {
-          color: #cbd5e1;
-        }
-
-        .statusPill {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 24px;
-          padding: 0 9px;
-          border-radius: 999px;
-          font-size: 11px;
-          font-weight: 900;
-          border: 1px solid #e5e7eb;
-        }
-
-        .statusPill.good.give,
-        .statusPill.good.request {
-          color: #166534;
-          border-color: #bbf7d0;
-          background: #ecfdf5;
-        }
-
-        .statusPill.warn.give,
-        .statusPill.warn.request {
-          color: #92400e;
-          border-color: #fde68a;
-          background: #fffbeb;
-        }
-
-        .statusPill.closed,
-        .statusPill.neutral {
-          color: #475569;
-          border-color: #e5e7eb;
-          background: #f8fafc;
-        }
-
-        .flowCard,
-        .archivedCard {
-          margin-top: 16px;
-          padding: 16px;
-          border-radius: 18px;
-          border: 1px solid #e5e7eb;
-        }
-
-        .flowCard-give {
-          border-color: rgba(16, 185, 129, 0.16);
-          background: linear-gradient(180deg, rgba(16, 185, 129, 0.05), #f8fafc);
-        }
-
-        .flowCard-request {
-          border-color: rgba(245, 158, 11, 0.16);
-          background: linear-gradient(180deg, rgba(245, 158, 11, 0.05), #fffaf0);
-        }
-
-        .archivedCard {
-          border-color: #dbe4ee;
-          background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
-        }
-
-        .flowTitle,
-        .archivedTitle {
-          font-size: 14px;
-          font-weight: 1000;
-          color: #0f172a;
-        }
-
-        .flowBody,
-        .archivedBody {
-          margin-top: 5px;
-          font-size: 13px;
-          line-height: 1.5;
-          color: #475569;
-          font-weight: 700;
-        }
-
-        .archivedMetaGrid {
-          margin-top: 12px;
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
-        }
-
-        .archivedMetaBox {
-          border-radius: 14px;
-          border: 1px solid #e2e8f0;
-          background: #ffffff;
-          padding: 12px;
-        }
-
-        .archivedMetaLabel {
-          font-size: 11px;
-          font-weight: 900;
-          color: #64748b;
-          text-transform: uppercase;
-          letter-spacing: 0.03em;
-        }
-
-        .archivedMetaValue {
-          margin-top: 6px;
-          font-size: 14px;
-          line-height: 1.4;
-          font-weight: 900;
-          color: #0f172a;
-          overflow-wrap: anywhere;
-        }
-
-        .flowActions {
-          margin-top: 14px;
-          display: grid;
-          grid-template-columns: 1fr;
-          gap: 10px;
-        }
-
-        .primaryAction,
-        .secondaryAction {
-          min-height: 44px;
-          width: 100%;
-          padding: 0 14px;
-          border-radius: 14px;
-          font-size: 13px;
-          font-weight: 900;
-          cursor: pointer;
-        }
-
-        .primaryAction-give {
-          border: 1px solid rgba(16, 185, 129, 0.26);
-          background: rgba(16, 185, 129, 0.12);
-          color: #065f46;
-        }
-
-        .primaryAction-request {
-          border: 1px solid rgba(245, 158, 11, 0.26);
-          background: rgba(245, 158, 11, 0.12);
-          color: #92400e;
-        }
-
-        .secondaryAction {
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-        }
-
-        .primaryAction:disabled,
-        .secondaryAction:disabled {
-          opacity: 0.58;
-          cursor: not-allowed;
-        }
-
-        .caption {
-          margin-top: 14px;
-          font-size: 13px;
-          line-height: 1.58;
-          color: #334155;
-          white-space: pre-wrap;
-        }
-
-        .captionName {
-          color: #0f172a;
-          font-weight: 1000;
-        }
-
-        .requestInfo {
-          margin-top: 12px;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-
-        .infoPill {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          padding: 7px 10px;
-          border-radius: 999px;
-          border: 1px solid rgba(245, 158, 11, 0.2);
-          background: rgba(245, 158, 11, 0.1);
-          color: #92400e;
-          font-size: 11px;
-          font-weight: 900;
-        }
-
-        .modal,
-        .imgModal {
+        .modal {
           position: fixed;
           inset: 0;
-          z-index: 100;
-          background: rgba(15, 23, 42, 0.5);
+          z-index: 120;
+          background: rgba(15, 23, 42, 0.55);
           display: flex;
           align-items: center;
           justify-content: center;
-          padding: 16px;
+          padding: 20px;
         }
 
         .modalCard,
-        .imgCard {
+        .imageCard {
           width: 100%;
-          max-width: 520px;
-          border-radius: 22px;
-          background: #fff;
-          border: 1px solid #e5e7eb;
-          box-shadow: 0 30px 80px rgba(15, 23, 42, 0.18);
+          max-width: 560px;
+          border-radius: 24px;
+          border: 1px solid #e2e8f0;
+          background: #ffffff;
+          box-shadow: 0 30px 80px rgba(15, 23, 42, 0.22);
         }
 
         .modalCard {
-          padding: 16px;
+          padding: 20px;
         }
 
         .modalTitle {
-          font-size: 16px;
-          font-weight: 1000;
+          font-size: 18px;
+          font-weight: 900;
           color: #0f172a;
         }
 
         .modalText {
-          margin-top: 8px;
-          font-size: 13px;
+          margin-top: 10px;
+          font-size: 14px;
+          line-height: 1.6;
           color: #475569;
           font-weight: 700;
-          line-height: 1.45;
         }
 
         .modalActions {
-          margin-top: 14px;
+          margin-top: 18px;
           display: flex;
           justify-content: flex-end;
-          gap: 10px;
+          gap: 12px;
         }
 
-        .ghostBtn,
-        .dangerBtn {
-          border-radius: 14px;
-          padding: 10px 13px;
-          font-size: 13px;
-          font-weight: 900;
-          cursor: pointer;
+        .imageCard {
+          max-width: 1080px;
+          overflow: hidden;
         }
 
-        .ghostBtn {
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          color: #0f172a;
-        }
-
-        .dangerBtn {
-          border: 1px solid #fecdd3;
-          background: #fff1f2;
-          color: #b91c1c;
-        }
-
-        .imgTop {
+        .imageTop {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 10px;
-          padding: 12px 14px;
+          gap: 12px;
+          padding: 14px 16px;
           border-bottom: 1px solid #eef2f7;
         }
 
-        .imgTitle {
-          font-size: 13px;
-          font-weight: 1000;
+        .imageTitle {
+          font-size: 14px;
+          font-weight: 900;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
 
-        .imgFull {
+        .imageFull {
           display: block;
           width: 100%;
-          max-height: 80vh;
+          max-height: 82vh;
           object-fit: contain;
           background: #111827;
         }
 
         .toast {
           position: fixed;
-          top: 16px;
+          top: 20px;
           left: 50%;
           transform: translateX(-50%);
-          z-index: 120;
-          max-width: calc(100vw - 24px);
-          padding: 10px 13px;
+          z-index: 140;
+          max-width: calc(100vw - 32px);
+          padding: 12px 15px;
           border-radius: 14px;
-          border: 1px solid #e5e7eb;
-          background: #fff;
-          font-size: 13px;
+          border: 1px solid #e2e8f0;
+          background: #ffffff;
+          font-size: 14px;
           font-weight: 900;
-          box-shadow: 0 16px 42px rgba(15, 23, 42, 0.14);
+          box-shadow: 0 18px 42px rgba(15, 23, 42, 0.16);
         }
 
         .toast.ok {
@@ -2384,36 +2206,74 @@ export default function ItemDetailPage() {
         }
 
         .toast.err {
-          border-color: #fecdd3;
+          border-color: #fecaca;
         }
 
-        @media (max-width: 560px) {
-          .heroImg {
-            height: 320px;
+        @media (max-width: 1080px) {
+          .detailGrid {
+            grid-template-columns: 1fr;
+          }
+
+          .mediaCol {
+            border-right: 0;
+            border-bottom: 1px solid #eef2f7;
+          }
+
+          .heroImg,
+          .noPhoto {
+            min-height: 520px;
+          }
+        }
+
+        @media (max-width: 720px) {
+          .page {
+            padding: 12px;
+          }
+
+          .topBar {
+            grid-template-columns: 56px 1fr 56px;
+            gap: 10px;
+            padding-bottom: 12px;
+          }
+
+          .topTitle {
+            font-size: 17px;
+          }
+
+          .detailCard {
+            border-radius: 22px;
+          }
+
+          .infoCol {
+            padding: 18px;
+            gap: 14px;
           }
 
           .title {
-            font-size: 20px;
+            font-size: 28px;
           }
 
-          .authorSub {
-            white-space: normal;
+          .metaRow {
+            font-size: 13px;
           }
 
-          .statsRow {
-            gap: 6px;
+          .buttonRow {
+            display: grid;
+            grid-template-columns: 1fr;
           }
 
-          .dot {
-            display: none;
-          }
-
-          .stat {
+          .primaryBtn,
+          .secondaryBtn {
             width: 100%;
           }
 
-          .archivedMetaGrid {
+          .archiveGrid {
             grid-template-columns: 1fr;
+          }
+
+          .heroImg,
+          .noPhoto {
+            min-height: 340px;
           }
         }
       `}</style>
