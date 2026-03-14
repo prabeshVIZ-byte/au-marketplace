@@ -162,11 +162,13 @@ type FlowConfig = {
 
 type SlideActionProps = {
   label: string;
-  doneLabel: string;
+  sentLabel: string;
   busyLabel: string;
   disabled?: boolean;
   busy?: boolean;
   tone: "give" | "request";
+  successKey: string;
+  activeSuccessKey: string | null;
   onComplete: () => Promise<void> | void;
 };
 
@@ -474,7 +476,7 @@ function getGiveFlow(args: {
       kind: "waitlist",
       title: "Waitlist only",
       body: "Another requester is currently being considered, but you can still join the backup queue.",
-      primary: "Join waitlist",
+      primary: "Slide to join waitlist",
       secondary: null,
       primaryDisabled: false,
       secondaryDisabled: false,
@@ -485,7 +487,7 @@ function getGiveFlow(args: {
     kind: "open",
     title: "This item is available",
     body: "Slide to send your request.",
-    primary: "Request item",
+    primary: "Slide to request item",
     secondary: null,
     primaryDisabled: false,
     secondaryDisabled: false,
@@ -572,7 +574,7 @@ function getRequestFlow(args: {
     kind: "open",
     title: "You can help with this request",
     body: "Slide to send your offer.",
-    primary: mine === "declined" ? "Offer again" : "Offer help",
+    primary: "Slide to offer help",
     secondary: null,
     primaryDisabled: false,
     secondaryDisabled: false,
@@ -745,42 +747,40 @@ async function loadItemDetail(itemId: string, uid: string | null): Promise<Loade
 
 function SlideAction({
   label,
-  doneLabel,
+  sentLabel,
   busyLabel,
   disabled = false,
   busy = false,
   tone,
+  successKey,
+  activeSuccessKey,
   onComplete,
 }: SlideActionProps) {
   const trackRef = useRef<HTMLDivElement | null>(null);
-  const knobSize = 54;
+  const knobSize = 62;
   const threshold = 0.84;
 
   const [offset, setOffset] = useState(0);
   const [dragging, setDragging] = useState(false);
-  const [done, setDone] = useState(false);
+  const [localSuccess, setLocalSuccess] = useState(false);
+
+  const isSuccess = activeSuccessKey === successKey || localSuccess;
 
   const getMaxOffset = () => {
     const trackWidth = trackRef.current?.offsetWidth ?? 0;
-    return Math.max(0, trackWidth - knobSize - 8);
+    return Math.max(0, trackWidth - knobSize - 10);
   };
 
   useEffect(() => {
-    if (!busy) return;
-    setDone(true);
-    setOffset(getMaxOffset());
-  }, [busy]);
-
-  useEffect(() => {
-    if (disabled) {
-      setDragging(false);
-      setDone(false);
+    if (busy || isSuccess) {
+      setOffset(getMaxOffset());
+    } else if (!dragging) {
       setOffset(0);
     }
-  }, [disabled]);
+  }, [busy, isSuccess, dragging]);
 
   const beginDrag = () => {
-    if (disabled || busy || done) return;
+    if (disabled || busy || isSuccess) return;
     setDragging(true);
   };
 
@@ -803,15 +803,13 @@ function SlideAction({
     const ratio = max <= 0 ? 0 : offset / max;
 
     if (ratio >= threshold) {
-      setDone(true);
       setOffset(max);
       try {
         await onComplete();
-      } finally {
-        setTimeout(() => {
-          setDone(false);
-          setOffset(0);
-        }, 700);
+        setLocalSuccess(true);
+      } catch {
+        setLocalSuccess(false);
+        setOffset(0);
       }
     } else {
       setOffset(0);
@@ -852,22 +850,31 @@ function SlideAction({
   return (
     <div
       ref={trackRef}
-      className={`slideAction slideAction-${tone} ${disabled ? "disabled" : ""} ${busy ? "busy" : ""} ${done ? "done" : ""}`}
-      aria-disabled={disabled || busy}
+      className={`slideAction slideAction-${tone} ${disabled ? "disabled" : ""} ${busy ? "busy" : ""} ${isSuccess ? "done" : ""}`}
+      aria-disabled={disabled || busy || isSuccess}
     >
+      <div className="slideGlass" />
       <div className="slideFill" style={{ width: `${progressPct}%` }} />
-      <div className="slideText">{busy ? busyLabel : done ? doneLabel : label}</div>
+      {!isSuccess && !busy ? <div className="slideShimmer" /> : null}
+
+      <div className="slideHintArrows" aria-hidden="true">
+        <span>›</span>
+        <span>›</span>
+        <span>›</span>
+      </div>
+
+      <div className="slideText">{busy ? busyLabel : isSuccess ? sentLabel : label}</div>
 
       <button
         type="button"
         className="slideKnob"
         onMouseDown={beginDrag}
         onTouchStart={beginDrag}
-        disabled={disabled || busy}
+        disabled={disabled || busy || isSuccess}
         aria-label={label}
         style={{ transform: `translateX(${offset}px)` }}
       >
-        →
+        <span className="slideKnobInner">{isSuccess ? "✓" : "➜"}</span>
       </button>
     </div>
   );
@@ -888,6 +895,7 @@ export default function ItemDetailPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   const [item, setItem] = useState<ItemRow | null>(null);
@@ -1031,8 +1039,11 @@ export default function ItemDetailPage() {
     setActionBusy(key);
     try {
       await fn();
+      setActionSuccess(key);
     } catch (e: any) {
+      setActionSuccess(null);
       showToast(e?.message || "Something went wrong.", "err");
+      throw e;
     } finally {
       setActionBusy(null);
     }
@@ -1123,7 +1134,7 @@ export default function ItemDetailPage() {
     if (isOwner) return;
     if (isGiveClosed(currentItem) || normStatus(currentItem.status) === "reserved") {
       showToast("This item is not accepting new requests.", "err");
-      return;
+      throw new Error("This item is not accepting new requests.");
     }
 
     if (mine === "accepted" || mine === "reserved") {
@@ -1209,7 +1220,7 @@ export default function ItemDetailPage() {
     if (isOwner) return;
     if (isRequestClosed(currentItem)) {
       showToast("This request is closed.", "err");
-      return;
+      throw new Error("This request is closed.");
     }
 
     if (mine === "accepted" || mine === "completed") {
@@ -1300,8 +1311,8 @@ export default function ItemDetailPage() {
             ? "Requests hidden."
             : "Requests shown."
           : nextValue
-          ? "Offers hidden."
-          : "Offers shown."
+            ? "Offers hidden."
+            : "Offers shown."
       );
     } catch (e: any) {
       showToast(e?.message || "Could not update visibility.", "err");
@@ -1391,6 +1402,10 @@ export default function ItemDetailPage() {
     };
   }, []);
 
+  useEffect(() => {
+    setActionSuccess(null);
+  }, [itemId, myInterest?.status, myOffer?.status, item?.status]);
+
   const isRequestArchivedOwnerView =
     !!item && postType === "request" && isOwner && isRequestClosed(item);
 
@@ -1479,8 +1494,8 @@ export default function ItemDetailPage() {
                               ? "Show requests"
                               : "Hide requests"
                             : item?.hide_interest_count
-                            ? "Show offers"
-                            : "Hide offers"}
+                              ? "Show offers"
+                              : "Hide offers"}
                         </button>
                       </>
                     ) : null}
@@ -1593,9 +1608,11 @@ export default function ItemDetailPage() {
                           tone="give"
                           label={giveFlow.primary}
                           busyLabel="Sending..."
-                          doneLabel="Sent"
+                          sentLabel="Request sent"
                           busy={actionBusy === "interest"}
                           disabled={!!actionBusy}
+                          successKey="interest"
+                          activeSuccessKey={actionSuccess}
                           onComplete={submitGiveInterest}
                         />
                       ) : (
@@ -1621,8 +1638,8 @@ export default function ItemDetailPage() {
                           {actionBusy === "chat"
                             ? "Opening..."
                             : actionBusy === "interest"
-                            ? "Sending..."
-                            : giveFlow.primary}
+                              ? "Sending..."
+                              : giveFlow.primary}
                         </button>
                       )}
 
@@ -1657,9 +1674,11 @@ export default function ItemDetailPage() {
                           tone="request"
                           label={requestFlow.primary}
                           busyLabel="Sending..."
-                          doneLabel="Sent"
+                          sentLabel="Offer sent"
                           busy={actionBusy === "offer"}
                           disabled={!!actionBusy}
+                          successKey="offer"
+                          activeSuccessKey={actionSuccess}
                           onComplete={submitHelpOffer}
                         />
                       ) : (
@@ -1685,8 +1704,8 @@ export default function ItemDetailPage() {
                           {actionBusy === "chat"
                             ? "Opening..."
                             : actionBusy === "offer"
-                            ? "Sending..."
-                            : requestFlow.primary}
+                              ? "Sending..."
+                              : requestFlow.primary}
                         </button>
                       )}
 
@@ -2149,28 +2168,43 @@ export default function ItemDetailPage() {
 
         .slideAction {
           position: relative;
-          width: min(100%, 360px);
-          min-height: 62px;
+          width: min(100%, 430px);
+          min-height: 74px;
           border-radius: 999px;
           overflow: hidden;
-          border: 1px solid #dbe2ea;
-          background: #f8fafc;
-          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+          border: 1px solid rgba(255, 255, 255, 0.35);
+          background: rgba(15, 23, 42, 0.92);
+          box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.18),
+            inset 0 -8px 20px rgba(255, 255, 255, 0.04),
+            0 12px 28px rgba(15, 23, 42, 0.18);
+          backdrop-filter: blur(20px);
         }
 
         .slideAction-give {
-          background: linear-gradient(180deg, #f0fdf4, #ecfdf5);
-          border-color: rgba(16, 185, 129, 0.22);
+          background: linear-gradient(180deg, rgba(9, 56, 52, 0.98), rgba(15, 118, 110, 0.98));
         }
 
         .slideAction-request {
-          background: linear-gradient(180deg, #fff7ed, #fffbeb);
-          border-color: rgba(245, 158, 11, 0.22);
+          background: linear-gradient(180deg, rgba(107, 53, 8, 0.98), rgba(180, 83, 9, 0.98));
         }
 
         .slideAction.disabled,
         .slideAction.busy {
-          opacity: 0.7;
+          opacity: 0.74;
+        }
+
+        .slideGlass {
+          position: absolute;
+          inset: 1px;
+          border-radius: 999px;
+          background: linear-gradient(
+            180deg,
+            rgba(255, 255, 255, 0.16) 0%,
+            rgba(255, 255, 255, 0.05) 28%,
+            rgba(255, 255, 255, 0.02) 100%
+          );
+          pointer-events: none;
         }
 
         .slideFill {
@@ -2178,49 +2212,102 @@ export default function ItemDetailPage() {
           inset: 0 auto 0 0;
           width: 0%;
           border-radius: 999px;
-          transition: width 0.12s linear;
+          transition: width 0.1s linear;
         }
 
         .slideAction-give .slideFill {
-          background: linear-gradient(90deg, rgba(15, 118, 110, 0.14), rgba(16, 185, 129, 0.22));
+          background: linear-gradient(
+            90deg,
+            rgba(110, 231, 183, 0.16),
+            rgba(255, 255, 255, 0.2)
+          );
         }
 
         .slideAction-request .slideFill {
-          background: linear-gradient(90deg, rgba(180, 83, 9, 0.14), rgba(245, 158, 11, 0.22));
+          background: linear-gradient(
+            90deg,
+            rgba(253, 186, 116, 0.18),
+            rgba(255, 255, 255, 0.2)
+          );
+        }
+
+        .slideShimmer {
+          position: absolute;
+          top: 0;
+          bottom: 0;
+          left: -34%;
+          width: 34%;
+          background: linear-gradient(
+            90deg,
+            transparent,
+            rgba(255, 255, 255, 0.16),
+            transparent
+          );
+          filter: blur(2px);
+          animation: slideSweep 2.1s linear infinite;
+          pointer-events: none;
+        }
+
+        .slideHintArrows {
+          position: absolute;
+          right: 18px;
+          top: 50%;
+          transform: translateY(-50%);
+          z-index: 1;
+          display: flex;
+          gap: 4px;
+          color: rgba(255, 255, 255, 0.5);
+          font-size: 18px;
+          font-weight: 900;
+          pointer-events: none;
+          user-select: none;
+        }
+
+        .slideAction.done .slideHintArrows,
+        .slideAction.busy .slideHintArrows {
+          opacity: 0;
         }
 
         .slideText {
           position: relative;
           z-index: 1;
-          min-height: 62px;
+          min-height: 74px;
           display: grid;
           place-items: center;
-          padding: 0 72px;
-          font-size: 14px;
-          font-weight: 900;
-          color: #334155;
+          padding: 0 98px 0 90px;
+          font-size: 15px;
+          font-weight: 800;
+          color: rgba(255, 255, 255, 0.9);
           text-align: center;
+          letter-spacing: 0.01em;
+          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
           user-select: none;
           pointer-events: none;
         }
 
+        .slideAction.done .slideText {
+          color: #ffffff;
+        }
+
         .slideKnob {
           position: absolute;
-          top: 3px;
-          left: 3px;
+          top: 6px;
+          left: 6px;
           z-index: 2;
-          width: 54px;
-          height: 54px;
+          width: 62px;
+          height: 62px;
           border-radius: 999px;
-          border: 1px solid rgba(15, 23, 42, 0.06);
-          background: #ffffff;
+          border: 1px solid rgba(255, 255, 255, 0.75);
+          background:
+            radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.72)),
+            linear-gradient(180deg, #ffffff, #e9eef5);
           color: #0f172a;
-          font-size: 20px;
-          font-weight: 900;
           cursor: grab;
           display: grid;
           place-items: center;
-          box-shadow: 0 10px 22px rgba(15, 23, 42, 0.14);
+          box-shadow:
+            0 10px 24px rgba(0, 0, 0, 0.28),
+            inset 0 1px 0 rgba(255, 255, 255, 0.95);
           transition: transform 0.18s ease;
           touch-action: none;
         }
@@ -2231,6 +2318,31 @@ export default function ItemDetailPage() {
 
         .slideKnob:disabled {
           cursor: not-allowed;
+        }
+
+        .slideKnobInner {
+          font-size: 24px;
+          font-weight: 900;
+          line-height: 1;
+          transform: translateX(1px);
+        }
+
+        .slideAction.done .slideKnob {
+          border-color: rgba(255, 255, 255, 0.9);
+        }
+
+        .slideAction.done .slideKnobInner {
+          color: #166534;
+          transform: none;
+        }
+
+        @keyframes slideSweep {
+          0% {
+            left: -34%;
+          }
+          100% {
+            left: 112%;
+          }
         }
 
         .sectionLabel {
@@ -2492,9 +2604,24 @@ export default function ItemDetailPage() {
             min-height: 340px;
           }
 
+          .slideAction {
+            min-height: 68px;
+          }
+
           .slideText {
-            padding: 0 62px;
+            min-height: 68px;
+            padding: 0 82px 0 82px;
             font-size: 13px;
+          }
+
+          .slideKnob {
+            width: 56px;
+            height: 56px;
+          }
+
+          .slideHintArrows {
+            right: 14px;
+            font-size: 16px;
           }
         }
       `}</style>
