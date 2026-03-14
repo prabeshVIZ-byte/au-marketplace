@@ -842,32 +842,181 @@ function SlideAction({
   }, [dragging, offset]);
 
   return (
-    <div
-      ref={trackRef}
-      className={`slideAction slideAction-${tone} ${disabled ? "disabled" : ""} ${busy ? "busy" : ""} ${isSuccess ? "done" : ""}`}
-      aria-disabled={disabled || busy || isSuccess}
-    >
-      <div className="slideText">
-        {busy ? busyLabel : isSuccess ? sentLabel : label}
+    <>
+      <div
+        ref={trackRef}
+        className={`slideAction slideAction-${tone} ${disabled ? "disabled" : ""} ${busy ? "busy" : ""} ${isSuccess ? "done" : ""}`}
+        aria-disabled={disabled || busy || isSuccess}
+      >
+        <div className="slideText">
+          {busy ? busyLabel : isSuccess ? sentLabel : label}
+        </div>
+
+        {!busy && !isSuccess ? <div className="slideTextGlow" /> : null}
+
+        <button
+          type="button"
+          className="slideKnob"
+          onMouseDown={beginDrag}
+          onTouchStart={beginDrag}
+          onDragStart={(e) => e.preventDefault()}
+          disabled={disabled || busy || isSuccess}
+          aria-label={label}
+          style={{ transform: `translateX(${offset}px)` }}
+        >
+          <span className={`slideKnobGlyph ${tone}`}>
+            {isSuccess ? "✓" : "➜"}
+          </span>
+        </button>
       </div>
 
-      {!busy && !isSuccess ? <div className="slideTextGlow" /> : null}
+      <style jsx>{`
+        .slideAction {
+          position: relative;
+          width: min(100%, 430px);
+          height: 76px;
+          border-radius: 999px;
+          overflow: hidden;
+          border: 1px solid rgba(196, 181, 253, 0.55);
+          background: linear-gradient(90deg, #c084fc 0%, #d8b4fe 45%, #f9a8d4 100%);
+          box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.4),
+            0 12px 28px rgba(168, 85, 247, 0.18);
+          flex: 0 0 auto;
+        }
 
-      <button
-        type="button"
-        className="slideKnob"
-        onMouseDown={beginDrag}
-        onTouchStart={beginDrag}
-        onDragStart={(e) => e.preventDefault()}
-        disabled={disabled || busy || isSuccess}
-        aria-label={label}
-        style={{ transform: `translateX(${offset}px)` }}
-      >
-        <span className={`slideKnobGlyph ${tone}`}>
-          {isSuccess ? "✓" : "➜"}
-        </span>
-      </button>
-    </div>
+        .slideAction-give {
+          background: linear-gradient(90deg, #c084fc 0%, #d8b4fe 45%, #f9a8d4 100%);
+        }
+
+        .slideAction-request {
+          background: linear-gradient(90deg, #c4b5fd 0%, #e9d5ff 48%, #fbcfe8 100%);
+        }
+
+        .slideAction.disabled,
+        .slideAction.busy {
+          opacity: 0.72;
+        }
+
+        .slideText {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0 26px 0 102px;
+          font-size: 16px;
+          font-weight: 500;
+          letter-spacing: -0.02em;
+          color: rgba(30, 20, 44, 0.88);
+          white-space: nowrap;
+          user-select: none;
+          pointer-events: none;
+          z-index: 1;
+        }
+
+        .slideTextGlow {
+          position: absolute;
+          top: 10px;
+          bottom: 10px;
+          left: 98px;
+          width: 130px;
+          border-radius: 999px;
+          background: linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0) 0%,
+            rgba(255, 255, 255, 0.3) 50%,
+            rgba(255, 255, 255, 0) 100%
+          );
+          filter: blur(8px);
+          animation: slideGlow 2s ease-in-out infinite;
+          pointer-events: none;
+          z-index: 0;
+        }
+
+        .slideKnob {
+          position: absolute;
+          top: 6px;
+          left: 6px;
+          width: 64px;
+          height: 64px;
+          border-radius: 999px;
+          border: 0;
+          background: linear-gradient(180deg, #ffffff 0%, #f7f7fb 100%);
+          box-shadow:
+            0 8px 22px rgba(76, 29, 149, 0.16),
+            inset 0 1px 0 rgba(255, 255, 255, 0.96);
+          display: grid;
+          place-items: center;
+          cursor: grab;
+          touch-action: none;
+          z-index: 2;
+          transition: transform 0.18s ease;
+        }
+
+        .slideKnob:active {
+          cursor: grabbing;
+        }
+
+        .slideKnob:disabled {
+          cursor: not-allowed;
+        }
+
+        .slideKnobGlyph {
+          font-size: 24px;
+          line-height: 1;
+          font-weight: 900;
+          transform: translateX(1px);
+        }
+
+        .slideKnobGlyph.give {
+          color: #22c55e;
+        }
+
+        .slideKnobGlyph.request {
+          color: #f97316;
+        }
+
+        .slideAction.done .slideKnobGlyph {
+          color: #16a34a;
+          transform: none;
+        }
+
+        @keyframes slideGlow {
+          0%,
+          100% {
+            opacity: 0.45;
+            transform: translateX(0);
+          }
+          50% {
+            opacity: 0.95;
+            transform: translateX(20px);
+          }
+        }
+
+        @media (max-width: 720px) {
+          .slideAction {
+            width: 100%;
+            height: 72px;
+          }
+
+          .slideText {
+            padding: 0 18px 0 96px;
+            font-size: 15px;
+          }
+
+          .slideKnob {
+            width: 60px;
+            height: 60px;
+          }
+
+          .slideTextGlow {
+            left: 92px;
+            width: 100px;
+          }
+        }
+      `}</style>
+    </>
   );
 }
 
@@ -2158,129 +2307,6 @@ export default function ItemDetailPage() {
           cursor: not-allowed;
         }
 
-        .slideAction {
-          position: relative;
-          width: min(100%, 430px);
-          height: 76px;
-          border-radius: 999px;
-          overflow: hidden;
-          border: 1px solid rgba(196, 181, 253, 0.55);
-          background: linear-gradient(90deg, #c084fc 0%, #d8b4fe 45%, #f9a8d4 100%);
-          box-shadow:
-            inset 0 1px 0 rgba(255, 255, 255, 0.4),
-            0 12px 28px rgba(168, 85, 247, 0.18);
-          flex: 0 0 auto;
-        }
-
-        .slideAction-give {
-          background: linear-gradient(90deg, #c084fc 0%, #d8b4fe 45%, #f9a8d4 100%);
-        }
-
-        .slideAction-request {
-          background: linear-gradient(90deg, #c4b5fd 0%, #e9d5ff 48%, #fbcfe8 100%);
-        }
-
-        .slideAction.disabled,
-        .slideAction.busy {
-          opacity: 0.72;
-        }
-
-        .slideText {
-          position: absolute;
-          inset: 0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 0 26px 0 102px;
-          font-size: 16px;
-          font-weight: 500;
-          letter-spacing: -0.02em;
-          color: rgba(30, 20, 44, 0.88);
-          white-space: nowrap;
-          user-select: none;
-          pointer-events: none;
-          z-index: 1;
-        }
-
-        .slideTextGlow {
-          position: absolute;
-          top: 10px;
-          bottom: 10px;
-          left: 98px;
-          width: 130px;
-          border-radius: 999px;
-          background: linear-gradient(
-            90deg,
-            rgba(255, 255, 255, 0) 0%,
-            rgba(255, 255, 255, 0.3) 50%,
-            rgba(255, 255, 255, 0) 100%
-          );
-          filter: blur(8px);
-          animation: slideGlow 2s ease-in-out infinite;
-          pointer-events: none;
-          z-index: 0;
-        }
-
-        .slideKnob {
-          position: absolute;
-          top: 6px;
-          left: 6px;
-          width: 64px;
-          height: 64px;
-          border-radius: 999px;
-          border: 0;
-          background: linear-gradient(180deg, #ffffff 0%, #f7f7fb 100%);
-          box-shadow:
-            0 8px 22px rgba(76, 29, 149, 0.16),
-            inset 0 1px 0 rgba(255, 255, 255, 0.96);
-          display: grid;
-          place-items: center;
-          cursor: grab;
-          touch-action: none;
-          z-index: 2;
-          transition: transform 0.18s ease;
-        }
-
-        .slideKnob:active {
-          cursor: grabbing;
-        }
-
-        .slideKnob:disabled {
-          cursor: not-allowed;
-        }
-
-        .slideKnobGlyph {
-          font-size: 24px;
-          line-height: 1;
-          font-weight: 900;
-          transform: translateX(1px);
-        }
-
-        .slideKnobGlyph.give {
-          color: #22c55e;
-        }
-
-        .slideKnobGlyph.request {
-          color: #f97316;
-        }
-
-        .slideAction.done .slideKnobGlyph {
-          color: #16a34a;
-          transform: none;
-        }
-
-        @keyframes slideGlow {
-          0%,
-          100% {
-            opacity: 0.45;
-            transform: translateX(0);
-          }
-          50% {
-            opacity: 0.95;
-            transform: translateX(20px);
-          }
-        }
-
         .sectionLabel {
           font-size: 12px;
           font-weight: 900;
@@ -2526,8 +2552,7 @@ export default function ItemDetailPage() {
           }
 
           .primaryBtn,
-          .secondaryBtn,
-          .slideAction {
+          .secondaryBtn {
             width: 100%;
           }
 
@@ -2538,25 +2563,6 @@ export default function ItemDetailPage() {
           .heroImg,
           .noPhoto {
             min-height: 340px;
-          }
-
-          .slideAction {
-            height: 72px;
-          }
-
-          .slideText {
-            padding: 0 18px 0 96px;
-            font-size: 15px;
-          }
-
-          .slideKnob {
-            width: 60px;
-            height: 60px;
-          }
-
-          .slideTextGlow {
-            left: 92px;
-            width: 100px;
           }
         }
       `}</style>
