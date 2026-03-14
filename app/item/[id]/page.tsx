@@ -160,6 +160,16 @@ type FlowConfig = {
   secondaryDisabled: boolean;
 };
 
+type SlideActionProps = {
+  label: string;
+  doneLabel: string;
+  busyLabel: string;
+  disabled?: boolean;
+  busy?: boolean;
+  tone: "give" | "request";
+  onComplete: () => Promise<void> | void;
+};
+
 /* =========================
    HELPERS
 ========================= */
@@ -474,7 +484,7 @@ function getGiveFlow(args: {
   return {
     kind: "open",
     title: "This item is available",
-    body: "Send a request to start the handoff.",
+    body: "Slide to send your request.",
     primary: "Request item",
     secondary: null,
     primaryDisabled: false,
@@ -561,7 +571,7 @@ function getRequestFlow(args: {
   return {
     kind: "open",
     title: "You can help with this request",
-    body: "Send an offer so the requester knows you can help.",
+    body: "Slide to send your offer.",
     primary: mine === "declined" ? "Offer again" : "Offer help",
     secondary: null,
     primaryDisabled: false,
@@ -727,6 +737,140 @@ async function loadItemDetail(itemId: string, uid: string | null): Promise<Loade
     hasAcceptedOther,
     completedInterest,
   };
+}
+
+/* =========================
+   SLIDE ACTION
+========================= */
+
+function SlideAction({
+  label,
+  doneLabel,
+  busyLabel,
+  disabled = false,
+  busy = false,
+  tone,
+  onComplete,
+}: SlideActionProps) {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const knobSize = 54;
+  const threshold = 0.84;
+
+  const [offset, setOffset] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const getMaxOffset = () => {
+    const trackWidth = trackRef.current?.offsetWidth ?? 0;
+    return Math.max(0, trackWidth - knobSize - 8);
+  };
+
+  useEffect(() => {
+    if (!busy) return;
+    setDone(true);
+    setOffset(getMaxOffset());
+  }, [busy]);
+
+  useEffect(() => {
+    if (disabled) {
+      setDragging(false);
+      setDone(false);
+      setOffset(0);
+    }
+  }, [disabled]);
+
+  const beginDrag = () => {
+    if (disabled || busy || done) return;
+    setDragging(true);
+  };
+
+  const updateDrag = (clientX: number) => {
+    const track = trackRef.current;
+    if (!track) return;
+
+    const rect = track.getBoundingClientRect();
+    const max = getMaxOffset();
+    const raw = clientX - rect.left - knobSize / 2;
+    const next = Math.min(Math.max(0, raw), max);
+    setOffset(next);
+  };
+
+  const endDrag = async () => {
+    if (!dragging) return;
+    setDragging(false);
+
+    const max = getMaxOffset();
+    const ratio = max <= 0 ? 0 : offset / max;
+
+    if (ratio >= threshold) {
+      setDone(true);
+      setOffset(max);
+      try {
+        await onComplete();
+      } finally {
+        setTimeout(() => {
+          setDone(false);
+          setOffset(0);
+        }, 700);
+      }
+    } else {
+      setOffset(0);
+    }
+  };
+
+  useEffect(() => {
+    if (!dragging) return;
+
+    const onMouseMove = (e: MouseEvent) => updateDrag(e.clientX);
+    const onTouchMove = (e: TouchEvent) => {
+      const point = e.touches[0];
+      if (!point) return;
+      updateDrag(point.clientX);
+    };
+    const onMouseUp = () => void endDrag();
+    const onTouchEnd = () => void endDrag();
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("touchmove", onTouchMove, { passive: true });
+    window.addEventListener("touchend", onTouchEnd);
+
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("touchend", onTouchEnd);
+    };
+  }, [dragging, offset]);
+
+  const progressPct = (() => {
+    const max = getMaxOffset();
+    if (max <= 0) return 0;
+    return Math.min(100, Math.max(0, (offset / max) * 100));
+  })();
+
+  return (
+    <div
+      ref={trackRef}
+      className={`slideAction slideAction-${tone} ${disabled ? "disabled" : ""} ${busy ? "busy" : ""} ${done ? "done" : ""}`}
+      aria-disabled={disabled || busy}
+    >
+      <div className="slideFill" style={{ width: `${progressPct}%` }} />
+      <div className="slideText">{busy ? busyLabel : done ? doneLabel : label}</div>
+
+      <button
+        type="button"
+        className="slideKnob"
+        onMouseDown={beginDrag}
+        onTouchStart={beginDrag}
+        disabled={disabled || busy}
+        aria-label={label}
+        style={{ transform: `translateX(${offset}px)` }}
+      >
+        →
+      </button>
+    </div>
+  );
 }
 
 /* =========================
@@ -1257,6 +1401,16 @@ export default function ItemDetailPage() {
         : "Willing to pay"
       : "Unpaid help";
 
+  const showGiveSlide =
+    postType === "give" &&
+    !!giveFlow &&
+    (giveFlow.kind === "open" || giveFlow.kind === "waitlist");
+
+  const showRequestSlide =
+    postType === "request" &&
+    !!requestFlow &&
+    requestFlow.kind === "open";
+
   return (
     <div className={`page page-${postType}`}>
       <div className="shell">
@@ -1434,34 +1588,43 @@ export default function ItemDetailPage() {
                     <div className="panelBody">{giveFlow.body}</div>
 
                     <div className="buttonRow">
-                      <button
-                        className={`primaryBtn primaryBtn-${postType}`}
-                        type="button"
-                        disabled={giveFlow.primaryDisabled || !!actionBusy}
-                        onClick={() => {
-                          if (giveFlow.kind === "owner") {
-                            router.push(`/manage/${item.id}`);
-                            return;
-                          }
-                          if (giveFlow.kind === "login") {
-                            router.push("/me");
-                            return;
-                          }
-                          if (giveFlow.kind === "accepted" || giveFlow.kind === "reserved") {
-                            void openConversation();
-                            return;
-                          }
-                          if (giveFlow.kind === "open" || giveFlow.kind === "waitlist") {
-                            void submitGiveInterest();
-                          }
-                        }}
-                      >
-                        {actionBusy === "chat"
-                          ? "Opening..."
-                          : actionBusy === "interest"
-                          ? "Sending..."
-                          : giveFlow.primary}
-                      </button>
+                      {showGiveSlide ? (
+                        <SlideAction
+                          tone="give"
+                          label={giveFlow.primary}
+                          busyLabel="Sending..."
+                          doneLabel="Sent"
+                          busy={actionBusy === "interest"}
+                          disabled={!!actionBusy}
+                          onComplete={submitGiveInterest}
+                        />
+                      ) : (
+                        <button
+                          className={`primaryBtn primaryBtn-${postType}`}
+                          type="button"
+                          disabled={giveFlow.primaryDisabled || !!actionBusy}
+                          onClick={() => {
+                            if (giveFlow.kind === "owner") {
+                              router.push(`/manage/${item.id}`);
+                              return;
+                            }
+                            if (giveFlow.kind === "login") {
+                              router.push("/me");
+                              return;
+                            }
+                            if (giveFlow.kind === "accepted" || giveFlow.kind === "reserved") {
+                              void openConversation();
+                              return;
+                            }
+                          }}
+                        >
+                          {actionBusy === "chat"
+                            ? "Opening..."
+                            : actionBusy === "interest"
+                            ? "Sending..."
+                            : giveFlow.primary}
+                        </button>
+                      )}
 
                       {giveFlow.secondary ? (
                         <button
@@ -1489,34 +1652,43 @@ export default function ItemDetailPage() {
                     <div className="panelBody">{requestFlow.body}</div>
 
                     <div className="buttonRow">
-                      <button
-                        className={`primaryBtn primaryBtn-${postType}`}
-                        type="button"
-                        disabled={requestFlow.primaryDisabled || !!actionBusy}
-                        onClick={() => {
-                          if (requestFlow.kind === "owner") {
-                            router.push(`/manage/${item.id}`);
-                            return;
-                          }
-                          if (requestFlow.kind === "login") {
-                            router.push("/me");
-                            return;
-                          }
-                          if (requestFlow.kind === "accepted") {
-                            void openConversation();
-                            return;
-                          }
-                          if (requestFlow.kind === "open") {
-                            void submitHelpOffer();
-                          }
-                        }}
-                      >
-                        {actionBusy === "chat"
-                          ? "Opening..."
-                          : actionBusy === "offer"
-                          ? "Sending..."
-                          : requestFlow.primary}
-                      </button>
+                      {showRequestSlide ? (
+                        <SlideAction
+                          tone="request"
+                          label={requestFlow.primary}
+                          busyLabel="Sending..."
+                          doneLabel="Sent"
+                          busy={actionBusy === "offer"}
+                          disabled={!!actionBusy}
+                          onComplete={submitHelpOffer}
+                        />
+                      ) : (
+                        <button
+                          className={`primaryBtn primaryBtn-${postType}`}
+                          type="button"
+                          disabled={requestFlow.primaryDisabled || !!actionBusy}
+                          onClick={() => {
+                            if (requestFlow.kind === "owner") {
+                              router.push(`/manage/${item.id}`);
+                              return;
+                            }
+                            if (requestFlow.kind === "login") {
+                              router.push("/me");
+                              return;
+                            }
+                            if (requestFlow.kind === "accepted") {
+                              void openConversation();
+                              return;
+                            }
+                          }}
+                        >
+                          {actionBusy === "chat"
+                            ? "Opening..."
+                            : actionBusy === "offer"
+                            ? "Sending..."
+                            : requestFlow.primary}
+                        </button>
+                      )}
 
                       {requestFlow.secondary ? (
                         <button
@@ -1544,35 +1716,6 @@ export default function ItemDetailPage() {
                   <div className="descriptionCard">
                     <div className="sectionLabel">Description</div>
                     <div className="descriptionText">{item.description.trim()}</div>
-                  </div>
-                ) : null}
-
-                {postType === "request" ? (
-                  <div className="detailChips">
-                    {item.request_group ? (
-                      <span className="infoPill">{requestGroupLabel(item.request_group)}</span>
-                    ) : null}
-                    {item.request_timeframe ? (
-                      <span className="infoPill">{requestTimeframeLabel(item.request_timeframe)}</span>
-                    ) : null}
-                    {item.request_location?.trim() ? (
-                      <span className="infoPill">{item.request_location.trim()}</span>
-                    ) : null}
-                    {item.request_willing_to_pay ? (
-                      <span className="infoPill">Willing to pay</span>
-                    ) : null}
-                    {item.request_budget !== null && item.request_budget !== undefined ? (
-                      <span className="infoPill">Budget: {formatPrice(item.request_budget)}</span>
-                    ) : null}
-                  </div>
-                ) : item.category?.trim() || item.pickup_location?.trim() ? (
-                  <div className="detailChips">
-                    {item.category?.trim() ? (
-                      <span className="infoPill givePill">{giveCategoryLabel(item.category)}</span>
-                    ) : null}
-                    {item.pickup_location?.trim() ? (
-                      <span className="infoPill givePill">{item.pickup_location.trim()}</span>
-                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1855,8 +1998,7 @@ export default function ItemDetailPage() {
 
         .pricePill,
         .budgetPill,
-        .statusPill,
-        .infoPill {
+        .statusPill {
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -1873,17 +2015,10 @@ export default function ItemDetailPage() {
           color: #065f46;
         }
 
-        .budgetPill,
-        .infoPill {
+        .budgetPill {
           border: 1px solid rgba(245, 158, 11, 0.2);
           background: rgba(245, 158, 11, 0.1);
           color: #92400e;
-        }
-
-        .infoPill.givePill {
-          border-color: rgba(16, 185, 129, 0.2);
-          background: rgba(16, 185, 129, 0.1);
-          color: #065f46;
         }
 
         .statusPill {
@@ -2012,6 +2147,92 @@ export default function ItemDetailPage() {
           cursor: not-allowed;
         }
 
+        .slideAction {
+          position: relative;
+          width: min(100%, 360px);
+          min-height: 62px;
+          border-radius: 999px;
+          overflow: hidden;
+          border: 1px solid #dbe2ea;
+          background: #f8fafc;
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+        }
+
+        .slideAction-give {
+          background: linear-gradient(180deg, #f0fdf4, #ecfdf5);
+          border-color: rgba(16, 185, 129, 0.22);
+        }
+
+        .slideAction-request {
+          background: linear-gradient(180deg, #fff7ed, #fffbeb);
+          border-color: rgba(245, 158, 11, 0.22);
+        }
+
+        .slideAction.disabled,
+        .slideAction.busy {
+          opacity: 0.7;
+        }
+
+        .slideFill {
+          position: absolute;
+          inset: 0 auto 0 0;
+          width: 0%;
+          border-radius: 999px;
+          transition: width 0.12s linear;
+        }
+
+        .slideAction-give .slideFill {
+          background: linear-gradient(90deg, rgba(15, 118, 110, 0.14), rgba(16, 185, 129, 0.22));
+        }
+
+        .slideAction-request .slideFill {
+          background: linear-gradient(90deg, rgba(180, 83, 9, 0.14), rgba(245, 158, 11, 0.22));
+        }
+
+        .slideText {
+          position: relative;
+          z-index: 1;
+          min-height: 62px;
+          display: grid;
+          place-items: center;
+          padding: 0 72px;
+          font-size: 14px;
+          font-weight: 900;
+          color: #334155;
+          text-align: center;
+          user-select: none;
+          pointer-events: none;
+        }
+
+        .slideKnob {
+          position: absolute;
+          top: 3px;
+          left: 3px;
+          z-index: 2;
+          width: 54px;
+          height: 54px;
+          border-radius: 999px;
+          border: 1px solid rgba(15, 23, 42, 0.06);
+          background: #ffffff;
+          color: #0f172a;
+          font-size: 20px;
+          font-weight: 900;
+          cursor: grab;
+          display: grid;
+          place-items: center;
+          box-shadow: 0 10px 22px rgba(15, 23, 42, 0.14);
+          transition: transform 0.18s ease;
+          touch-action: none;
+        }
+
+        .slideKnob:active {
+          cursor: grabbing;
+        }
+
+        .slideKnob:disabled {
+          cursor: not-allowed;
+        }
+
         .sectionLabel {
           font-size: 12px;
           font-weight: 900;
@@ -2026,12 +2247,6 @@ export default function ItemDetailPage() {
           line-height: 1.75;
           color: #334155;
           white-space: pre-wrap;
-        }
-
-        .detailChips {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 10px;
         }
 
         .archiveGrid {
@@ -2263,7 +2478,8 @@ export default function ItemDetailPage() {
           }
 
           .primaryBtn,
-          .secondaryBtn {
+          .secondaryBtn,
+          .slideAction {
             width: 100%;
           }
 
@@ -2274,6 +2490,11 @@ export default function ItemDetailPage() {
           .heroImg,
           .noPhoto {
             min-height: 340px;
+          }
+
+          .slideText {
+            padding: 0 62px;
+            font-size: 13px;
           }
         }
       `}</style>
