@@ -476,7 +476,7 @@ function getGiveFlow(args: {
       kind: "waitlist",
       title: "Waitlist only",
       body: "Another requester is currently being considered, but you can still join the backup queue.",
-      primary: "Slide to join waitlist",
+      primary: "slide to join waitlist",
       secondary: null,
       primaryDisabled: false,
       secondaryDisabled: false,
@@ -487,7 +487,7 @@ function getGiveFlow(args: {
     kind: "open",
     title: "This item is available",
     body: "Slide to send your request.",
-    primary: "Slide to request item",
+    primary: "slide to send your request",
     secondary: null,
     primaryDisabled: false,
     secondaryDisabled: false,
@@ -574,7 +574,7 @@ function getRequestFlow(args: {
     kind: "open",
     title: "You can help with this request",
     body: "Slide to send your offer.",
-    primary: "Slide to offer help",
+    primary: "slide to offer help",
     secondary: null,
     primaryDisabled: false,
     secondaryDisabled: false,
@@ -757,7 +757,7 @@ function SlideAction({
   onComplete,
 }: SlideActionProps) {
   const trackRef = useRef<HTMLDivElement | null>(null);
-  const knobSize = 62;
+  const knobSize = 64;
   const threshold = 0.84;
 
   const [offset, setOffset] = useState(0);
@@ -853,17 +853,13 @@ function SlideAction({
       className={`slideAction slideAction-${tone} ${disabled ? "disabled" : ""} ${busy ? "busy" : ""} ${isSuccess ? "done" : ""}`}
       aria-disabled={disabled || busy || isSuccess}
     >
-      <div className="slideGlass" />
+      <div className="slideBgGlow" />
       <div className="slideFill" style={{ width: `${progressPct}%` }} />
-      {!isSuccess && !busy ? <div className="slideShimmer" /> : null}
+      {!busy && !isSuccess ? <div className="slideShimmer" /> : null}
 
-      <div className="slideHintArrows" aria-hidden="true">
-        <span>›</span>
-        <span>›</span>
-        <span>›</span>
+      <div className="slideText">
+        {busy ? busyLabel : isSuccess ? sentLabel : label}
       </div>
-
-      <div className="slideText">{busy ? busyLabel : isSuccess ? sentLabel : label}</div>
 
       <button
         type="button"
@@ -874,7 +870,9 @@ function SlideAction({
         aria-label={label}
         style={{ transform: `translateX(${offset}px)` }}
       >
-        <span className="slideKnobInner">{isSuccess ? "✓" : "➜"}</span>
+        <span className={`slideKnobGlyph ${tone}`}>
+          {isSuccess ? "✓" : "➜"}
+        </span>
       </button>
     </div>
   );
@@ -1607,8 +1605,8 @@ export default function ItemDetailPage() {
                         <SlideAction
                           tone="give"
                           label={giveFlow.primary}
-                          busyLabel="Sending..."
-                          sentLabel="Request sent"
+                          busyLabel="sending..."
+                          sentLabel="request sent"
                           busy={actionBusy === "interest"}
                           disabled={!!actionBusy}
                           successKey="interest"
@@ -1673,8 +1671,8 @@ export default function ItemDetailPage() {
                         <SlideAction
                           tone="request"
                           label={requestFlow.primary}
-                          busyLabel="Sending..."
-                          sentLabel="Offer sent"
+                          busyLabel="sending..."
+                          sentLabel="offer sent"
                           busy={actionBusy === "offer"}
                           disabled={!!actionBusy}
                           successKey="offer"
@@ -2169,40 +2167,52 @@ export default function ItemDetailPage() {
         .slideAction {
           position: relative;
           width: min(100%, 430px);
-          min-height: 74px;
+          min-height: 76px;
           border-radius: 999px;
           overflow: hidden;
-          border: 1px solid rgba(255, 255, 255, 0.35);
-          background: rgba(15, 23, 42, 0.92);
+          border: 1px solid rgba(167, 139, 250, 0.34);
+          background: linear-gradient(
+            90deg,
+            rgba(192, 132, 252, 0.84) 0%,
+            rgba(216, 180, 254, 0.88) 36%,
+            rgba(244, 171, 203, 0.84) 100%
+          );
           box-shadow:
-            inset 0 1px 0 rgba(255, 255, 255, 0.18),
-            inset 0 -8px 20px rgba(255, 255, 255, 0.04),
-            0 12px 28px rgba(15, 23, 42, 0.18);
-          backdrop-filter: blur(20px);
+            inset 0 1px 0 rgba(255, 255, 255, 0.38),
+            0 14px 34px rgba(88, 28, 135, 0.18);
         }
 
         .slideAction-give {
-          background: linear-gradient(180deg, rgba(9, 56, 52, 0.98), rgba(15, 118, 110, 0.98));
+          background: linear-gradient(
+            90deg,
+            rgba(190, 132, 252, 0.9) 0%,
+            rgba(221, 185, 255, 0.92) 45%,
+            rgba(248, 180, 208, 0.88) 100%
+          );
         }
 
         .slideAction-request {
-          background: linear-gradient(180deg, rgba(107, 53, 8, 0.98), rgba(180, 83, 9, 0.98));
+          background: linear-gradient(
+            90deg,
+            rgba(194, 145, 255, 0.9) 0%,
+            rgba(232, 192, 255, 0.92) 45%,
+            rgba(255, 187, 198, 0.88) 100%
+          );
         }
 
         .slideAction.disabled,
         .slideAction.busy {
-          opacity: 0.74;
+          opacity: 0.72;
         }
 
-        .slideGlass {
+        .slideBgGlow {
           position: absolute;
-          inset: 1px;
-          border-radius: 999px;
+          inset: 0;
           background: linear-gradient(
             180deg,
-            rgba(255, 255, 255, 0.16) 0%,
-            rgba(255, 255, 255, 0.05) 28%,
-            rgba(255, 255, 255, 0.02) 100%
+            rgba(255, 255, 255, 0.2) 0%,
+            rgba(255, 255, 255, 0.06) 38%,
+            rgba(255, 255, 255, 0) 100%
           );
           pointer-events: none;
         }
@@ -2212,103 +2222,70 @@ export default function ItemDetailPage() {
           inset: 0 auto 0 0;
           width: 0%;
           border-radius: 999px;
+          background: linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.16),
+            rgba(255, 255, 255, 0.3)
+          );
           transition: width 0.1s linear;
-        }
-
-        .slideAction-give .slideFill {
-          background: linear-gradient(
-            90deg,
-            rgba(110, 231, 183, 0.16),
-            rgba(255, 255, 255, 0.2)
-          );
-        }
-
-        .slideAction-request .slideFill {
-          background: linear-gradient(
-            90deg,
-            rgba(253, 186, 116, 0.18),
-            rgba(255, 255, 255, 0.2)
-          );
         }
 
         .slideShimmer {
           position: absolute;
-          top: 0;
-          bottom: 0;
-          left: -34%;
-          width: 34%;
+          top: 8px;
+          bottom: 8px;
+          left: 74px;
+          width: 112px;
+          border-radius: 999px;
           background: linear-gradient(
             90deg,
-            transparent,
-            rgba(255, 255, 255, 0.16),
-            transparent
+            rgba(255, 255, 255, 0) 0%,
+            rgba(255, 255, 255, 0.28) 50%,
+            rgba(255, 255, 255, 0) 100%
           );
-          filter: blur(2px);
-          animation: slideSweep 2.1s linear infinite;
+          filter: blur(7px);
+          animation: shimmerPulse 2s ease-in-out infinite;
           pointer-events: none;
-        }
-
-        .slideHintArrows {
-          position: absolute;
-          right: 18px;
-          top: 50%;
-          transform: translateY(-50%);
-          z-index: 1;
-          display: flex;
-          gap: 4px;
-          color: rgba(255, 255, 255, 0.5);
-          font-size: 18px;
-          font-weight: 900;
-          pointer-events: none;
-          user-select: none;
-        }
-
-        .slideAction.done .slideHintArrows,
-        .slideAction.busy .slideHintArrows {
-          opacity: 0;
         }
 
         .slideText {
           position: relative;
-          z-index: 1;
-          min-height: 74px;
-          display: grid;
-          place-items: center;
-          padding: 0 98px 0 90px;
-          font-size: 15px;
-          font-weight: 800;
-          color: rgba(255, 255, 255, 0.9);
+          z-index: 2;
+          min-height: 76px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0 24px 0 102px;
+          font-size: 16px;
+          font-weight: 500;
+          letter-spacing: -0.02em;
+          color: rgba(25, 18, 40, 0.84);
           text-align: center;
-          letter-spacing: 0.01em;
-          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
           user-select: none;
           pointer-events: none;
         }
 
         .slideAction.done .slideText {
-          color: #ffffff;
+          color: rgba(25, 18, 40, 0.88);
+          font-weight: 600;
         }
 
         .slideKnob {
           position: absolute;
           top: 6px;
           left: 6px;
-          z-index: 2;
-          width: 62px;
-          height: 62px;
+          z-index: 3;
+          width: 64px;
+          height: 64px;
           border-radius: 999px;
-          border: 1px solid rgba(255, 255, 255, 0.75);
-          background:
-            radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.72)),
-            linear-gradient(180deg, #ffffff, #e9eef5);
-          color: #0f172a;
-          cursor: grab;
+          border: 0;
+          background: linear-gradient(180deg, #ffffff 0%, #f7f7fb 100%);
+          box-shadow:
+            0 10px 24px rgba(76, 29, 149, 0.16),
+            inset 0 1px 0 rgba(255, 255, 255, 0.96);
           display: grid;
           place-items: center;
-          box-shadow:
-            0 10px 24px rgba(0, 0, 0, 0.28),
-            inset 0 1px 0 rgba(255, 255, 255, 0.95);
-          transition: transform 0.18s ease;
+          cursor: grab;
           touch-action: none;
         }
 
@@ -2320,28 +2297,35 @@ export default function ItemDetailPage() {
           cursor: not-allowed;
         }
 
-        .slideKnobInner {
+        .slideKnobGlyph {
           font-size: 24px;
-          font-weight: 900;
           line-height: 1;
+          font-weight: 900;
           transform: translateX(1px);
         }
 
-        .slideAction.done .slideKnob {
-          border-color: rgba(255, 255, 255, 0.9);
+        .slideKnobGlyph.give {
+          color: #22c55e;
         }
 
-        .slideAction.done .slideKnobInner {
-          color: #166534;
+        .slideKnobGlyph.request {
+          color: #f97316;
+        }
+
+        .slideAction.done .slideKnobGlyph {
+          color: #16a34a;
           transform: none;
         }
 
-        @keyframes slideSweep {
-          0% {
-            left: -34%;
-          }
+        @keyframes shimmerPulse {
+          0%,
           100% {
-            left: 112%;
+            opacity: 0.45;
+            transform: translateX(0);
+          }
+          50% {
+            opacity: 0.9;
+            transform: translateX(16px);
           }
         }
 
@@ -2605,23 +2589,23 @@ export default function ItemDetailPage() {
           }
 
           .slideAction {
-            min-height: 68px;
+            min-height: 72px;
           }
 
           .slideText {
-            min-height: 68px;
-            padding: 0 82px 0 82px;
-            font-size: 13px;
+            min-height: 72px;
+            padding: 0 18px 0 96px;
+            font-size: 15px;
           }
 
           .slideKnob {
-            width: 56px;
-            height: 56px;
+            width: 60px;
+            height: 60px;
           }
 
-          .slideHintArrows {
-            right: 14px;
-            font-size: 16px;
+          .slideShimmer {
+            left: 68px;
+            width: 92px;
           }
         }
       `}</style>
