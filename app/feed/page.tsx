@@ -41,6 +41,7 @@ type ItemMeta = {
   status: string | null;
   hide_interest_count: boolean | null;
   price: number | null;
+  pickup_location: string | null;
 };
 
 type FeedRow = FeedRowFromView & {
@@ -53,6 +54,7 @@ type FeedRow = FeedRowFromView & {
   request_willing_to_pay: boolean | null;
   hide_interest_count: boolean | null;
   price: number | null;
+  pickup_location: string | null;
 };
 
 type EventCategory =
@@ -151,6 +153,8 @@ type NotificationRow = {
   created_at: string;
 };
 
+type FeedTab = "services" | "requests" | "items" | "events";
+
 const PAGE_BOTTOM_PAD = 110;
 const ATTEND_TABLE = "event_attendees";
 
@@ -181,16 +185,6 @@ function itemPublicStatus(item: FeedRow): "open" | "in_talks" | "closed" {
     return "in_talks";
   }
   return "open";
-}
-
-function requestGroupLabel(g: string | null | undefined) {
-  const k = (g ?? "").toLowerCase();
-  if (k === "logistics") return "Logistics";
-  if (k === "services") return "Services";
-  if (k === "urgent") return "Urgent";
-  if (k === "collaboration") return "Collaboration";
-  if (k === "lost & found") return "Lost & Found";
-  return "Request";
 }
 
 function requestTimeframeLabel(t: string | null | undefined) {
@@ -280,11 +274,69 @@ function isInteractiveDoubleTapTarget(target: EventTarget | null) {
   );
 }
 
-function formatPriceTag(price: number | null | undefined) {
-  if (price === null || price === undefined) return "Free";
+function formatPriceTag(price: number | null | undefined, empty = "Free") {
+  if (price === null || price === undefined) return empty;
   const n = Number(price);
-  if (!Number.isFinite(n)) return "Free";
+  if (!Number.isFinite(n)) return empty;
   return `$${n.toFixed(2)}`;
+}
+
+function titleCaseWords(v: string) {
+  return v
+    .split(" ")
+    .filter(Boolean)
+    .map((x) => x.charAt(0).toUpperCase() + x.slice(1))
+    .join(" ");
+}
+
+function isServiceRow(item: FeedRow) {
+  const category = (item.category ?? "").toLowerCase().trim();
+  const requestGroup = (item.request_group ?? "").toLowerCase().trim();
+  return (
+    category.startsWith("service:") ||
+    requestGroup.startsWith("service_offer:")
+  );
+}
+
+function isRequestRow(item: FeedRow) {
+  return (item.post_type ?? "give") === "request";
+}
+
+function isItemRow(item: FeedRow) {
+  return !isRequestRow(item) && !isServiceRow(item);
+}
+
+function serviceCategoryLabel(item: FeedRow) {
+  const category = (item.category ?? "").trim();
+  if (category.toLowerCase().startsWith("service:")) {
+    return titleCaseWords(category.replace(/^service:/i, "").replace(/_/g, " "));
+  }
+  return "Service";
+}
+
+function serviceDeliveryLabel(item: FeedRow) {
+  const raw = (item.request_group ?? "").trim().toLowerCase();
+  if (raw.startsWith("service_offer:")) {
+    const v = raw.replace(/^service_offer:/, "");
+    if (v === "in_person") return "In person";
+    if (v === "remote") return "Remote";
+    if (v === "either") return "Either";
+  }
+  return "Flexible";
+}
+
+function requestCategoryLabel(item: FeedRow) {
+  const category = (item.category ?? "").trim();
+  if (category.toLowerCase().startsWith("request:")) {
+    return titleCaseWords(category.replace(/^request:/i, "").replace(/_/g, " "));
+  }
+
+  const group = (item.request_group ?? "").trim();
+  return group ? titleCaseWords(group.replace(/_/g, " ")) : "Request";
+}
+
+function itemCategoryLabel(category: string | null | undefined) {
+  return category ? titleCaseWords(category) : "Uncategorized";
 }
 
 async function getAuthState(): Promise<AuthState> {
@@ -344,7 +396,7 @@ export default function FeedPage() {
   const [openImg, setOpenImg] = useState<string | null>(null);
   const [openTitle, setOpenTitle] = useState("");
 
-  const [tab, setTab] = useState<"items" | "requests" | "events">("items");
+  const [tab, setTab] = useState<FeedTab>("services");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"newest" | "popular">("newest");
   const [roleFilter, setRoleFilter] = useState<"all" | "student" | "faculty">("all");
@@ -373,7 +425,7 @@ export default function FeedPage() {
     const { data, error } = await supabase
       .from("items")
       .select(
-        "id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,request_willing_to_pay,status,hide_interest_count,price"
+        "id,owner_id,is_claimed,post_type,request_group,request_timeframe,request_location,request_willing_to_pay,status,hide_interest_count,price,pickup_location"
       )
       .in("id", itemIds);
 
@@ -494,6 +546,7 @@ export default function FeedPage() {
           interest_count: row.interest_count ?? 0,
           hide_interest_count: m?.hide_interest_count ?? null,
           price: m?.price ?? null,
+          pickup_location: m?.pickup_location ?? null,
         };
       });
 
@@ -505,12 +558,12 @@ export default function FeedPage() {
 
       setItems(visible);
 
-      const giveIds = visible
-        .filter((item) => (item.post_type ?? "give") === "give")
+      const actionableIds = visible
+        .filter((item) => !isRequestRow(item))
         .map((item) => item.id);
 
       if (nextAuth.isLoggedIn && nextAuth.userId) {
-        await loadMyInterestStatuses(nextAuth.userId, giveIds);
+        await loadMyInterestStatuses(nextAuth.userId, actionableIds);
       } else {
         setMyInterestMap({});
       }
@@ -900,7 +953,7 @@ export default function FeedPage() {
     }
   }
 
-  function handleTabChange(nextTab: "items" | "requests" | "events") {
+  function handleTabChange(nextTab: FeedTab) {
     setTab(nextTab);
     setQuery("");
     setCategoryFilter("all");
@@ -1028,10 +1081,19 @@ export default function FeedPage() {
     };
   }, []);
 
-  const categories = useMemo(() => {
+  const serviceCategories = useMemo(() => {
     const set = new Set<string>();
     for (const item of items) {
-      if ((item.post_type ?? "give") !== "give") continue;
+      if (!isServiceRow(item)) continue;
+      set.add(serviceCategoryLabel(item));
+    }
+    return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
+  }, [items]);
+
+  const itemCategories = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of items) {
+      if (!isItemRow(item)) continue;
       const c = (item.category ?? "").trim();
       if (c) set.add(c);
     }
@@ -1040,9 +1102,9 @@ export default function FeedPage() {
 
   const tabbedItems = useMemo(() => {
     return items.filter((item) => {
-      const pt = (item.post_type ?? "give") as PostType;
-      if (tab === "items") return pt !== "request";
-      if (tab === "requests") return pt === "request";
+      if (tab === "services") return isServiceRow(item);
+      if (tab === "requests") return isRequestRow(item);
+      if (tab === "items") return isItemRow(item);
       return false;
     });
   }, [items, tab]);
@@ -1051,15 +1113,17 @@ export default function FeedPage() {
     const q = query.trim().toLowerCase();
 
     let list = tabbedItems.filter((item) => {
-      const pt = (item.post_type ?? "give") as PostType;
-
       if (roleFilter !== "all") {
         const r = (item.owner_role ?? null) as OwnerRole;
         if (!r || r !== roleFilter) return false;
       }
 
-      if (tab === "items" && pt !== "request") {
-        if (categoryFilter !== "all" && (item.category ?? "") !== categoryFilter) return false;
+      if (tab === "services" && categoryFilter !== "all") {
+        if (serviceCategoryLabel(item) !== categoryFilter) return false;
+      }
+
+      if (tab === "items" && categoryFilter !== "all") {
+        if ((item.category ?? "") !== categoryFilter) return false;
       }
 
       if (q) {
@@ -1070,6 +1134,7 @@ export default function FeedPage() {
           item.request_group ?? "",
           item.request_timeframe ?? "",
           item.request_location ?? "",
+          item.pickup_location ?? "",
         ]
           .join(" ")
           .toLowerCase();
@@ -1131,7 +1196,7 @@ export default function FeedPage() {
   const activeFilterCount =
     (sort === "popular" ? 1 : 0) +
     (roleFilter !== "all" ? 1 : 0) +
-    (tab === "items" && categoryFilter !== "all" ? 1 : 0) +
+    ((tab === "services" || tab === "items") && categoryFilter !== "all" ? 1 : 0) +
     (query.trim() ? 1 : 0);
 
   return (
@@ -1167,7 +1232,13 @@ export default function FeedPage() {
               />
             </div>
             <div className="brandSub">
-              {tab === "items" ? "Campus items" : tab === "requests" ? "Help requests" : "Upcoming events"}
+              {tab === "services"
+                ? "Campus side gigs"
+                : tab === "requests"
+                ? "Help requests"
+                : tab === "items"
+                ? "Secondary item board"
+                : "Upcoming events"}
             </div>
           </div>
 
@@ -1192,13 +1263,13 @@ export default function FeedPage() {
 
         <div className="headerBody">
           <div className="tabsRow">
-            <div className="seg3" role="tablist" aria-label="Feed tabs">
+            <div className="seg4" role="tablist" aria-label="Feed tabs">
               <button
-                className={`segBtn ${tab === "items" ? "active" : ""}`}
-                onClick={() => handleTabChange("items")}
+                className={`segBtn ${tab === "services" ? "active" : ""}`}
+                onClick={() => handleTabChange("services")}
                 type="button"
               >
-                Items
+                Services
               </button>
               <button
                 className={`segBtn ${tab === "requests" ? "active" : ""}`}
@@ -1208,15 +1279,29 @@ export default function FeedPage() {
                 Requests
               </button>
               <button
+                className={`segBtn ${tab === "items" ? "active" : ""}`}
+                onClick={() => handleTabChange("items")}
+                type="button"
+              >
+                Items
+              </button>
+              <button
                 className={`segBtn ${tab === "events" ? "active" : ""}`}
                 onClick={() => handleTabChange("events")}
                 type="button"
               >
                 Events
               </button>
+
               <span
-                className={`segIndicator3 ${
-                  tab === "items" ? "pos0" : tab === "requests" ? "pos1" : "pos2"
+                className={`segIndicator4 ${
+                  tab === "services"
+                    ? "pos0"
+                    : tab === "requests"
+                    ? "pos1"
+                    : tab === "items"
+                    ? "pos2"
+                    : "pos3"
                 }`}
                 aria-hidden="true"
               />
@@ -1251,7 +1336,9 @@ export default function FeedPage() {
                 onFocus={() => setSearchFocused(true)}
                 onBlur={() => setSearchFocused(false)}
                 placeholder={
-                  tab === "events"
+                  tab === "services"
+                    ? "Search tutoring, hair, baking, tech help…"
+                    : tab === "events"
                     ? "Search events, hosts, locations…"
                     : tab === "items"
                     ? "Search items, categories…"
@@ -1271,9 +1358,9 @@ export default function FeedPage() {
               )}
             </div>
 
-            {tab === "items" && (
+            {(tab === "services" || tab === "items") && (
               <div className="chipRow" ref={chipRowRef} aria-label="Categories">
-                {categories.map((c) => {
+                {(tab === "services" ? serviceCategories : itemCategories).map((c) => {
                   const active = categoryFilter === c;
                   const label = c === "all" ? "All" : c[0].toUpperCase() + c.slice(1);
                   return (
@@ -1290,7 +1377,9 @@ export default function FeedPage() {
               </div>
             )}
 
-            {(sort === "popular" || roleFilter !== "all" || (tab === "items" && categoryFilter !== "all")) && (
+            {(sort === "popular" ||
+              roleFilter !== "all" ||
+              ((tab === "services" || tab === "items") && categoryFilter !== "all")) && (
               <div className="activeFilterRow">
                 {sort === "popular" && (
                   <button className="activeFilterPill" type="button" onClick={() => setSort("newest")}>
@@ -1302,7 +1391,7 @@ export default function FeedPage() {
                     {roleFilter === "student" ? "Student" : "Faculty"} <span>✕</span>
                   </button>
                 )}
-                {tab === "items" && categoryFilter !== "all" && (
+                {(tab === "services" || tab === "items") && categoryFilter !== "all" && (
                   <button className="activeFilterPill" type="button" onClick={() => setCategoryFilter("all")}>
                     {categoryFilter} <span>✕</span>
                   </button>
@@ -1313,10 +1402,12 @@ export default function FeedPage() {
 
           <div className="subline">
             <div className="subTitle">
-              {tab === "items"
-                ? "Public Items"
+              {tab === "services"
+                ? "Public Services"
                 : tab === "requests"
                 ? "Public Requests"
+                : tab === "items"
+                ? "Public Items"
                 : "Campus Events"}
             </div>
             <div className="count">
@@ -1516,10 +1607,18 @@ export default function FeedPage() {
           {!loading && tab !== "events" && filteredItems.length === 0 ? (
             <div className="emptyState">
               <div className="emptyIcon">✦</div>
-              <div className="emptyTitle">{tab === "items" ? "No items found" : "No requests found"}</div>
+              <div className="emptyTitle">
+                {tab === "services"
+                  ? "No services found"
+                  : tab === "items"
+                  ? "No items found"
+                  : "No requests found"}
+              </div>
               <div className="emptySubtitle">
-                {tab === "items"
-                  ? "Try another category, role filter, or search."
+                {tab === "services"
+                  ? "Try another service category, role filter, or search."
+                  : tab === "items"
+                  ? "Try another item category, role filter, or search."
                   : "Try another search or filter combination."}
               </div>
               <button
@@ -1666,7 +1765,6 @@ export default function FeedPage() {
 
           {!loading && tab !== "events"
             ? filteredItems.map((item) => {
-                const postType = (item.post_type ?? "give") as PostType;
                 const isMine = !!auth.userId && !!item.owner_id && item.owner_id === auth.userId;
                 const myStatus = myInterestMap[item.id];
                 const mineActive = isActiveInterestStatus(myStatus);
@@ -1675,8 +1773,8 @@ export default function FeedPage() {
                 const loveBusy = savingLoveKey === `item:${item.id}`;
                 const cardKey = `item:${item.id}`;
 
-                if (postType === "request") {
-                  const group = requestGroupLabel(item.request_group);
+                if (tab === "requests") {
+                  const reqLabel = requestCategoryLabel(item);
                   const tf = requestTimeframeLabel(item.request_timeframe);
                   const loc = (item.request_location ?? "").trim();
 
@@ -1693,7 +1791,7 @@ export default function FeedPage() {
                         <div className="requestTop">
                           <div className="requestPills">
                             <span className="requestMainPill">REQUEST</span>
-                            <span className="requestGroupPill">{group}</span>
+                            <span className="requestGroupPill">{reqLabel}</span>
                             {isMine ? <span className="requestSoftPill">Yours</span> : null}
                           </div>
 
@@ -1718,6 +1816,10 @@ export default function FeedPage() {
 
                         <div className="requestInfoGrid">
                           <div className="requestInfoCell">
+                            <span className="requestInfoKey">Type</span>
+                            <span className="requestInfoVal">{reqLabel}</span>
+                          </div>
+                          <div className="requestInfoCell">
                             <span className="requestInfoKey">Time</span>
                             <span className="requestInfoVal">{tf || "Flexible"}</span>
                           </div>
@@ -1726,21 +1828,17 @@ export default function FeedPage() {
                             <span className="requestInfoVal">{loc || "Not specified"}</span>
                           </div>
                           <div className="requestInfoCell">
-                            <span className="requestInfoKey">Offers</span>
+                            <span className="requestInfoKey">Budget</span>
                             <span className="requestInfoVal">
-                              {item.hide_interest_count ? "Hidden" : `${item.interest_count || 0}`}
+                              {item.request_willing_to_pay ? "Willing to pay" : "Unpaid / open"}
                             </span>
-                          </div>
-                          <div className="requestInfoCell">
-                            <span className="requestInfoKey">Posted</span>
-                            <span className="requestInfoVal">{formatShortDate(item.created_at)}</span>
                           </div>
                         </div>
 
                         <div className="bottomRow">
                           <div className="miniFacts">
-                            <span>🆘 {group}</span>
-                            {item.request_willing_to_pay ? <span>💵 Willing to pay</span> : null}
+                            <span>🆘 {reqLabel}</span>
+                            {item.request_willing_to_pay ? <span>💵 Paid possible</span> : null}
                           </div>
 
                           <button
@@ -1753,7 +1851,116 @@ export default function FeedPage() {
                             disabled={isMine}
                             data-no-card-doubletap="true"
                           >
-                            {isMine ? "Yours" : auth.isLoggedIn ? "Offer help" : "Offer help"}
+                            {isMine ? "Yours" : "Offer help"}
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                }
+
+                if (tab === "services") {
+                  const publicState = itemPublicStatus(item);
+                  const badge =
+                    publicState === "in_talks" ? "IN TALKS" : publicState === "closed" ? "CLOSED" : "AVAILABLE";
+
+                  return (
+                    <article
+                      key={item.id}
+                      className="card cardService"
+                      onPointerUp={(e) => handleCardPointerUp(e, "item", item.id)}
+                      onClick={() => router.push(`/item/${item.id}`)}
+                    >
+                      {burstCardKey === cardKey ? <div className="bigHeartBurst">♥</div> : null}
+
+                      <div className="media">
+                        <div className={`floatingBadge ${publicState === "in_talks" ? "badgeTalks" : "badgeService"}`}>
+                          {badge}
+                        </div>
+
+                        <div className="priceBadge servicePriceBadge">
+                          {formatPriceTag(item.price, "Quote")}
+                        </div>
+
+                        <button
+                          className={`tinyLike ${loved ? "active" : ""}`}
+                          type="button"
+                          disabled={loveBusy}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void toggleItemLove(item.id);
+                          }}
+                          aria-label={loved ? "Unlike" : "Like"}
+                          data-no-card-doubletap="true"
+                        >
+                          <span className="tinyLikeGlyph">{loved ? "♥" : "♡"}</span>
+                          <span className="tinyLikeCount">{loveCount}</span>
+                        </button>
+
+                        {item.photo_url ? (
+                          <button
+                            className="mediaBtn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenImg(item.photo_url!);
+                              setOpenTitle(item.title);
+                            }}
+                            type="button"
+                            aria-label="Open photo"
+                            data-no-card-doubletap="true"
+                          >
+                            <img src={item.photo_url} alt={item.title} loading="lazy" className="mediaImg" />
+                          </button>
+                        ) : (
+                          <div className="noPhoto noPhotoServices">No photo</div>
+                        )}
+                      </div>
+
+                      <div className="body">
+                        <div className="eyebrowRow">
+                          <span className="eyebrowTag serviceTag">{serviceCategoryLabel(item)}</span>
+                          <span className="eyebrowTag subtle">{serviceDeliveryLabel(item)}</span>
+                          {item.owner_role ? <span className="eyebrowTag subtle">{item.owner_role}</span> : null}
+                          {isMine ? <span className="eyebrowTag subtle">Yours</span> : null}
+                        </div>
+
+                        <div className="title">{item.title}</div>
+
+                        <div className="metaLine">
+                          {item.request_location?.trim()
+                            ? item.request_location
+                            : item.pickup_location?.trim()
+                            ? item.pickup_location
+                            : "Location flexible"}
+                        </div>
+
+                        <div className="desc clamp2">{item.description || "No description provided."}</div>
+
+                        <div className="bottomRow">
+                          <div className="miniFacts">
+                            <span>🛠 {serviceCategoryLabel(item)}</span>
+                            <span>📍 {serviceDeliveryLabel(item)}</span>
+                          </div>
+
+                          <button
+                            className={`primaryInlineBtn serviceBtn ${isMine ? "disabled" : mineActive ? "on" : ""}`}
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              router.push(auth.isLoggedIn ? `/item/${item.id}` : "/me");
+                            }}
+                            disabled={isMine}
+                            data-no-card-doubletap="true"
+                          >
+                            {isMine
+                              ? "Yours"
+                              : auth.isLoggedIn
+                              ? mineActive
+                                ? myInterestLabel(myStatus)
+                                : publicState === "in_talks"
+                                ? "Join queue"
+                                : "Contact"
+                              : "Contact"}
                           </button>
                         </div>
                       </div>
@@ -1819,7 +2026,7 @@ export default function FeedPage() {
 
                     <div className="body">
                       <div className="eyebrowRow">
-                        <span className="eyebrowTag">{item.category || "Uncategorized"}</span>
+                        <span className="eyebrowTag">{itemCategoryLabel(item.category)}</span>
                         {item.owner_role ? <span className="eyebrowTag subtle">{item.owner_role}</span> : null}
                         {isMine ? <span className="eyebrowTag subtle">Yours</span> : null}
                       </div>
@@ -1838,6 +2045,7 @@ export default function FeedPage() {
 
                       <div className="bottomRow">
                         <div className="miniFacts">
+                          {item.pickup_location ? <span>📍 {item.pickup_location}</span> : null}
                           {item.expires_at ? <span>⏰ {formatShortDate(item.expires_at)}</span> : <span>⏰ Open</span>}
                         </div>
 
@@ -1891,12 +2099,16 @@ export default function FeedPage() {
           transition: background 0.2s ease;
         }
 
-        .page-items {
-          background: #f7f8f7;
+        .page-services {
+          background: #f6faf7;
         }
 
         .page-requests {
           background: #fbf8f3;
+        }
+
+        .page-items {
+          background: #f7f8f7;
         }
 
         .page-events {
@@ -2006,14 +2218,14 @@ export default function FeedPage() {
           align-items: center;
         }
 
-        .seg3 {
+        .seg4 {
           position: relative;
           height: 42px;
           border-radius: 999px;
           border: 1px solid #e5e7eb;
           background: rgba(243, 244, 246, 0.92);
           display: grid;
-          grid-template-columns: 1fr 1fr 1fr;
+          grid-template-columns: repeat(4, 1fr);
           overflow: hidden;
         }
 
@@ -2031,11 +2243,11 @@ export default function FeedPage() {
           color: #111827;
         }
 
-        .segIndicator3 {
+        .segIndicator4 {
           position: absolute;
           top: 3px;
           bottom: 3px;
-          width: calc(33.333% - 6px);
+          width: calc(25% - 6px);
           border-radius: 999px;
           background: rgba(255, 255, 255, 0.97);
           border: 1px solid #e5e7eb;
@@ -2044,16 +2256,20 @@ export default function FeedPage() {
           z-index: 1;
         }
 
-        .segIndicator3.pos0 {
+        .segIndicator4.pos0 {
           transform: translateX(3px);
         }
 
-        .segIndicator3.pos1 {
+        .segIndicator4.pos1 {
           transform: translateX(calc(100% + 3px));
         }
 
-        .segIndicator3.pos2 {
+        .segIndicator4.pos2 {
           transform: translateX(calc(200% + 3px));
+        }
+
+        .segIndicator4.pos3 {
+          transform: translateX(calc(300% + 3px));
         }
 
         .ctrlBtn {
@@ -2587,14 +2803,19 @@ export default function FeedPage() {
           cursor: pointer;
         }
 
-        .cardItem {
+        .cardService {
           border: 1px solid rgba(16, 185, 129, 0.2);
-          background: linear-gradient(180deg, rgba(16, 185, 129, 0.04), #ffffff 34%);
+          background: linear-gradient(180deg, rgba(16, 185, 129, 0.05), #ffffff 34%);
         }
 
         .cardRequest {
           border: 1px solid rgba(245, 158, 11, 0.22);
           background: linear-gradient(180deg, rgba(245, 158, 11, 0.04), #ffffff 34%);
+        }
+
+        .cardItem {
+          border: 1px solid rgba(148, 163, 184, 0.22);
+          background: linear-gradient(180deg, rgba(148, 163, 184, 0.04), #ffffff 34%);
         }
 
         .cardEvent {
@@ -2647,9 +2868,14 @@ export default function FeedPage() {
           backdrop-filter: blur(6px);
         }
 
-        .badgeItem {
+        .badgeService {
           border-color: rgba(16, 185, 129, 0.2);
           color: #065f46;
+        }
+
+        .badgeItem {
+          border-color: rgba(148, 163, 184, 0.22);
+          color: #334155;
         }
 
         .badgeTalks {
@@ -2670,9 +2896,9 @@ export default function FeedPage() {
           min-height: 34px;
           padding: 0 12px;
           border-radius: 999px;
-          border: 1px solid rgba(16, 185, 129, 0.2);
+          border: 1px solid rgba(148, 163, 184, 0.2);
           background: rgba(255, 255, 255, 0.92);
-          color: #065f46;
+          color: #334155;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -2680,6 +2906,11 @@ export default function FeedPage() {
           font-weight: 900;
           backdrop-filter: blur(8px);
           box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+        }
+
+        .servicePriceBadge {
+          border-color: rgba(16, 185, 129, 0.2);
+          color: #065f46;
         }
 
         .tinyLike {
@@ -2767,8 +2998,12 @@ export default function FeedPage() {
           font-weight: 700;
         }
 
-        .noPhotoItems {
+        .noPhotoServices {
           background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), #f8fafc);
+        }
+
+        .noPhotoItems {
+          background: linear-gradient(135deg, rgba(148, 163, 184, 0.08), #f8fafc);
         }
 
         .noPhotoEvents {
@@ -2895,6 +3130,12 @@ export default function FeedPage() {
           border-color: rgba(59, 130, 246, 0.16);
         }
 
+        .eyebrowTag.serviceTag {
+          color: #065f46;
+          background: rgba(16, 185, 129, 0.1);
+          border-color: rgba(16, 185, 129, 0.18);
+        }
+
         .eyebrowTag.subtle {
           background: rgba(255, 255, 255, 0.84);
           color: #4b5563;
@@ -2969,6 +3210,11 @@ export default function FeedPage() {
           color: #6b7280;
           border: 1px solid #e5e7eb;
           box-shadow: none;
+        }
+
+        .serviceBtn {
+          background: #10b981;
+          box-shadow: 0 12px 24px rgba(16, 185, 129, 0.18);
         }
 
         .requestBtn {
@@ -3133,6 +3379,12 @@ export default function FeedPage() {
           object-fit: contain;
           display: block;
           background: #0b0f19;
+        }
+
+        @media (max-width: 640px) {
+          .segBtn {
+            font-size: 12px;
+          }
         }
 
         @media (max-width: 560px) {

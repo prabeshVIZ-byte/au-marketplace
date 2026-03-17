@@ -10,10 +10,29 @@ import { supabase } from "@/lib/supabaseClient";
    TYPES
 ========================= */
 
-type Mode = "give" | "request" | "event";
+type Mode = "service" | "request" | "item" | "event";
 type PostType = "give" | "request";
 
-type GiveCategory =
+type ServiceCategory =
+  | "tutoring"
+  | "hair"
+  | "nails"
+  | "baking"
+  | "photography"
+  | "tech help"
+  | "moving help"
+  | "cleaning help"
+  | "fitness coaching"
+  | "design & editing"
+  | "music lessons"
+  | "other service";
+
+type ServiceDelivery =
+  | "in_person"
+  | "remote"
+  | "either";
+
+type ItemCategory =
   | "books"
   | "notes"
   | "electronics"
@@ -30,16 +49,26 @@ type GiveCategory =
   | "lost & found"
   | "others";
 
-type PickupLocation =
+type CampusLocation =
   | "College Quad"
   | "Safety Service Office"
   | "Dining Hall"
   | "Library"
   | "Student Center";
 
-type RequestGroup = "logistics" | "services" | "urgent" | "collaboration";
+type RequestCategory =
+  | "tutoring"
+  | "beauty"
+  | "food"
+  | "moving help"
+  | "tech help"
+  | "design help"
+  | "cleaning help"
+  | "fitness help"
+  | "music help"
+  | "other help";
 
-type RequestTimeframe = "today" | "this_week" | "flexible";
+type RequestUrgency = "today" | "this_week" | "flexible";
 
 type EventCategory =
   | "career"
@@ -63,13 +92,19 @@ type DraftState = {
   title: string;
   description: string;
 
-  giveCategory: GiveCategory;
-  pickupLocation: PickupLocation;
-  price: string;
-  negotiable: boolean;
+  serviceCategory: ServiceCategory;
+  serviceDelivery: ServiceDelivery;
+  serviceLocation: string;
+  serviceRate: string;
+  serviceNegotiable: boolean;
 
-  requestGroup: RequestGroup;
-  requestTimeframe: RequestTimeframe;
+  itemCategory: ItemCategory;
+  pickupLocation: CampusLocation;
+  itemPrice: string;
+  itemNegotiable: boolean;
+
+  requestCategory: RequestCategory;
+  requestUrgency: RequestUrgency;
   requestLocation: string;
   requestWillingToPay: boolean;
   requestBudget: string;
@@ -109,14 +144,32 @@ const EVENT_FLYERS_BUCKET = "event-flyers";
 const MAX_ITEM_PHOTO_MB = 6;
 const MAX_EVENT_FLYER_MB = 8;
 
-const DRAFT_KEY = "scholarswap_create_phone_first_v3";
+const DRAFT_KEY = "scholarswap_create_gig_first_v1";
 const SUCCESS_ROUTE = "/feed";
 
-const GIVE_STEPS: StepKey[] = ["media", "write", "details", "review"];
+const SERVICE_STEPS: StepKey[] = ["media", "write", "details", "review"];
 const REQUEST_STEPS: StepKey[] = ["write", "details", "review"];
+const ITEM_STEPS: StepKey[] = ["media", "write", "details", "review"];
 const EVENT_STEPS: StepKey[] = ["media", "write", "details", "review"];
 
-const GIVE_CATEGORY_OPTIONS: GiveCategory[] = [
+const SERVICE_CATEGORY_OPTIONS: ServiceCategory[] = [
+  "tutoring",
+  "hair",
+  "nails",
+  "baking",
+  "photography",
+  "tech help",
+  "moving help",
+  "cleaning help",
+  "fitness coaching",
+  "design & editing",
+  "music lessons",
+  "other service",
+];
+
+const SERVICE_DELIVERY_OPTIONS: ServiceDelivery[] = ["in_person", "remote", "either"];
+
+const ITEM_CATEGORY_OPTIONS: ItemCategory[] = [
   "books",
   "notes",
   "electronics",
@@ -134,7 +187,7 @@ const GIVE_CATEGORY_OPTIONS: GiveCategory[] = [
   "others",
 ];
 
-const PICKUP_OPTIONS: PickupLocation[] = [
+const PICKUP_OPTIONS: CampusLocation[] = [
   "College Quad",
   "Safety Service Office",
   "Dining Hall",
@@ -142,18 +195,20 @@ const PICKUP_OPTIONS: PickupLocation[] = [
   "Student Center",
 ];
 
-const REQUEST_GROUP_OPTIONS: RequestGroup[] = [
-  "logistics",
-  "services",
-  "urgent",
-  "collaboration",
+const REQUEST_CATEGORY_OPTIONS: RequestCategory[] = [
+  "tutoring",
+  "beauty",
+  "food",
+  "moving help",
+  "tech help",
+  "design help",
+  "cleaning help",
+  "fitness help",
+  "music help",
+  "other help",
 ];
 
-const REQUEST_TIMEFRAME_OPTIONS: RequestTimeframe[] = [
-  "today",
-  "this_week",
-  "flexible",
-];
+const REQUEST_URGENCY_OPTIONS: RequestUrgency[] = ["today", "this_week", "flexible"];
 
 const EVENT_CATEGORY_OPTIONS: EventCategory[] = [
   "career",
@@ -180,13 +235,19 @@ function getDefaultDraft(): DraftState {
     title: "",
     description: "",
 
-    giveCategory: "books",
-    pickupLocation: "College Quad",
-    price: "",
-    negotiable: false,
+    serviceCategory: "tutoring",
+    serviceDelivery: "in_person",
+    serviceLocation: "",
+    serviceRate: "",
+    serviceNegotiable: false,
 
-    requestGroup: "logistics",
-    requestTimeframe: "today",
+    itemCategory: "books",
+    pickupLocation: "College Quad",
+    itemPrice: "",
+    itemNegotiable: false,
+
+    requestCategory: "tutoring",
+    requestUrgency: "today",
     requestLocation: "",
     requestWillingToPay: false,
     requestBudget: "",
@@ -208,8 +269,9 @@ function getDefaultDraft(): DraftState {
 }
 
 function getStepsForMode(mode: Mode | null): StepKey[] {
-  if (mode === "give") return GIVE_STEPS;
+  if (mode === "service") return SERVICE_STEPS;
   if (mode === "request") return REQUEST_STEPS;
+  if (mode === "item") return ITEM_STEPS;
   if (mode === "event") return EVENT_STEPS;
   return [];
 }
@@ -289,26 +351,35 @@ function formatLongDateTime(iso: string | null) {
   });
 }
 
-function giveCategoryLabel(v: GiveCategory) {
+function titleCaseWords(v: string) {
   return v
     .split(" ")
     .map((x) => x.charAt(0).toUpperCase() + x.slice(1))
     .join(" ");
 }
 
-function requestGroupLabel(v: RequestGroup) {
-  if (v === "logistics") return "Logistics";
-  if (v === "services") return "Services";
-  if (v === "urgent") return "Urgent";
-  if (v === "collaboration") return "Collaboration";
-  return "Request";
+function serviceCategoryLabel(v: ServiceCategory) {
+  return titleCaseWords(v);
 }
 
-function requestTimeframeLabel(v: RequestTimeframe) {
+function deliveryLabel(v: ServiceDelivery) {
+  if (v === "in_person") return "In person";
+  if (v === "remote") return "Remote";
+  return "Either";
+}
+
+function itemCategoryLabel(v: ItemCategory) {
+  return titleCaseWords(v);
+}
+
+function requestCategoryLabel(v: RequestCategory) {
+  return titleCaseWords(v);
+}
+
+function requestUrgencyLabel(v: RequestUrgency) {
   if (v === "today") return "Today";
   if (v === "this_week") return "This week";
-  if (v === "flexible") return "Flexible";
-  return "";
+  return "Flexible";
 }
 
 function eventCategoryLabel(v: EventCategory) {
@@ -325,20 +396,30 @@ function expireChoiceLabel(v: ExpireChoice) {
 
 function modeLabel(mode: Mode | null) {
   if (!mode) return "";
-  return mode.charAt(0).toUpperCase() + mode.slice(1);
+  if (mode === "service") return "Service";
+  if (mode === "request") return "Request";
+  if (mode === "item") return "Item";
+  return "Event";
 }
 
 function stepTitle(mode: Mode, stepKey: StepKey) {
-  if (mode === "give") {
-    if (stepKey === "media") return "Add a photo";
-    if (stepKey === "write") return "Describe the item";
-    if (stepKey === "details") return "Add item details";
+  if (mode === "service") {
+    if (stepKey === "media") return "Add a cover photo";
+    if (stepKey === "write") return "Describe your service";
+    if (stepKey === "details") return "Add service details";
     return "Review before posting";
   }
 
   if (mode === "request") {
     if (stepKey === "write") return "Write your request";
-    if (stepKey === "details") return "Add details";
+    if (stepKey === "details") return "Add request details";
+    return "Review before posting";
+  }
+
+  if (mode === "item") {
+    if (stepKey === "media") return "Add an item photo";
+    if (stepKey === "write") return "Describe the item";
+    if (stepKey === "details") return "Add item details";
     return "Review before posting";
   }
 
@@ -349,17 +430,24 @@ function stepTitle(mode: Mode, stepKey: StepKey) {
 }
 
 function stepSubtitle(mode: Mode, stepKey: StepKey) {
-  if (mode === "give") {
-    if (stepKey === "media") return "Photos make posts feel real and trustworthy.";
-    if (stepKey === "write") return "Tell students what it is and why it matters.";
-    if (stepKey === "details") return "Help people understand category and pickup quickly.";
-    return "Check everything once before sharing.";
+  if (mode === "service") {
+    if (stepKey === "media") return "A real photo makes service providers look more trustworthy.";
+    if (stepKey === "write") return "State clearly what you do, for whom, and what makes you good.";
+    if (stepKey === "details") return "Price, delivery style, and location reduce back-and-forth.";
+    return "Check everything once before going live.";
   }
 
   if (mode === "request") {
-    if (stepKey === "write") return "Be specific so people can actually help.";
-    if (stepKey === "details") return "Set urgency and context clearly.";
+    if (stepKey === "write") return "Specific requests get better responses than vague ones.";
+    if (stepKey === "details") return "Clarify urgency, budget, and where the help is needed.";
     return "Check the request before posting.";
+  }
+
+  if (mode === "item") {
+    if (stepKey === "media") return "A strong photo increases trust and clicks.";
+    if (stepKey === "write") return "Make it obvious what the item is and its condition.";
+    if (stepKey === "details") return "Price and pickup should be easy to understand.";
+    return "Check everything once before sharing.";
   }
 
   if (stepKey === "media") return "A strong flyer makes the event feel alive.";
@@ -392,11 +480,21 @@ function parseOptionalPrice(raw: string) {
   return value;
 }
 
-function formatPriceLabel(raw: string, negotiable: boolean) {
+function formatPriceLabel(raw: string, negotiable: boolean, emptyLabel = "Free / not listed") {
   const parsed = parseOptionalPrice(raw);
-  if (parsed === null) return "Free";
+  if (parsed === null) return emptyLabel;
   if (Number.isNaN(parsed)) return "Invalid price";
   return `$${parsed.toFixed(2)}${negotiable ? " • Negotiable" : " • Fixed"}`;
+}
+
+function buildServiceDescription(draft: DraftState, cleanDesc: string) {
+  const meta = [
+    `Service category: ${serviceCategoryLabel(draft.serviceCategory)}`,
+    `Delivery: ${deliveryLabel(draft.serviceDelivery)}`,
+    `Location/area: ${draft.serviceLocation.trim() || "Not specified"}`,
+    `Rate: ${formatPriceLabel(draft.serviceRate, draft.serviceNegotiable, "Contact for pricing")}`,
+  ];
+  return `${cleanDesc}\n\n---\n${meta.join("\n")}`;
 }
 
 /* =========================
@@ -464,9 +562,7 @@ export default function CreatePage() {
   }, [eventStartIso, eventEndIso]);
 
   useEffect(() => {
-    const updateDevice = () => {
-      setIsDesktop(window.innerWidth >= 1024);
-    };
+    const updateDevice = () => setIsDesktop(window.innerWidth >= 1024);
     updateDevice();
     window.addEventListener("resize", updateDevice);
     return () => window.removeEventListener("resize", updateDevice);
@@ -722,11 +818,15 @@ export default function CreatePage() {
 
   function validateStep(stepKey: StepKey): ValidationResult {
     if (!draft.mode) {
-      return { ok: false, message: "Choose Give, Request, or Event first.", section: "type" };
+      return {
+        ok: false,
+        message: "Choose Service, Request, Item, or Event first.",
+        section: "type",
+      };
     }
 
     if (stepKey === "media") {
-      if (draft.mode === "give" && !itemFile) {
+      if ((draft.mode === "service" || draft.mode === "item") && !itemFile) {
         return { ok: false, message: "Add a photo to continue.", section: "media" };
       }
       if (draft.mode === "event" && !eventFile) {
@@ -744,15 +844,28 @@ export default function CreatePage() {
     }
 
     if (stepKey === "details") {
-      if (draft.mode === "give") {
-        if (!draft.giveCategory) {
-          return { ok: false, message: "Choose a category.", section: "details" };
+      if (draft.mode === "service") {
+        const parsedRate = parseOptionalPrice(draft.serviceRate);
+        if (Number.isNaN(parsedRate)) {
+          return {
+            ok: false,
+            message: "Rate must be a valid number with up to 2 decimals.",
+            section: "details",
+          };
+        }
+        if (!draft.serviceCategory) {
+          return { ok: false, message: "Choose a service category.", section: "details" };
+        }
+      }
+
+      if (draft.mode === "item") {
+        if (!draft.itemCategory) {
+          return { ok: false, message: "Choose an item category.", section: "details" };
         }
         if (!draft.pickupLocation) {
           return { ok: false, message: "Choose a pickup location.", section: "details" };
         }
-
-        const parsedPrice = parseOptionalPrice(draft.price);
+        const parsedPrice = parseOptionalPrice(draft.itemPrice);
         if (Number.isNaN(parsedPrice)) {
           return {
             ok: false,
@@ -763,13 +876,6 @@ export default function CreatePage() {
       }
 
       if (draft.mode === "request") {
-        if (!draft.requestGroup) {
-          return { ok: false, message: "Choose a request type.", section: "details" };
-        }
-        if (!draft.requestTimeframe) {
-          return { ok: false, message: "Choose a timeframe.", section: "details" };
-        }
-
         const parsedBudget = parseOptionalPrice(draft.requestBudget);
         if (Number.isNaN(parsedBudget)) {
           return {
@@ -825,7 +931,11 @@ export default function CreatePage() {
 
   function validateBeforeSubmit(): ValidationResult {
     if (!draft.mode) {
-      return { ok: false, message: "Choose Give, Request, or Event first.", section: "type" };
+      return {
+        ok: false,
+        message: "Choose Service, Request, Item, or Event first.",
+        section: "type",
+      };
     }
 
     if (!isLoggedIn) {
@@ -982,9 +1092,11 @@ export default function CreatePage() {
         return;
       }
 
-      const postType: PostType = draft.mode === "give" ? "give" : "request";
+      const postType: PostType = draft.mode === "request" ? "request" : "give";
       const { untilCancel, expiresAt } = computeExpiry(draft.expireChoice);
-      const parsedPrice = parseOptionalPrice(draft.price);
+
+      const parsedServiceRate = parseOptionalPrice(draft.serviceRate);
+      const parsedItemPrice = parseOptionalPrice(draft.itemPrice);
       const parsedRequestBudget = parseOptionalPrice(draft.requestBudget);
 
       const itemInsert: {
@@ -1018,23 +1130,34 @@ export default function CreatePage() {
         post_type: postType,
       };
 
-      if (postType === "give") {
-        itemInsert.category = draft.giveCategory;
+      if (draft.mode === "service") {
+        itemInsert.category = `service:${draft.serviceCategory}`;
+        itemInsert.pickup_location = draft.serviceLocation.trim() || deliveryLabel(draft.serviceDelivery);
+        itemInsert.price = parsedServiceRate === null ? null : parsedServiceRate;
+        itemInsert.is_negotiable = parsedServiceRate === null ? false : draft.serviceNegotiable;
+        itemInsert.request_group = `service_offer:${draft.serviceDelivery}`;
+        itemInsert.request_timeframe = null;
+        itemInsert.request_location = draft.serviceLocation.trim() || null;
+        itemInsert.request_willing_to_pay = null;
+        itemInsert.request_budget = null;
+        itemInsert.description = buildServiceDescription(draft, cleanDesc);
+      } else if (draft.mode === "item") {
+        itemInsert.category = draft.itemCategory;
         itemInsert.pickup_location = draft.pickupLocation;
-        itemInsert.price = parsedPrice === null ? null : parsedPrice;
-        itemInsert.is_negotiable = parsedPrice === null ? false : draft.negotiable;
+        itemInsert.price = parsedItemPrice === null ? null : parsedItemPrice;
+        itemInsert.is_negotiable = parsedItemPrice === null ? false : draft.itemNegotiable;
         itemInsert.request_group = null;
         itemInsert.request_timeframe = null;
         itemInsert.request_location = null;
         itemInsert.request_willing_to_pay = null;
         itemInsert.request_budget = null;
       } else {
-        itemInsert.category = "others";
+        itemInsert.category = `request:${draft.requestCategory}`;
         itemInsert.pickup_location = null;
         itemInsert.price = null;
         itemInsert.is_negotiable = false;
-        itemInsert.request_group = draft.requestGroup;
-        itemInsert.request_timeframe = draft.requestTimeframe;
+        itemInsert.request_group = draft.requestCategory;
+        itemInsert.request_timeframe = draft.requestUrgency;
         itemInsert.request_location = draft.requestLocation.trim() || null;
         itemInsert.request_willing_to_pay = draft.requestWillingToPay;
         itemInsert.request_budget =
@@ -1053,7 +1176,7 @@ export default function CreatePage() {
 
       const itemId = String(createdItem.id);
 
-      if (postType === "request") {
+      if (draft.mode === "request") {
         resetComposer();
         router.push(`/item/${itemId}`);
         router.refresh();
@@ -1127,8 +1250,9 @@ export default function CreatePage() {
     if (saving) return "Posting...";
     if (!draft.mode) return "Continue";
     if (currentStep !== "review") return "Continue";
-    if (draft.mode === "give") return "Share item";
+    if (draft.mode === "service") return "Post service";
     if (draft.mode === "request") return "Post request";
+    if (draft.mode === "item") return "Post item";
     return "Publish event";
   }
 
@@ -1144,11 +1268,11 @@ export default function CreatePage() {
   function renderModePicker() {
     return (
       <div style={{ display: "grid", gap: 14 }}>
-        <button type="button" onClick={() => selectMode("give")} style={modeCard("warm")}>
-          <div style={modeIconBox}>🎁</div>
+        <button type="button" onClick={() => selectMode("service")} style={modeCard("warm")}>
+          <div style={modeIconBox}>✂️</div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={modeTitle}>Give</div>
-            <div style={modeDesc}>Share something useful with campus</div>
+            <div style={modeTitle}>Offer a service</div>
+            <div style={modeDesc}>Hair, tutoring, baking, nails, tech help, and more</div>
           </div>
           <div style={modeArrow}>→</div>
         </button>
@@ -1156,8 +1280,17 @@ export default function CreatePage() {
         <button type="button" onClick={() => selectMode("request")} style={modeCard("blue")}>
           <div style={modeIconBox}>🤝</div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={modeTitle}>Request</div>
-            <div style={modeDesc}>Ask the campus community for help</div>
+            <div style={modeTitle}>Request help</div>
+            <div style={modeDesc}>Ask the campus community for a gig or service</div>
+          </div>
+          <div style={modeArrow}>→</div>
+        </button>
+
+        <button type="button" onClick={() => selectMode("item")} style={modeCard("neutral")}>
+          <div style={modeIconBox}>📦</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={modeTitle}>Post an item</div>
+            <div style={modeDesc}>Items still matter, but they are secondary now</div>
           </div>
           <div style={modeArrow}>→</div>
         </button>
@@ -1208,22 +1341,29 @@ export default function CreatePage() {
   function renderMediaStep() {
     if (!draft.mode || currentStep !== "media") return null;
 
-    const isGive = draft.mode === "give";
-    const file = isGive ? itemFile : eventFile;
-    const preview = isGive ? itemPreviewUrl : eventPreviewUrl;
-    const savedName = isGive ? draft.itemFileName : draft.eventFileName;
+    const isEvent = draft.mode === "event";
+    const file = isEvent ? eventFile : itemFile;
+    const preview = isEvent ? eventPreviewUrl : itemPreviewUrl;
+    const savedName = isEvent ? draft.eventFileName : draft.itemFileName;
+    const title =
+      draft.mode === "service"
+        ? "Upload service photo"
+        : draft.mode === "item"
+        ? "Upload item photo"
+        : "Upload event flyer";
+    const icon = draft.mode === "service" ? "📸" : draft.mode === "item" ? "📷" : "🎫";
 
     return (
       <section style={screenCard(fieldError === "media")}>
         <div style={heroUploadWrap}>
           <input
-            ref={isGive ? itemFileInputRef : eventFileInputRef}
+            ref={isEvent ? eventFileInputRef : itemFileInputRef}
             type="file"
             accept="image/jpeg,image/png,image/webp"
             onChange={(e) =>
-              isGive
-                ? pickItemFile(e.target.files?.[0] ?? null)
-                : pickEventFile(e.target.files?.[0] ?? null)
+              isEvent
+                ? pickEventFile(e.target.files?.[0] ?? null)
+                : pickItemFile(e.target.files?.[0] ?? null)
             }
             style={{ display: "none" }}
           />
@@ -1231,7 +1371,7 @@ export default function CreatePage() {
           <button
             type="button"
             onClick={() =>
-              isGive ? itemFileInputRef.current?.click() : eventFileInputRef.current?.click()
+              isEvent ? eventFileInputRef.current?.click() : itemFileInputRef.current?.click()
             }
             style={heroUploadButton}
           >
@@ -1240,10 +1380,8 @@ export default function CreatePage() {
               <img src={preview} alt="Preview" style={heroUploadImage} />
             ) : (
               <div style={heroUploadPlaceholder}>
-                <div style={{ fontSize: 54 }}>{isGive ? "📷" : "🎫"}</div>
-                <div style={{ marginTop: 14, fontSize: 24, fontWeight: 1000 }}>
-                  {isGive ? "Upload item photo" : "Upload event flyer"}
-                </div>
+                <div style={{ fontSize: 54 }}>{icon}</div>
+                <div style={{ marginTop: 14, fontSize: 24, fontWeight: 1000 }}>{title}</div>
                 <div style={{ marginTop: 8, color: "#64748b", fontSize: 14, fontWeight: 700 }}>
                   JPG, PNG, or WEBP
                 </div>
@@ -1265,7 +1403,7 @@ export default function CreatePage() {
             {file && (
               <button
                 type="button"
-                onClick={() => (isGive ? pickItemFile(null) : pickEventFile(null))}
+                onClick={() => (isEvent ? pickEventFile(null) : pickItemFile(null))}
                 style={removeBtn}
               >
                 Remove
@@ -1289,10 +1427,12 @@ export default function CreatePage() {
             onChange={(e) => patchDraft("title", e.target.value)}
             style={titleInputModern}
             placeholder={
-              draft.mode === "give"
-                ? "What are you sharing?"
+              draft.mode === "service"
+                ? "What service are you offering?"
                 : draft.mode === "request"
-                ? "What do you need?"
+                ? "What help do you need?"
+                : draft.mode === "item"
+                ? "What item are you posting?"
                 : "What’s your event called?"
             }
             autoFocus
@@ -1301,8 +1441,10 @@ export default function CreatePage() {
 
         <div style={{ marginTop: 18 }}>
           <label style={fieldLabelModern}>
-            {draft.mode === "request"
-              ? "Details"
+            {draft.mode === "service"
+              ? "Service description"
+              : draft.mode === "request"
+              ? "Request details"
               : draft.mode === "event"
               ? "Why should people come?"
               : "Description"}
@@ -1313,18 +1455,22 @@ export default function CreatePage() {
             style={textareaModern}
             rows={7}
             placeholder={
-              draft.mode === "give"
-                ? "Mention condition, quantity, and anything important about pickup."
+              draft.mode === "service"
+                ? "Explain exactly what you do, your experience, what is included, and who this is for."
                 : draft.mode === "request"
-                ? "Explain exactly what you need, and by when."
+                ? "Explain exactly what you need, when you need it, and what a helpful response looks like."
+                : draft.mode === "item"
+                ? "Mention condition, quantity, and anything important about pickup."
                 : "Tell students what this is, who it is for, and why they should care."
             }
           />
         </div>
 
         <div style={tipCard}>
-          {draft.mode === "give" && "The clearest give posts usually get picked up first."}
+          {draft.mode === "service" &&
+            "The best service posts sound specific, credible, and easy to book."}
           {draft.mode === "request" && "Specific asks get better responses than vague ones."}
+          {draft.mode === "item" && "The clearest item posts usually move first."}
           {draft.mode === "event" && "Lead with the value of the event, not just the logistics."}
         </div>
       </section>
@@ -1334,22 +1480,155 @@ export default function CreatePage() {
   function renderDetailsStep() {
     if (!draft.mode || currentStep !== "details") return null;
 
-    if (draft.mode === "give") {
-      const hasPrice = draft.price.trim().length > 0;
+    if (draft.mode === "service") {
+      const hasRate = draft.serviceRate.trim().length > 0;
 
       return (
         <section style={screenCard(fieldError === "details")}>
           <div style={detailGroup}>
-            <div style={fieldLabelModern}>Category</div>
+            <div style={fieldLabelModern}>Service category</div>
             <div style={choiceGrid}>
-              {GIVE_CATEGORY_OPTIONS.map((v) => (
+              {SERVICE_CATEGORY_OPTIONS.map((v) => (
                 <button
                   key={v}
                   type="button"
-                  onClick={() => patchDraft("giveCategory", v)}
-                  style={choiceTile(draft.giveCategory === v, "warm")}
+                  onClick={() => patchDraft("serviceCategory", v)}
+                  style={choiceTile(draft.serviceCategory === v, "warm")}
                 >
-                  {giveCategoryLabel(v)}
+                  {serviceCategoryLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>How do you deliver it?</div>
+            <div style={segmentedTripletWrap}>
+              {SERVICE_DELIVERY_OPTIONS.map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("serviceDelivery", v)}
+                  style={segmentBtn(draft.serviceDelivery === v)}
+                >
+                  {deliveryLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Location / service area</div>
+            <input
+              value={draft.serviceLocation}
+              onChange={(e) => patchDraft("serviceLocation", e.target.value)}
+              style={softInputModern}
+              placeholder="Optional. Example: Campus, off-campus, online, dorm area"
+            />
+          </div>
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Rate (optional)</div>
+            <input
+              value={draft.serviceRate}
+              onChange={(e) => {
+                const next = sanitizePriceInput(e.target.value);
+                setDraft((prev) => ({
+                  ...prev,
+                  serviceRate: next,
+                  serviceNegotiable: next.trim().length > 0 ? prev.serviceNegotiable : false,
+                }));
+                setMsg(null);
+                setFieldError(null);
+              }}
+              style={softInputModern}
+              placeholder="Leave blank if quote-based"
+              inputMode="decimal"
+            />
+          </div>
+
+          {hasRate && (
+            <div style={detailGroup}>
+              <div style={fieldLabelModern}>Pricing style</div>
+              <div style={segmentedWrap}>
+                <button
+                  type="button"
+                  onClick={() => patchDraft("serviceNegotiable", false)}
+                  style={segmentBtn(!draft.serviceNegotiable)}
+                >
+                  Fixed rate
+                </button>
+                <button
+                  type="button"
+                  onClick={() => patchDraft("serviceNegotiable", true)}
+                  style={segmentBtn(draft.serviceNegotiable)}
+                >
+                  Negotiable
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div style={dividerLine} />
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Visibility</div>
+            <div style={segmentedWrap}>
+              <button
+                type="button"
+                onClick={() => patchDraft("hideName", false)}
+                style={segmentBtn(!draft.hideName)}
+              >
+                Show my name
+              </button>
+              <button
+                type="button"
+                onClick={() => patchDraft("hideName", true)}
+                style={segmentBtn(draft.hideName)}
+              >
+                Anonymous
+              </button>
+            </div>
+          </div>
+
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Auto-close</div>
+            <div style={choiceGrid}>
+              {EXPIRE_OPTIONS.map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("expireChoice", v)}
+                  style={choiceTile(
+                    draft.expireChoice === v,
+                    v === "urgent24" ? "danger" : "neutral"
+                  )}
+                >
+                  {expireChoiceLabel(v)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+      );
+    }
+
+    if (draft.mode === "item") {
+      const hasPrice = draft.itemPrice.trim().length > 0;
+
+      return (
+        <section style={screenCard(fieldError === "details")}>
+          <div style={detailGroup}>
+            <div style={fieldLabelModern}>Item category</div>
+            <div style={choiceGrid}>
+              {ITEM_CATEGORY_OPTIONS.map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => patchDraft("itemCategory", v)}
+                  style={choiceTile(draft.itemCategory === v, "neutral")}
+                >
+                  {itemCategoryLabel(v)}
                 </button>
               ))}
             </div>
@@ -1374,13 +1653,13 @@ export default function CreatePage() {
           <div style={detailGroup}>
             <div style={fieldLabelModern}>Price (optional)</div>
             <input
-              value={draft.price}
+              value={draft.itemPrice}
               onChange={(e) => {
                 const next = sanitizePriceInput(e.target.value);
                 setDraft((prev) => ({
                   ...prev,
-                  price: next,
-                  negotiable: next.trim().length > 0 ? prev.negotiable : false,
+                  itemPrice: next,
+                  itemNegotiable: next.trim().length > 0 ? prev.itemNegotiable : false,
                 }));
                 setMsg(null);
                 setFieldError(null);
@@ -1397,15 +1676,15 @@ export default function CreatePage() {
               <div style={segmentedWrap}>
                 <button
                   type="button"
-                  onClick={() => patchDraft("negotiable", false)}
-                  style={segmentBtn(!draft.negotiable)}
+                  onClick={() => patchDraft("itemNegotiable", false)}
+                  style={segmentBtn(!draft.itemNegotiable)}
                 >
                   Fixed price
                 </button>
                 <button
                   type="button"
-                  onClick={() => patchDraft("negotiable", true)}
-                  style={segmentBtn(draft.negotiable)}
+                  onClick={() => patchDraft("itemNegotiable", true)}
+                  style={segmentBtn(draft.itemNegotiable)}
                 >
                   Negotiable
                 </button>
@@ -1461,32 +1740,32 @@ export default function CreatePage() {
       return (
         <section style={screenCard(fieldError === "details")}>
           <div style={detailGroup}>
-            <div style={fieldLabelModern}>Request type</div>
+            <div style={fieldLabelModern}>What kind of help?</div>
             <div style={choiceGrid}>
-              {REQUEST_GROUP_OPTIONS.map((v) => (
+              {REQUEST_CATEGORY_OPTIONS.map((v) => (
                 <button
                   key={v}
                   type="button"
-                  onClick={() => patchDraft("requestGroup", v)}
-                  style={choiceTile(draft.requestGroup === v, v === "urgent" ? "danger" : "blue")}
+                  onClick={() => patchDraft("requestCategory", v)}
+                  style={choiceTile(draft.requestCategory === v, "blue")}
                 >
-                  {requestGroupLabel(v)}
+                  {requestCategoryLabel(v)}
                 </button>
               ))}
             </div>
           </div>
 
           <div style={detailGroup}>
-            <div style={fieldLabelModern}>Timeframe</div>
+            <div style={fieldLabelModern}>Urgency</div>
             <div style={segmentedTripletWrap}>
-              {REQUEST_TIMEFRAME_OPTIONS.map((v) => (
+              {REQUEST_URGENCY_OPTIONS.map((v) => (
                 <button
                   key={v}
                   type="button"
-                  onClick={() => patchDraft("requestTimeframe", v)}
-                  style={segmentBtn(draft.requestTimeframe === v)}
+                  onClick={() => patchDraft("requestUrgency", v)}
+                  style={segmentBtn(draft.requestUrgency === v)}
                 >
-                  {requestTimeframeLabel(v)}
+                  {requestUrgencyLabel(v)}
                 </button>
               ))}
             </div>
@@ -1498,7 +1777,7 @@ export default function CreatePage() {
               value={draft.requestLocation}
               onChange={(e) => patchDraft("requestLocation", e.target.value)}
               style={softInputModern}
-              placeholder="Optional location"
+              placeholder="Optional. Example: campus, library, off-campus, remote"
             />
           </div>
 
@@ -1708,29 +1987,30 @@ export default function CreatePage() {
   function renderReviewCard() {
     if (!draft.mode) return null;
 
-    if (draft.mode === "give") {
+    if (draft.mode === "service") {
       return (
         <div style={previewCard}>
           <div style={previewMediaWrap}>
             {itemPreviewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={itemPreviewUrl} alt="Item preview" style={previewImage} />
+              <img src={itemPreviewUrl} alt="Service preview" style={previewImage} />
             ) : (
               <div style={previewPlaceholder}>No image selected</div>
             )}
-            <div style={previewBadge("#fff7ed", "#9a3412", "#fdba74")}>GIVE</div>
+            <div style={previewBadge("#fff7ed", "#9a3412", "#fdba74")}>SERVICE</div>
           </div>
 
           <div style={previewBody}>
             <div style={previewMeta}>
-              {giveCategoryLabel(draft.giveCategory)} • {draft.pickupLocation}
+              {serviceCategoryLabel(draft.serviceCategory)} • {deliveryLabel(draft.serviceDelivery)}
             </div>
-            <div style={previewHeadline}>{cleanTitle || "Untitled post"}</div>
+            <div style={previewHeadline}>{cleanTitle || "Untitled service"}</div>
             <div style={{ marginTop: 8, fontSize: 13, fontWeight: 900, color: "#9a3412" }}>
-              {formatPriceLabel(draft.price, draft.negotiable)}
+              {formatPriceLabel(draft.serviceRate, draft.serviceNegotiable, "Contact for pricing")}
             </div>
             <div style={previewText}>{cleanDesc || "No description yet."}</div>
             <div style={previewFooter}>
+              {draft.serviceLocation.trim() || "No location added"} •{" "}
               {draft.hideName ? "Anonymous" : "Visible name"} •{" "}
               {expireChoiceLabel(draft.expireChoice)}
             </div>
@@ -1752,10 +2032,10 @@ export default function CreatePage() {
             <div style={{ padding: 18, width: "100%" }}>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>
-                  {requestGroupLabel(draft.requestGroup)}
+                  {requestCategoryLabel(draft.requestCategory)}
                 </span>
                 <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>
-                  {requestTimeframeLabel(draft.requestTimeframe)}
+                  {requestUrgencyLabel(draft.requestUrgency)}
                 </span>
                 {draft.requestWillingToPay && (
                   <span style={miniPill("#dbeafe", "#1d4ed8", "#93c5fd")}>Willing to pay</span>
@@ -1774,6 +2054,37 @@ export default function CreatePage() {
             <div style={previewText}>{cleanDesc || "No description yet."}</div>
             <div style={previewFooter}>
               {draft.requestLocation.trim() || "No location added"} •{" "}
+              {draft.hideName ? "Anonymous" : "Visible name"} •{" "}
+              {expireChoiceLabel(draft.expireChoice)}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (draft.mode === "item") {
+      return (
+        <div style={previewCard}>
+          <div style={previewMediaWrap}>
+            {itemPreviewUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={itemPreviewUrl} alt="Item preview" style={previewImage} />
+            ) : (
+              <div style={previewPlaceholder}>No image selected</div>
+            )}
+            <div style={previewBadge("#f8fafc", "#0f172a", "#cbd5e1")}>ITEM</div>
+          </div>
+
+          <div style={previewBody}>
+            <div style={previewMeta}>
+              {itemCategoryLabel(draft.itemCategory)} • {draft.pickupLocation}
+            </div>
+            <div style={previewHeadline}>{cleanTitle || "Untitled item"}</div>
+            <div style={{ marginTop: 8, fontSize: 13, fontWeight: 900, color: "#0f172a" }}>
+              {formatPriceLabel(draft.itemPrice, draft.itemNegotiable)}
+            </div>
+            <div style={previewText}>{cleanDesc || "No description yet."}</div>
+            <div style={previewFooter}>
               {draft.hideName ? "Anonymous" : "Visible name"} •{" "}
               {expireChoiceLabel(draft.expireChoice)}
             </div>
@@ -1822,19 +2133,25 @@ export default function CreatePage() {
             <span style={reviewValue}>{modeLabel(draft.mode)}</span>
           </div>
 
-          {draft.mode === "give" && (
+          {draft.mode === "service" && (
             <>
               <div style={reviewRow}>
                 <span style={reviewLabel}>Category</span>
-                <span style={reviewValue}>{giveCategoryLabel(draft.giveCategory)}</span>
+                <span style={reviewValue}>{serviceCategoryLabel(draft.serviceCategory)}</span>
               </div>
               <div style={reviewRow}>
-                <span style={reviewLabel}>Pickup</span>
-                <span style={reviewValue}>{draft.pickupLocation}</span>
+                <span style={reviewLabel}>Delivery</span>
+                <span style={reviewValue}>{deliveryLabel(draft.serviceDelivery)}</span>
               </div>
               <div style={reviewRow}>
-                <span style={reviewLabel}>Price</span>
-                <span style={reviewValue}>{formatPriceLabel(draft.price, draft.negotiable)}</span>
+                <span style={reviewLabel}>Location</span>
+                <span style={reviewValue}>{draft.serviceLocation.trim() || "None"}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Rate</span>
+                <span style={reviewValue}>
+                  {formatPriceLabel(draft.serviceRate, draft.serviceNegotiable, "Contact for pricing")}
+                </span>
               </div>
               <div style={reviewRow}>
                 <span style={reviewLabel}>Auto-close</span>
@@ -1846,16 +2163,47 @@ export default function CreatePage() {
           {draft.mode === "request" && (
             <>
               <div style={reviewRow}>
-                <span style={reviewLabel}>Request type</span>
-                <span style={reviewValue}>{requestGroupLabel(draft.requestGroup)}</span>
+                <span style={reviewLabel}>Help type</span>
+                <span style={reviewValue}>{requestCategoryLabel(draft.requestCategory)}</span>
               </div>
               <div style={reviewRow}>
-                <span style={reviewLabel}>Timeframe</span>
-                <span style={reviewValue}>{requestTimeframeLabel(draft.requestTimeframe)}</span>
+                <span style={reviewLabel}>Urgency</span>
+                <span style={reviewValue}>{requestUrgencyLabel(draft.requestUrgency)}</span>
               </div>
               <div style={reviewRow}>
                 <span style={reviewLabel}>Location</span>
                 <span style={reviewValue}>{draft.requestLocation.trim() || "None"}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Budget</span>
+                <span style={reviewValue}>
+                  {draft.requestWillingToPay
+                    ? formatPriceLabel(draft.requestBudget, false, "Open to discuss")
+                    : "Not offering payment"}
+                </span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Auto-close</span>
+                <span style={reviewValue}>{expireChoiceLabel(draft.expireChoice)}</span>
+              </div>
+            </>
+          )}
+
+          {draft.mode === "item" && (
+            <>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Category</span>
+                <span style={reviewValue}>{itemCategoryLabel(draft.itemCategory)}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Pickup</span>
+                <span style={reviewValue}>{draft.pickupLocation}</span>
+              </div>
+              <div style={reviewRow}>
+                <span style={reviewLabel}>Price</span>
+                <span style={reviewValue}>
+                  {formatPriceLabel(draft.itemPrice, draft.itemNegotiable)}
+                </span>
               </div>
               <div style={reviewRow}>
                 <span style={reviewLabel}>Auto-close</span>
@@ -1983,7 +2331,10 @@ export default function CreatePage() {
           <>
             <div style={heroHeader}>
               <div style={heroTitle}>Create</div>
-              <div style={heroSubtitle}>What do you want to share today?</div>
+              <div style={heroSubtitle}>
+                Lead with gigs and services first. Items still exist, but they are no longer the
+                center.
+              </div>
             </div>
 
             <div style={accountCard}>
@@ -2186,13 +2537,15 @@ const desktopStickyPreview: React.CSSProperties = {
   top: 16,
 };
 
-function modeCard(tone: "warm" | "blue" | "purple"): React.CSSProperties {
+function modeCard(tone: "warm" | "blue" | "purple" | "neutral"): React.CSSProperties {
   const palette =
     tone === "warm"
       ? { bg: "linear-gradient(135deg, #fff7ed 0%, #ffffff 100%)", border: "#fed7aa" }
       : tone === "blue"
       ? { bg: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)", border: "#bfdbfe" }
-      : { bg: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%)", border: "#c4b5fd" };
+      : tone === "purple"
+      ? { bg: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%)", border: "#c4b5fd" }
+      : { bg: "linear-gradient(135deg, #f8fafc 0%, #ffffff 100%)", border: "#cbd5e1" };
 
   return {
     width: "100%",
