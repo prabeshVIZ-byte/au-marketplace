@@ -15,6 +15,8 @@ const LOVES_TABLE = "post_likes";
 
 type PostType = "give" | "request";
 
+type ListingKind = "item" | "service" | "request";
+
 type InterestStatus =
   | "pending"
   | "accepted"
@@ -166,7 +168,7 @@ type SlideActionProps = {
   busyLabel: string;
   disabled?: boolean;
   busy?: boolean;
-  tone: "give" | "request";
+  tone: "item" | "service" | "request";
   successKey: string;
   activeSuccessKey: string | null;
   onComplete: () => Promise<void> | void;
@@ -185,14 +187,12 @@ function normStatus(v: string | null | undefined) {
   return (v ?? "").trim().toLowerCase();
 }
 
-function requestGroupLabel(v: string | null) {
-  const k = normStatus(v);
-  if (k === "logistics") return "Logistics";
-  if (k === "services") return "Services";
-  if (k === "urgent") return "Urgent";
-  if (k === "collaboration") return "Collaboration";
-  if (k === "lost & found") return "Lost & Found";
-  return "Request";
+function titleCaseWords(v: string) {
+  return v
+    .split(" ")
+    .filter(Boolean)
+    .map((x) => x.charAt(0).toUpperCase() + x.slice(1))
+    .join(" ");
 }
 
 function requestTimeframeLabel(v: string | null) {
@@ -203,12 +203,14 @@ function requestTimeframeLabel(v: string | null) {
   return "";
 }
 
+function readableRequestGroup(v: string | null) {
+  const raw = (v ?? "").trim();
+  if (!raw) return "Request";
+  return titleCaseWords(raw.replace(/_/g, " "));
+}
+
 function giveCategoryLabel(v: string | null) {
-  return (v ?? "")
-    .split(" ")
-    .filter(Boolean)
-    .map((x) => x.charAt(0).toUpperCase() + x.slice(1))
-    .join(" ");
+  return titleCaseWords(v ?? "");
 }
 
 function formatDelist(expiresAt: string | null) {
@@ -238,18 +240,19 @@ function formatFullWhen(ts: string | null | undefined) {
   });
 }
 
-function formatPrice(price: number | null | undefined) {
-  if (price === null || price === undefined) return "Free";
+function formatPrice(price: number | null | undefined, fallback = "Free") {
+  if (price === null || price === undefined) return fallback;
   const n = Number(price);
-  if (!Number.isFinite(n)) return "Free";
+  if (!Number.isFinite(n)) return fallback;
   return `$${n.toFixed(2)}`;
 }
 
 function formatPriceWithNegotiable(
   price: number | null | undefined,
-  isNegotiable: boolean | null | undefined
+  isNegotiable: boolean | null | undefined,
+  fallback = "Free"
 ) {
-  const base = formatPrice(price);
+  const base = formatPrice(price, fallback);
   if (price === null || price === undefined) return base;
   return isNegotiable ? `${base} • Negotiable` : `${base} • Fixed`;
 }
@@ -287,7 +290,57 @@ function isExpired(expiresAt: string | null | undefined) {
   return ts <= Date.now();
 }
 
-function isGiveClosed(item: ItemRow | null) {
+function detectListingKind(item: ItemRow | null): ListingKind {
+  if (!item) return "item";
+  if ((item.post_type ?? "give") === "request") return "request";
+
+  const category = normStatus(item.category);
+  const requestGroup = normStatus(item.request_group);
+
+  if (category.startsWith("service:") || requestGroup.startsWith("service_offer:")) {
+    return "service";
+  }
+
+  return "item";
+}
+
+function serviceCategoryLabel(item: ItemRow | null) {
+  if (!item) return "Service";
+
+  const category = (item.category ?? "").trim();
+  if (category.toLowerCase().startsWith("service:")) {
+    return titleCaseWords(category.replace(/^service:/i, "").replace(/_/g, " "));
+  }
+
+  return "Service";
+}
+
+function serviceDeliveryLabel(item: ItemRow | null) {
+  if (!item) return "Flexible";
+
+  const raw = normStatus(item.request_group);
+  if (raw.startsWith("service_offer:")) {
+    const v = raw.replace(/^service_offer:/, "");
+    if (v === "in_person") return "In person";
+    if (v === "remote") return "Remote";
+    if (v === "either") return "Either";
+  }
+
+  return "Flexible";
+}
+
+function requestCategoryLabel(item: ItemRow | null) {
+  if (!item) return "Request";
+
+  const category = (item.category ?? "").trim();
+  if (category.toLowerCase().startsWith("request:")) {
+    return titleCaseWords(category.replace(/^request:/i, "").replace(/_/g, " "));
+  }
+
+  return readableRequestGroup(item.request_group);
+}
+
+function isGiveLikeClosed(item: ItemRow | null) {
   if (!item) return false;
   const st = normStatus(item.status);
   return st === "claimed" || st === "completed" || isExpired(item.expires_at);
@@ -299,11 +352,10 @@ function isRequestClosed(item: ItemRow | null) {
   return st === "claimed" || st === "completed" || isExpired(item.expires_at);
 }
 
-function getStatusChip(item: ItemRow | null) {
+function getStatusChip(item: ItemRow | null, listingKind: ListingKind) {
   if (!item) return { label: "Loading", tone: "neutral" as const };
 
   const st = normStatus(item.status);
-  const isGive = (item.post_type ?? "give") === "give";
 
   if (isExpired(item.expires_at) && st !== "claimed" && st !== "completed") {
     return { label: "Expired", tone: "closed" as const };
@@ -311,32 +363,56 @@ function getStatusChip(item: ItemRow | null) {
 
   if (st === "reserved") {
     return {
-      label: isGive ? "Reserved" : "In progress",
+      label: listingKind === "request" ? "In progress" : "Reserved",
       tone: "warn" as const,
     };
   }
 
   if (st === "claimed" || st === "completed") {
     return {
-      label: isGive ? "Given" : "Fulfilled",
+      label:
+        listingKind === "request"
+          ? "Fulfilled"
+          : listingKind === "service"
+          ? "Closed"
+          : "Given",
       tone: "closed" as const,
     };
   }
 
   return {
-    label: isGive ? "Available" : "Open",
+    label:
+      listingKind === "request"
+        ? "Open"
+        : listingKind === "service"
+        ? "Available"
+        : "Available",
     tone: "good" as const,
   };
 }
 
-function getSubtitle(item: ItemRow | null, postType: PostType) {
+function getSubtitle(item: ItemRow | null, listingKind: ListingKind) {
   if (!item) return "";
 
-  if (postType === "request") {
+  if (listingKind === "request") {
     return [
-      requestGroupLabel(item.request_group),
+      requestCategoryLabel(item),
       item.request_timeframe ? requestTimeframeLabel(item.request_timeframe) : "",
       item.request_location?.trim() ? item.request_location : "",
+    ]
+      .filter(Boolean)
+      .join(" • ");
+  }
+
+  if (listingKind === "service") {
+    return [
+      serviceCategoryLabel(item),
+      serviceDeliveryLabel(item),
+      item.request_location?.trim()
+        ? item.request_location
+        : item.pickup_location?.trim()
+        ? item.pickup_location
+        : "",
     ]
       .filter(Boolean)
       .join(" • ");
@@ -353,45 +429,51 @@ function getSubtitle(item: ItemRow | null, postType: PostType) {
 function getActivityLabel(args: {
   item: ItemRow | null;
   publicActivityHidden: boolean;
-  postType: PostType;
+  listingKind: ListingKind;
   interestCount: number;
   offerCount: number;
 }) {
-  const { item, publicActivityHidden, postType, interestCount, offerCount } = args;
+  const { item, publicActivityHidden, listingKind, interestCount, offerCount } = args;
   if (!item) return "";
 
   if (publicActivityHidden) {
-    return postType === "give" ? "Requests hidden" : "Offers hidden";
+    return listingKind === "request" ? "Offers hidden" : "Requests hidden";
   }
 
-  if (postType === "give") {
-    return `${interestCount} request${interestCount === 1 ? "" : "s"}`;
+  if (listingKind === "request") {
+    return `${offerCount} offer${offerCount === 1 ? "" : "s"}`;
   }
 
-  return `${offerCount} offer${offerCount === 1 ? "" : "s"}`;
+  return `${interestCount} request${interestCount === 1 ? "" : "s"}`;
 }
 
-function getGiveFlow(args: {
+function getGiveLikeFlow(args: {
   item: ItemRow | null;
+  listingKind: "item" | "service";
   isOwner: boolean;
   isAshland: boolean;
   myInterest: MyInterestRow | null;
   hasAcceptedOther: boolean;
 }): FlowConfig | null {
-  const { item, isOwner, isAshland, myInterest, hasAcceptedOther } = args;
-  if (!item || (item.post_type ?? "give") !== "give") return null;
+  const { item, listingKind, isOwner, isAshland, myInterest, hasAcceptedOther } = args;
+  if (!item) return null;
+  if ((item.post_type ?? "give") !== "give") return null;
 
   const mine = normStatus(myInterest?.status);
+  const noun = listingKind === "service" ? "service" : "item";
 
   if (isOwner) {
-    if (isGiveClosed(item)) return null;
+    if (isGiveLikeClosed(item)) return null;
 
     return {
       kind: "owner",
-      title: "You own this item",
-      body: "Review requests, manage pickup, or update the listing.",
-      primary: "Manage item",
-      secondary: "Edit item",
+      title: `You own this ${noun}`,
+      body:
+        listingKind === "service"
+          ? "Review incoming interest, message people, or update your service."
+          : "Review requests, manage pickup, or update the listing.",
+      primary: listingKind === "service" ? "Manage service" : "Manage item",
+      secondary: listingKind === "service" ? "Edit service" : "Edit item",
       primaryDisabled: false,
       secondaryDisabled: false,
     };
@@ -400,8 +482,8 @@ function getGiveFlow(args: {
   if (!isAshland) {
     return {
       kind: "login",
-      title: "Log in to request this item",
-      body: "Only Ashland users can request items.",
+      title: `Log in to contact this ${noun}`,
+      body: "Only Ashland users can interact with listings.",
       primary: "Log in",
       secondary: null,
       primaryDisabled: false,
@@ -412,8 +494,11 @@ function getGiveFlow(args: {
   if (mine === "reserved") {
     return {
       kind: "reserved",
-      title: "Pickup confirmed",
-      body: "This item is reserved for you. Continue in chat.",
+      title: listingKind === "service" ? "You’re booked in" : "Pickup confirmed",
+      body:
+        listingKind === "service"
+          ? "The provider reserved you. Continue in chat."
+          : "This item is reserved for you. Continue in chat.",
       primary: "Open chat",
       secondary: null,
       primaryDisabled: false,
@@ -424,8 +509,11 @@ function getGiveFlow(args: {
   if (mine === "accepted") {
     return {
       kind: "accepted",
-      title: "Your request was accepted",
-      body: "Open chat to continue the handoff.",
+      title: listingKind === "service" ? "Your request was accepted" : "Your request was accepted",
+      body:
+        listingKind === "service"
+          ? "Open chat to confirm details with the provider."
+          : "Open chat to continue the handoff.",
       primary: "Open chat",
       secondary: null,
       primaryDisabled: false,
@@ -436,22 +524,31 @@ function getGiveFlow(args: {
   if (mine === "pending") {
     return {
       kind: "pending",
-      title: hasAcceptedOther ? "You are on the waitlist" : "Request sent",
+      title: hasAcceptedOther
+        ? "You are on the waitlist"
+        : listingKind === "service"
+        ? "Interest sent"
+        : "Request sent",
       body: hasAcceptedOther
-        ? "The owner is already working with another requester, but you are still in line."
+        ? "The owner is already working with someone else, but you are still in line."
+        : listingKind === "service"
+        ? "The provider has not decided yet."
         : "The owner has not picked a requester yet.",
-      primary: "Requested",
+      primary: listingKind === "service" ? "Interest sent" : "Requested",
       secondary: "Withdraw",
       primaryDisabled: true,
       secondaryDisabled: false,
     };
   }
 
-  if (isGiveClosed(item)) {
+  if (isGiveLikeClosed(item)) {
     return {
       kind: "closed",
-      title: "This item is no longer available",
-      body: "Requests are closed for this listing.",
+      title: `This ${noun} is no longer available`,
+      body:
+        listingKind === "service"
+          ? "New interest is closed for this service."
+          : "Requests are closed for this listing.",
       primary: "Unavailable",
       secondary: null,
       primaryDisabled: true,
@@ -462,8 +559,14 @@ function getGiveFlow(args: {
   if (normStatus(item.status) === "reserved") {
     return {
       kind: "reserved_other",
-      title: "This item is already reserved",
-      body: "A handoff is already in progress.",
+      title:
+        listingKind === "service"
+          ? "This service is already reserved"
+          : "This item is already reserved",
+      body:
+        listingKind === "service"
+          ? "The provider is already working with someone."
+          : "A handoff is already in progress.",
       primary: "Unavailable",
       secondary: null,
       primaryDisabled: true,
@@ -475,8 +578,11 @@ function getGiveFlow(args: {
     return {
       kind: "waitlist",
       title: "Waitlist only",
-      body: "Another requester is currently being considered, but you can still join the backup queue.",
-      primary: "slide to send your request",
+      body:
+        listingKind === "service"
+          ? "The provider is currently considering someone else, but you can still join the queue."
+          : "Another requester is currently being considered, but you can still join the backup queue.",
+      primary: listingKind === "service" ? "slide to show interest" : "slide to send your request",
       secondary: null,
       primaryDisabled: false,
       secondaryDisabled: false,
@@ -485,9 +591,15 @@ function getGiveFlow(args: {
 
   return {
     kind: "open",
-    title: "This item is available",
-    body: "Slide to send your request.",
-    primary: "slide to send your request",
+    title:
+      listingKind === "service"
+        ? "You can contact this provider"
+        : "This item is available",
+    body:
+      listingKind === "service"
+        ? "Slide to show interest and start the conversation."
+        : "Slide to send your request.",
+    primary: listingKind === "service" ? "slide to show interest" : "slide to send your request",
     secondary: null,
     primaryDisabled: false,
     secondaryDisabled: false,
@@ -660,7 +772,7 @@ async function loadItemDetail(itemId: string, uid: string | null): Promise<Loade
         null;
     }
 
-    if (isGiveClosed(item)) {
+    if (isGiveLikeClosed(item)) {
       const { data: completedRows, error: completedErr } = await supabase
         .from("interests")
         .select(`
@@ -878,15 +990,18 @@ function SlideAction({
           border-radius: 999px;
           overflow: hidden;
           border: 1px solid rgba(196, 181, 253, 0.55);
-          background: linear-gradient(90deg, #c084fc 0%, #d8b4fe 45%, #f9a8d4 100%);
           box-shadow:
             inset 0 1px 0 rgba(255, 255, 255, 0.4),
             0 12px 28px rgba(168, 85, 247, 0.18);
           flex: 0 0 auto;
         }
 
-        .slideAction-give {
+        .slideAction-item {
           background: linear-gradient(90deg, #c084fc 0%, #d8b4fe 45%, #f9a8d4 100%);
+        }
+
+        .slideAction-service {
+          background: linear-gradient(90deg, #86efac 0%, #bbf7d0 45%, #dcfce7 100%);
         }
 
         .slideAction-request {
@@ -969,8 +1084,12 @@ function SlideAction({
           transform: translateX(1px);
         }
 
-        .slideKnobGlyph.give {
+        .slideKnobGlyph.item {
           color: #22c55e;
+        }
+
+        .slideKnobGlyph.service {
+          color: #16a34a;
         }
 
         .slideKnobGlyph.request {
@@ -1061,6 +1180,8 @@ export default function ItemDetailPage() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const postType: PostType = (item?.post_type ?? "give") as PostType;
+  const listingKind = useMemo(() => detectListingKind(item), [item]);
+
   const isAshland = !!userId && !!userEmail && userEmail.toLowerCase().endsWith("@ashland.edu");
 
   const isOwner = useMemo(() => {
@@ -1069,15 +1190,15 @@ export default function ItemDetailPage() {
 
   const ownerLabel = useMemo(() => ownerNameLabel(item, owner), [item, owner]);
   const publicActivityHidden = !!item?.hide_interest_count && !isOwner;
-  const itemStateChip = useMemo(() => getStatusChip(item), [item]);
+  const itemStateChip = useMemo(() => getStatusChip(item, listingKind), [item, listingKind]);
 
-  const isArchivedGiveOwnerView = useMemo(() => {
-    return !!item && postType === "give" && isOwner && isGiveClosed(item);
-  }, [item, postType, isOwner]);
+  const isArchivedGiveLikeOwnerView = useMemo(() => {
+    return !!item && listingKind !== "request" && isOwner && isGiveLikeClosed(item);
+  }, [item, listingKind, isOwner]);
 
   const soldToLabel = useMemo(() => {
-    return readableName(completedInterest?.requester, "Recipient");
-  }, [completedInterest]);
+    return readableName(completedInterest?.requester, listingKind === "service" ? "Client" : "Recipient");
+  }, [completedInterest, listingKind]);
 
   const soldAtLabel = useMemo(() => {
     if (!completedInterest) return item?.claimed_at || null;
@@ -1090,36 +1211,39 @@ export default function ItemDetailPage() {
     );
   }, [completedInterest, item?.claimed_at]);
 
-  const subtitle = useMemo(() => getSubtitle(item, postType), [item, postType]);
+  const subtitle = useMemo(() => getSubtitle(item, listingKind), [item, listingKind]);
 
   const activityLabel = useMemo(() => {
     return getActivityLabel({
       item,
       publicActivityHidden,
-      postType,
+      listingKind,
       interestCount,
       offerCount,
     });
-  }, [item, publicActivityHidden, postType, interestCount, offerCount]);
+  }, [item, publicActivityHidden, listingKind, interestCount, offerCount]);
 
-  const giveFlow = useMemo(() => {
-    return getGiveFlow({
+  const giveLikeFlow = useMemo(() => {
+    if (listingKind === "request") return null;
+    return getGiveLikeFlow({
       item,
+      listingKind,
       isOwner,
       isAshland,
       myInterest,
       hasAcceptedOther,
     });
-  }, [item, isOwner, isAshland, myInterest, hasAcceptedOther]);
+  }, [item, listingKind, isOwner, isAshland, myInterest, hasAcceptedOther]);
 
   const requestFlow = useMemo(() => {
+    if (listingKind !== "request") return null;
     return getRequestFlow({
       item,
       isOwner,
       isAshland,
       myOffer,
     });
-  }, [item, isOwner, isAshland, myOffer]);
+  }, [item, listingKind, isOwner, isAshland, myOffer]);
 
   function showToast(msg: string, kind: "ok" | "err" = "ok") {
     setToast({ msg, kind });
@@ -1257,8 +1381,8 @@ export default function ItemDetailPage() {
     });
   }
 
-  async function submitGiveInterest() {
-    if (!item || postType !== "give") return;
+  async function submitGiveLikeInterest() {
+    if (!item || listingKind === "request") return;
 
     const currentUserId = userId;
     const currentUserEmail = userEmail;
@@ -1272,9 +1396,14 @@ export default function ItemDetailPage() {
     }
 
     if (isOwner) return;
-    if (isGiveClosed(currentItem) || normStatus(currentItem.status) === "reserved") {
-      showToast("This item is not accepting new requests.", "err");
-      throw new Error("This item is not accepting new requests.");
+    if (isGiveLikeClosed(currentItem) || normStatus(currentItem.status) === "reserved") {
+      showToast(
+        listingKind === "service"
+          ? "This service is not accepting new interest."
+          : "This item is not accepting new requests.",
+        "err"
+      );
+      throw new Error("This listing is not accepting new interest.");
     }
 
     if (mine === "accepted" || mine === "reserved") {
@@ -1317,11 +1446,17 @@ export default function ItemDetailPage() {
       }
 
       await loadEverything(currentUserId, currentUserEmail);
-      showToast(hasAcceptedOther ? "Joined waitlist." : "Request sent.");
+      showToast(
+        hasAcceptedOther
+          ? "Joined waitlist."
+          : listingKind === "service"
+          ? "Interest sent."
+          : "Request sent."
+      );
     });
   }
 
-  async function withdrawGiveInterest() {
+  async function withdrawGiveLikeInterest() {
     if (!myInterest?.id || !userId) return;
     if (normStatus(myInterest.status) !== "pending") return;
 
@@ -1339,12 +1474,12 @@ export default function ItemDetailPage() {
       if (error) throw new Error(error.message);
 
       await loadEverything(currentUserId, currentUserEmail);
-      showToast("Request withdrawn.");
+      showToast(listingKind === "service" ? "Interest withdrawn." : "Request withdrawn.");
     });
   }
 
   async function submitHelpOffer() {
-    if (!item || postType !== "request") return;
+    if (!item || listingKind !== "request") return;
 
     const currentUserId = userId;
     const currentUserEmail = userEmail;
@@ -1426,7 +1561,7 @@ export default function ItemDetailPage() {
   }
 
   async function toggleCountVisibility() {
-    if (!item || !isOwner || !userId || (postType === "give" && isArchivedGiveOwnerView)) return;
+    if (!item || !isOwner || !userId || isArchivedGiveLikeOwnerView) return;
 
     const nextValue = !item.hide_interest_count;
     const currentItemId = item.id;
@@ -1446,13 +1581,13 @@ export default function ItemDetailPage() {
 
       setItem((prev) => (prev ? { ...prev, hide_interest_count: nextValue } : prev));
       showToast(
-        postType === "give"
+        listingKind === "request"
           ? nextValue
-            ? "Requests hidden."
-            : "Requests shown."
-          : nextValue
             ? "Offers hidden."
             : "Offers shown."
+          : nextValue
+          ? "Requests hidden."
+          : "Requests shown."
       );
     } catch (e: any) {
       showToast(e?.message || "Could not update visibility.", "err");
@@ -1470,20 +1605,20 @@ export default function ItemDetailPage() {
     setBusy(true);
 
     try {
-      if (postType === "give") {
-        const { error: interestDeleteErr } = await supabase
-          .from("interests")
-          .delete()
-          .eq("item_id", currentItemId);
-
-        if (interestDeleteErr) throw new Error(interestDeleteErr.message);
-      } else {
+      if (listingKind === "request") {
         const { error: offerDeleteErr } = await supabase
           .from("request_offers")
           .delete()
           .eq("request_id", currentItemId);
 
         if (offerDeleteErr) throw new Error(offerDeleteErr.message);
+      } else {
+        const { error: interestDeleteErr } = await supabase
+          .from("interests")
+          .delete()
+          .eq("item_id", currentItemId);
+
+        if (interestDeleteErr) throw new Error(interestDeleteErr.message);
       }
 
       const { error: loveDeleteErr } = await supabase
@@ -1501,7 +1636,13 @@ export default function ItemDetailPage() {
 
       if (itemDeleteErr) throw new Error(itemDeleteErr.message);
 
-      showToast("Listing deleted.");
+      showToast(
+        listingKind === "service"
+          ? "Service deleted."
+          : listingKind === "request"
+          ? "Request deleted."
+          : "Listing deleted."
+      );
       router.replace("/feed");
     } catch (e: any) {
       showToast(e?.message || "Could not delete listing.", "err");
@@ -1547,7 +1688,7 @@ export default function ItemDetailPage() {
   }, [itemId, myInterest?.status, myOffer?.status, item?.status]);
 
   const isRequestArchivedOwnerView =
-    !!item && postType === "request" && isOwner && isRequestClosed(item);
+    !!item && listingKind === "request" && isOwner && isRequestClosed(item);
 
   const budgetLabel =
     item?.request_willing_to_pay
@@ -1556,18 +1697,23 @@ export default function ItemDetailPage() {
         : "Willing to pay"
       : "Unpaid help";
 
-  const showGiveSlide =
-    postType === "give" &&
-    !!giveFlow &&
-    (giveFlow.kind === "open" || giveFlow.kind === "waitlist");
+  const priceLabel =
+    listingKind === "service"
+      ? formatPriceWithNegotiable(item?.price, item?.is_negotiable, "Contact for pricing")
+      : formatPriceWithNegotiable(item?.price, item?.is_negotiable);
+
+  const showGiveLikeSlide =
+    listingKind !== "request" &&
+    !!giveLikeFlow &&
+    (giveLikeFlow.kind === "open" || giveLikeFlow.kind === "waitlist");
 
   const showRequestSlide =
-    postType === "request" &&
+    listingKind === "request" &&
     !!requestFlow &&
     requestFlow.kind === "open";
 
   return (
-    <div className={`page page-${postType}`}>
+    <div className={`page page-${listingKind}`}>
       <div className="shell">
         <header className="topBar">
           <div className="topLeft">
@@ -1577,7 +1723,13 @@ export default function ItemDetailPage() {
           </div>
 
           <div className="topCenter">
-            <div className="topTitle">Post details</div>
+            <div className="topTitle">
+              {listingKind === "service"
+                ? "Service details"
+                : listingKind === "request"
+                ? "Request details"
+                : "Item details"}
+            </div>
             <div className="topSub">ScholarSwap</div>
           </div>
 
@@ -1604,7 +1756,7 @@ export default function ItemDetailPage() {
 
                 {menuOpen ? (
                   <div className="menuCard">
-                    {!isArchivedGiveOwnerView && !isRequestArchivedOwnerView ? (
+                    {!isArchivedGiveLikeOwnerView && !isRequestArchivedOwnerView ? (
                       <>
                         <button
                           className="menuItem"
@@ -1614,7 +1766,11 @@ export default function ItemDetailPage() {
                             router.push(`/manage/${item?.id}`);
                           }}
                         >
-                          {postType === "give" ? "Manage item" : "Manage request"}
+                          {listingKind === "service"
+                            ? "Manage service"
+                            : listingKind === "request"
+                            ? "Manage request"
+                            : "Manage item"}
                         </button>
 
                         <button
@@ -1625,17 +1781,21 @@ export default function ItemDetailPage() {
                             router.push(`/item/${item?.id}/edit`);
                           }}
                         >
-                          {postType === "give" ? "Edit item" : "Edit request"}
+                          {listingKind === "service"
+                            ? "Edit service"
+                            : listingKind === "request"
+                            ? "Edit request"
+                            : "Edit item"}
                         </button>
 
                         <button className="menuItem" type="button" onClick={() => void toggleCountVisibility()}>
-                          {postType === "give"
+                          {listingKind === "request"
                             ? item?.hide_interest_count
-                              ? "Show requests"
-                              : "Hide requests"
-                            : item?.hide_interest_count
                               ? "Show offers"
-                              : "Hide offers"}
+                              : "Hide offers"
+                            : item?.hide_interest_count
+                            ? "Show requests"
+                            : "Hide requests"}
                         </button>
                       </>
                     ) : null}
@@ -1681,13 +1841,13 @@ export default function ItemDetailPage() {
                     <img src={item.photo_url} alt={item.title} className="heroImg" />
                   </button>
                 ) : (
-                  <div className={`noPhoto noPhoto-${postType}`}>No image</div>
+                  <div className={`noPhoto noPhoto-${listingKind}`}>No image</div>
                 )}
               </div>
 
               <div className="infoCol">
                 <div className="ownerRow">
-                  <div className={`avatar avatar-${postType}`}>{initials(ownerLabel)}</div>
+                  <div className={`avatar avatar-${listingKind}`}>{initials(ownerLabel)}</div>
 
                   <div className="ownerText">
                     <div className="ownerName">{ownerLabel}</div>
@@ -1700,12 +1860,12 @@ export default function ItemDetailPage() {
                 </div>
 
                 <div className="pillRow">
-                  {postType === "give" ? (
-                    <span className="pricePill">
-                      {formatPriceWithNegotiable(item.price, item.is_negotiable)}
-                    </span>
-                  ) : (
+                  {listingKind === "request" ? (
                     <span className="budgetPill">{budgetLabel}</span>
+                  ) : (
+                    <span className={`pricePill ${listingKind === "service" ? "service" : ""}`}>
+                      {priceLabel}
+                    </span>
                   )}
 
                   <span className={`statusPill ${itemStateChip.tone}`}>{itemStateChip.label}</span>
@@ -1719,57 +1879,65 @@ export default function ItemDetailPage() {
                   <span>Delists {formatDelist(item.expires_at)}</span>
                 </div>
 
-                {isArchivedGiveOwnerView ? (
+                {isArchivedGiveLikeOwnerView ? (
                   <div className="archivePanel">
-                    <div className="panelTitle">Completed handoff</div>
+                    <div className="panelTitle">
+                      {listingKind === "service" ? "Completed booking" : "Completed handoff"}
+                    </div>
                     <div className="panelBody">
-                      This listing has been completed and moved to archive.
+                      {listingKind === "service"
+                        ? "This service interaction has been completed and moved to archive."
+                        : "This listing has been completed and moved to archive."}
                     </div>
 
                     <div className="archiveGrid">
                       <div className="archiveBox">
-                        <div className="archiveLabel">Given to</div>
+                        <div className="archiveLabel">
+                          {listingKind === "service" ? "Client" : "Given to"}
+                        </div>
                         <div className="archiveValue">{soldToLabel}</div>
                       </div>
                       <div className="archiveBox">
-                        <div className="archiveLabel">Given on</div>
+                        <div className="archiveLabel">
+                          {listingKind === "service" ? "Completed on" : "Given on"}
+                        </div>
                         <div className="archiveValue">{formatFullWhen(soldAtLabel)}</div>
                       </div>
                     </div>
                   </div>
-                ) : postType === "give" && giveFlow ? (
+                ) : listingKind !== "request" && giveLikeFlow ? (
                   <div className="actionPanel">
-                    <div className="panelTitle">{giveFlow.title}</div>
-                    <div className="panelBody">{giveFlow.body}</div>
+                    <div className="panelTitle">{giveLikeFlow.title}</div>
+                    <div className="panelBody">{giveLikeFlow.body}</div>
 
                     <div className="buttonRow">
-                      {showGiveSlide ? (
+                      {showGiveLikeSlide ? (
                         <SlideAction
-                          tone="give"
-                          label={giveFlow.primary}
+                          tone={listingKind === "service" ? "service" : "item"}
+                          label={giveLikeFlow.primary}
                           busyLabel="sending..."
-                          sentLabel="request sent"
+                          sentLabel={listingKind === "service" ? "interest sent" : "request sent"}
                           busy={actionBusy === "interest"}
                           disabled={!!actionBusy}
                           successKey="interest"
                           activeSuccessKey={actionSuccess}
-                          onComplete={submitGiveInterest}
+                          onComplete={submitGiveLikeInterest}
                         />
                       ) : (
                         <button
-                          className={`primaryBtn primaryBtn-${postType}`}
+                          className={`primaryBtn primaryBtn-${listingKind}`}
                           type="button"
-                          disabled={giveFlow.primaryDisabled || !!actionBusy}
+                          disabled={giveLikeFlow.primaryDisabled || !!actionBusy}
                           onClick={() => {
-                            if (giveFlow.kind === "owner") {
+                            if (giveLikeFlow.kind === "owner") {
                               router.push(`/manage/${item.id}`);
                               return;
                             }
-                            if (giveFlow.kind === "login") {
+                            if (giveLikeFlow.kind === "login") {
                               router.push("/me");
                               return;
                             }
-                            if (giveFlow.kind === "accepted" || giveFlow.kind === "reserved") {
+                            if (giveLikeFlow.kind === "accepted" || giveLikeFlow.kind === "reserved") {
                               void openConversation();
                               return;
                             }
@@ -1778,32 +1946,32 @@ export default function ItemDetailPage() {
                           {actionBusy === "chat"
                             ? "Opening..."
                             : actionBusy === "interest"
-                              ? "Sending..."
-                              : giveFlow.primary}
+                            ? "Sending..."
+                            : giveLikeFlow.primary}
                         </button>
                       )}
 
-                      {giveFlow.secondary ? (
+                      {giveLikeFlow.secondary ? (
                         <button
                           className="secondaryBtn"
                           type="button"
-                          disabled={giveFlow.secondaryDisabled || !!actionBusy}
+                          disabled={giveLikeFlow.secondaryDisabled || !!actionBusy}
                           onClick={() => {
-                            if (giveFlow.kind === "owner") {
+                            if (giveLikeFlow.kind === "owner") {
                               router.push(`/item/${item.id}/edit`);
                               return;
                             }
-                            if (giveFlow.kind === "pending") {
-                              void withdrawGiveInterest();
+                            if (giveLikeFlow.kind === "pending") {
+                              void withdrawGiveLikeInterest();
                             }
                           }}
                         >
-                          {actionBusy === "withdraw-interest" ? "Working..." : giveFlow.secondary}
+                          {actionBusy === "withdraw-interest" ? "Working..." : giveLikeFlow.secondary}
                         </button>
                       ) : null}
                     </div>
                   </div>
-                ) : postType === "request" && requestFlow ? (
+                ) : listingKind === "request" && requestFlow ? (
                   <div className="actionPanel">
                     <div className="panelTitle">{requestFlow.title}</div>
                     <div className="panelBody">{requestFlow.body}</div>
@@ -1823,7 +1991,7 @@ export default function ItemDetailPage() {
                         />
                       ) : (
                         <button
-                          className={`primaryBtn primaryBtn-${postType}`}
+                          className={`primaryBtn primaryBtn-${listingKind}`}
                           type="button"
                           disabled={requestFlow.primaryDisabled || !!actionBusy}
                           onClick={() => {
@@ -1844,8 +2012,8 @@ export default function ItemDetailPage() {
                           {actionBusy === "chat"
                             ? "Opening..."
                             : actionBusy === "offer"
-                              ? "Sending..."
-                              : requestFlow.primary}
+                            ? "Sending..."
+                            : requestFlow.primary}
                         </button>
                       )}
 
@@ -1873,7 +2041,9 @@ export default function ItemDetailPage() {
 
                 {item.description?.trim() ? (
                   <div className="descriptionCard">
-                    <div className="sectionLabel">Description</div>
+                    <div className="sectionLabel">
+                      {listingKind === "service" ? "Service details" : "Description"}
+                    </div>
                     <div className="descriptionText">{item.description.trim()}</div>
                   </div>
                 ) : null}
@@ -1886,7 +2056,9 @@ export default function ItemDetailPage() {
       {confirmDelete ? (
         <div className="modal" onClick={() => setConfirmDelete(false)}>
           <div className="modalCard" onClick={(e) => e.stopPropagation()}>
-            <div className="modalTitle">Delete listing?</div>
+            <div className="modalTitle">
+              Delete {listingKind === "service" ? "service" : listingKind === "request" ? "request" : "listing"}?
+            </div>
             <div className="modalText">This permanently removes the post.</div>
 
             <div className="modalActions">
@@ -1926,8 +2098,12 @@ export default function ItemDetailPage() {
           color: #0f172a;
         }
 
-        .page-give {
+        .page-item {
           background: #f6f8f7;
+        }
+
+        .page-service {
+          background: #f4fbf6;
         }
 
         .page-request {
@@ -1951,8 +2127,12 @@ export default function ItemDetailPage() {
           backdrop-filter: blur(14px);
         }
 
-        .page-give .topBar {
+        .page-item .topBar {
           background: rgba(246, 248, 247, 0.92);
+        }
+
+        .page-service .topBar {
+          background: rgba(244, 251, 246, 0.92);
         }
 
         .page-request .topBar {
@@ -2073,8 +2253,12 @@ export default function ItemDetailPage() {
           color: #64748b;
         }
 
-        .noPhoto-give {
+        .noPhoto-item {
           background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), #f8fafc);
+        }
+
+        .noPhoto-service {
+          background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), #f0fdf4);
         }
 
         .noPhoto-request {
@@ -2105,10 +2289,16 @@ export default function ItemDetailPage() {
           flex: 0 0 auto;
         }
 
-        .avatar-give {
+        .avatar-item {
           border: 1px solid rgba(16, 185, 129, 0.18);
           background: linear-gradient(135deg, rgba(16, 185, 129, 0.11), #f0fdf4 100%);
           color: #065f46;
+        }
+
+        .avatar-service {
+          border: 1px solid rgba(34, 197, 94, 0.18);
+          background: linear-gradient(135deg, rgba(34, 197, 94, 0.12), #f0fdf4 100%);
+          color: #166534;
         }
 
         .avatar-request {
@@ -2174,6 +2364,12 @@ export default function ItemDetailPage() {
           color: #065f46;
         }
 
+        .pricePill.service {
+          border-color: rgba(34, 197, 94, 0.22);
+          background: rgba(34, 197, 94, 0.1);
+          color: #166534;
+        }
+
         .budgetPill {
           border: 1px solid rgba(245, 158, 11, 0.2);
           background: rgba(245, 158, 11, 0.1);
@@ -2225,10 +2421,16 @@ export default function ItemDetailPage() {
           padding: 18px;
         }
 
-        .actionPanel {
-          background: ${postType === "give"
-            ? "linear-gradient(180deg, rgba(16, 185, 129, 0.05), #ffffff)"
-            : "linear-gradient(180deg, rgba(245, 158, 11, 0.05), #ffffff)"};
+        .page-item .actionPanel {
+          background: linear-gradient(180deg, rgba(16, 185, 129, 0.05), #ffffff);
+        }
+
+        .page-service .actionPanel {
+          background: linear-gradient(180deg, rgba(34, 197, 94, 0.06), #ffffff);
+        }
+
+        .page-request .actionPanel {
+          background: linear-gradient(180deg, rgba(245, 158, 11, 0.05), #ffffff);
         }
 
         .archivePanel {
@@ -2275,9 +2477,15 @@ export default function ItemDetailPage() {
           border: 1px solid transparent;
         }
 
-        .primaryBtn-give {
+        .primaryBtn-item {
           background: #0f766e;
           border-color: #0f766e;
+          color: #ffffff;
+        }
+
+        .primaryBtn-service {
+          background: #15803d;
+          border-color: #15803d;
           color: #ffffff;
         }
 
