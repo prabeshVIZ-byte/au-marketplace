@@ -1129,8 +1129,7 @@ export default function CreatePage() {
 
       if (draft.mode === "service") {
         itemInsert.category = `service:${draft.serviceCategory}`;
-        itemInsert.pickup_location =
-          draft.serviceLocation.trim() || deliveryLabel(draft.serviceDelivery);
+        itemInsert.pickup_location = draft.serviceLocation.trim() || deliveryLabel(draft.serviceDelivery);
         itemInsert.price = parsedServiceRate === null ? null : parsedServiceRate;
         itemInsert.is_negotiable = parsedServiceRate === null ? false : draft.serviceNegotiable;
         itemInsert.request_group = `service_offer:${draft.serviceDelivery}`;
@@ -1270,7 +1269,6 @@ export default function CreatePage() {
       desc: string;
       icon: string;
       tone: "warm" | "blue" | "neutral" | "purple";
-      badge: string;
     }> = [
       {
         key: "service",
@@ -1278,7 +1276,6 @@ export default function CreatePage() {
         desc: "Tutoring, hair, baking, nails, photography, tech help, and more",
         icon: "✂️",
         tone: "warm",
-        badge: "Most popular",
       },
       {
         key: "request",
@@ -1286,7 +1283,6 @@ export default function CreatePage() {
         desc: "Ask the campus community for help, gigs, or quick support",
         icon: "🤝",
         tone: "blue",
-        badge: "Fast responses",
       },
       {
         key: "item",
@@ -1294,7 +1290,6 @@ export default function CreatePage() {
         desc: "Sell, give away, or share useful things around campus",
         icon: "📦",
         tone: "neutral",
-        badge: "Simple listing",
       },
       {
         key: "event",
@@ -1302,7 +1297,6 @@ export default function CreatePage() {
         desc: "Promote something happening on campus and drive attendance",
         icon: "📅",
         tone: "purple",
-        badge: "Campus visibility",
       },
     ];
 
@@ -1317,7 +1311,6 @@ export default function CreatePage() {
           >
             <div style={modernModeTopRow}>
               <div style={modernModeIcon(m.tone)}>{m.icon}</div>
-              <div style={modernModeBadge(m.tone)}>{m.badge}</div>
             </div>
 
             <div style={modernModeTitle}>{m.title}</div>
@@ -2354,52 +2347,7 @@ export default function CreatePage() {
         </div>
 
         {!draft.mode ? (
-          <>
-            <section style={landingHeroCard}>
-              <div style={landingHeroGlow} />
-
-              <div style={landingHeroContent}>
-                <div style={landingEyebrow}>CREATE</div>
-
-                <div style={landingHeroTitle}>
-                  Publish something
-                  <br />
-                  that looks native
-                  <br />
-                  to a modern campus app
-                </div>
-
-                <div style={landingHeroSubtitle}>
-                  Start with a service, request, item, or event. Clean flow. Fast posting.
-                  Mobile-first feel.
-                </div>
-
-                <div style={landingMiniStats}>
-                  <div style={landingStatCard}>
-                    <div style={landingStatValue}>4</div>
-                    <div style={landingStatLabel}>post types</div>
-                  </div>
-                  <div style={landingStatCard}>
-                    <div style={landingStatValue}>~1 min</div>
-                    <div style={landingStatLabel}>to publish</div>
-                  </div>
-                  <div style={landingStatCard}>
-                    <div style={landingStatValue}>Ashland</div>
-                    <div style={landingStatLabel}>verified campus</div>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <div style={landingSectionHeader}>
-              <div style={landingSectionTitle}>Choose what you want to create</div>
-              <div style={landingSectionSubtitle}>
-                Pick one format and continue into the posting flow.
-              </div>
-            </div>
-
-            <div style={{ marginTop: 18 }}>{renderModePicker()}</div>
-          </>
+          <div style={landingModesGrid}>{renderModePicker()}</div>
         ) : (
           <div style={composerGrid(isDesktop)}>
             <div style={mainColumn}>
@@ -3065,113 +3013,6 @@ const primaryButton: React.CSSProperties = {
   boxShadow: "0 18px 35px rgba(3,19,61,0.22)",
 };
 
-const landingHeroCard: React.CSSProperties = {
-  position: "relative",
-  overflow: "hidden",
-  borderRadius: 32,
-  padding: 24,
-  minHeight: 280,
-  background:
-    "radial-gradient(circle at top left, rgba(99,102,241,0.16) 0%, rgba(99,102,241,0.06) 22%, rgba(255,255,255,0.96) 52%, rgba(255,255,255,0.98) 100%)",
-  border: "1px solid rgba(226,232,240,0.95)",
-  boxShadow: "0 24px 70px rgba(15,23,42,0.08)",
-};
-
-const landingHeroGlow: React.CSSProperties = {
-  position: "absolute",
-  top: -80,
-  right: -40,
-  width: 220,
-  height: 220,
-  borderRadius: "50%",
-  background: "radial-gradient(circle, rgba(59,130,246,0.18) 0%, rgba(59,130,246,0) 72%)",
-  pointerEvents: "none",
-};
-
-const landingHeroContent: React.CSSProperties = {
-  position: "relative",
-  zIndex: 1,
-};
-
-const landingEyebrow: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 8,
-  padding: "8px 12px",
-  borderRadius: 999,
-  background: "rgba(255,255,255,0.72)",
-  border: "1px solid rgba(226,232,240,0.95)",
-  color: "#475569",
-  fontSize: 11,
-  fontWeight: 1000,
-  letterSpacing: "0.14em",
-};
-
-const landingHeroTitle: React.CSSProperties = {
-  marginTop: 18,
-  fontSize: 42,
-  lineHeight: 0.96,
-  letterSpacing: "-0.06em",
-  fontWeight: 1000,
-  color: "#020617",
-};
-
-const landingHeroSubtitle: React.CSSProperties = {
-  marginTop: 14,
-  maxWidth: 640,
-  fontSize: 15,
-  lineHeight: 1.6,
-  color: "#475569",
-  fontWeight: 600,
-};
-
-const landingMiniStats: React.CSSProperties = {
-  marginTop: 22,
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: 12,
-};
-
-const landingStatCard: React.CSSProperties = {
-  background: "rgba(255,255,255,0.74)",
-  border: "1px solid rgba(226,232,240,0.95)",
-  borderRadius: 20,
-  padding: "14px 14px",
-  backdropFilter: "blur(10px)",
-};
-
-const landingStatValue: React.CSSProperties = {
-  fontSize: 16,
-  fontWeight: 1000,
-  color: "#0f172a",
-};
-
-const landingStatLabel: React.CSSProperties = {
-  marginTop: 4,
-  fontSize: 12,
-  color: "#64748b",
-  fontWeight: 800,
-};
-
-const landingSectionHeader: React.CSSProperties = {
-  marginTop: 22,
-};
-
-const landingSectionTitle: React.CSSProperties = {
-  fontSize: 22,
-  lineHeight: 1.08,
-  fontWeight: 1000,
-  letterSpacing: "-0.035em",
-  color: "#020617",
-};
-
-const landingSectionSubtitle: React.CSSProperties = {
-  marginTop: 6,
-  fontSize: 14,
-  color: "#64748b",
-  fontWeight: 600,
-};
-
 const landingModesGrid: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
@@ -3245,30 +3086,6 @@ function modernModeIcon(
     border: "1px solid rgba(255,255,255,0.9)",
     boxShadow: "inset 0 1px 0 rgba(255,255,255,0.7)",
     flexShrink: 0,
-  };
-}
-
-function modernModeBadge(
-  tone: "warm" | "blue" | "purple" | "neutral"
-): React.CSSProperties {
-  const colors =
-    tone === "warm"
-      ? { bg: "#fff7ed", color: "#9a3412", border: "#fdba74" }
-      : tone === "blue"
-      ? { bg: "#eff6ff", color: "#1d4ed8", border: "#93c5fd" }
-      : tone === "purple"
-      ? { bg: "#f5f3ff", color: "#6d28d9", border: "#c4b5fd" }
-      : { bg: "#f8fafc", color: "#334155", border: "#cbd5e1" };
-
-  return {
-    padding: "7px 10px",
-    borderRadius: 999,
-    background: colors.bg,
-    color: colors.color,
-    border: `1px solid ${colors.border}`,
-    fontSize: 11,
-    fontWeight: 1000,
-    whiteSpace: "nowrap",
   };
 }
 
