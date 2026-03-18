@@ -1128,17 +1128,17 @@ export default function CreatePage() {
       };
 
       if (draft.mode === "service") {
-        itemInsert.category = `service:${draft.serviceCategory}`;
-        itemInsert.pickup_location = draft.serviceLocation.trim() || deliveryLabel(draft.serviceDelivery);
-        itemInsert.price = parsedServiceRate === null ? null : parsedServiceRate;
-        itemInsert.is_negotiable = parsedServiceRate === null ? false : draft.serviceNegotiable;
-        itemInsert.request_group = `service_offer:${draft.serviceDelivery}`;
-        itemInsert.request_timeframe = null;
-        itemInsert.request_location = draft.serviceLocation.trim() || null;
-        itemInsert.request_willing_to_pay = null;
-        itemInsert.request_budget = null;
-        itemInsert.description = buildServiceDescription(draft, cleanDesc);
-      } else if (draft.mode === "item") {
+  itemInsert.category = `service:${draft.serviceCategory}`;
+  itemInsert.pickup_location = null;
+  itemInsert.price = parsedServiceRate === null ? null : parsedServiceRate;
+  itemInsert.is_negotiable = parsedServiceRate === null ? false : draft.serviceNegotiable;
+  itemInsert.request_group = `service_offer:${draft.serviceDelivery}`;
+  itemInsert.request_timeframe = null;
+  itemInsert.request_location = draft.serviceLocation.trim() || null;
+  itemInsert.request_willing_to_pay = null;
+  itemInsert.request_budget = null;
+  itemInsert.description = buildServiceDescription(draft, cleanDesc);
+} else if (draft.mode === "item") {
         itemInsert.category = draft.itemCategory;
         itemInsert.pickup_location = draft.pickupLocation;
         itemInsert.price = parsedItemPrice === null ? null : parsedItemPrice;
