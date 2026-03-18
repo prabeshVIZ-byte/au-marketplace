@@ -27,10 +27,7 @@ type ServiceCategory =
   | "music lessons"
   | "other service";
 
-type ServiceDelivery =
-  | "in_person"
-  | "remote"
-  | "either";
+type ServiceDelivery = "in_person" | "remote" | "either";
 
 type ItemCategory =
   | "books"
@@ -1132,7 +1129,8 @@ export default function CreatePage() {
 
       if (draft.mode === "service") {
         itemInsert.category = `service:${draft.serviceCategory}`;
-        itemInsert.pickup_location = draft.serviceLocation.trim() || deliveryLabel(draft.serviceDelivery);
+        itemInsert.pickup_location =
+          draft.serviceLocation.trim() || deliveryLabel(draft.serviceDelivery);
         itemInsert.price = parsedServiceRate === null ? null : parsedServiceRate;
         itemInsert.is_negotiable = parsedServiceRate === null ? false : draft.serviceNegotiable;
         itemInsert.request_group = `service_offer:${draft.serviceDelivery}`;
@@ -1266,43 +1264,71 @@ export default function CreatePage() {
   }
 
   function renderModePicker() {
+    const modes: Array<{
+      key: Mode;
+      title: string;
+      desc: string;
+      icon: string;
+      tone: "warm" | "blue" | "neutral" | "purple";
+      badge: string;
+    }> = [
+      {
+        key: "service",
+        title: "Offer a service",
+        desc: "Tutoring, hair, baking, nails, photography, tech help, and more",
+        icon: "✂️",
+        tone: "warm",
+        badge: "Most popular",
+      },
+      {
+        key: "request",
+        title: "Request help",
+        desc: "Ask the campus community for help, gigs, or quick support",
+        icon: "🤝",
+        tone: "blue",
+        badge: "Fast responses",
+      },
+      {
+        key: "item",
+        title: "Post an item",
+        desc: "Sell, give away, or share useful things around campus",
+        icon: "📦",
+        tone: "neutral",
+        badge: "Simple listing",
+      },
+      {
+        key: "event",
+        title: "Create an event",
+        desc: "Promote something happening on campus and drive attendance",
+        icon: "📅",
+        tone: "purple",
+        badge: "Campus visibility",
+      },
+    ];
+
     return (
-      <div style={{ display: "grid", gap: 14 }}>
-        <button type="button" onClick={() => selectMode("service")} style={modeCard("warm")}>
-          <div style={modeIconBox}>✂️</div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={modeTitle}>Offer a service</div>
-            <div style={modeDesc}>Hair, tutoring, baking, nails, tech help, and more</div>
-          </div>
-          <div style={modeArrow}>→</div>
-        </button>
+      <div style={landingModesGrid}>
+        {modes.map((m) => (
+          <button
+            key={m.key}
+            type="button"
+            onClick={() => selectMode(m.key)}
+            style={modernModeCard(m.tone)}
+          >
+            <div style={modernModeTopRow}>
+              <div style={modernModeIcon(m.tone)}>{m.icon}</div>
+              <div style={modernModeBadge(m.tone)}>{m.badge}</div>
+            </div>
 
-        <button type="button" onClick={() => selectMode("request")} style={modeCard("blue")}>
-          <div style={modeIconBox}>🤝</div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={modeTitle}>Request help</div>
-            <div style={modeDesc}>Ask the campus community for a gig or service</div>
-          </div>
-          <div style={modeArrow}>→</div>
-        </button>
+            <div style={modernModeTitle}>{m.title}</div>
+            <div style={modernModeDesc}>{m.desc}</div>
 
-        <button type="button" onClick={() => selectMode("item")} style={modeCard("neutral")}>
-          <div style={modeIconBox}>📦</div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={modeTitle}>Post an item</div>
-            <div style={modeDesc}>Items still matter, but they are secondary now</div>
-          </div>
-          <div style={modeArrow}>→</div>
-        </button>
-
-        <button type="button" onClick={() => selectMode("event")} style={modeCard("purple")}>
-          <div style={modeIconBox}>📅</div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={modeTitle}>Event</div>
-            <div style={modeDesc}>Promote something happening on campus</div>
-          </div>
-          <div style={modeArrow}>→</div>
-        </button>
+            <div style={modernModeFooter}>
+              <span style={modernModeAction}>Start</span>
+              <span style={modernModeArrow}>→</span>
+            </div>
+          </button>
+        ))}
       </div>
     );
   }
@@ -2329,21 +2355,50 @@ export default function CreatePage() {
 
         {!draft.mode ? (
           <>
-            <div style={heroHeader}>
-              <div style={heroTitle}>Create</div>
-              <div style={heroSubtitle}>
-                Lead with gigs and services first. Items still exist, but they are no longer the
-                center.
+            <section style={landingHeroCard}>
+              <div style={landingHeroGlow} />
+
+              <div style={landingHeroContent}>
+                <div style={landingEyebrow}>CREATE</div>
+
+                <div style={landingHeroTitle}>
+                  Publish something
+                  <br />
+                  that looks native
+                  <br />
+                  to a modern campus app
+                </div>
+
+                <div style={landingHeroSubtitle}>
+                  Start with a service, request, item, or event. Clean flow. Fast posting.
+                  Mobile-first feel.
+                </div>
+
+                <div style={landingMiniStats}>
+                  <div style={landingStatCard}>
+                    <div style={landingStatValue}>4</div>
+                    <div style={landingStatLabel}>post types</div>
+                  </div>
+                  <div style={landingStatCard}>
+                    <div style={landingStatValue}>~1 min</div>
+                    <div style={landingStatLabel}>to publish</div>
+                  </div>
+                  <div style={landingStatCard}>
+                    <div style={landingStatValue}>Ashland</div>
+                    <div style={landingStatLabel}>verified campus</div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <div style={landingSectionHeader}>
+              <div style={landingSectionTitle}>Choose what you want to create</div>
+              <div style={landingSectionSubtitle}>
+                Pick one format and continue into the posting flow.
               </div>
             </div>
 
-            <div style={accountCard}>
-              <div style={{ fontSize: 13, color: "#475569", fontWeight: 800 }}>
-                Posting as <b>{email}</b>
-              </div>
-            </div>
-
-            <div style={{ marginTop: 16 }}>{renderModePicker()}</div>
+            <div style={{ marginTop: 18 }}>{renderModePicker()}</div>
           </>
         ) : (
           <div style={composerGrid(isDesktop)}>
@@ -2357,12 +2412,6 @@ export default function CreatePage() {
               </div>
 
               {renderStepper()}
-
-              <div style={accountInlineCard}>
-                <div style={{ fontSize: 13, color: "#475569", fontWeight: 800 }}>
-                  Posting as <b>{email}</b>
-                </div>
-              </div>
 
               {renderCurrentStep()}
 
@@ -2443,11 +2492,6 @@ const topBarButton: React.CSSProperties = {
   cursor: "pointer",
 };
 
-const heroHeader: React.CSSProperties = {
-  paddingTop: 6,
-  marginBottom: 14,
-};
-
 const heroHeaderCompact: React.CSSProperties = {
   marginBottom: 16,
 };
@@ -2458,20 +2502,6 @@ const pageEyebrow: React.CSSProperties = {
   textTransform: "uppercase",
   color: "#64748b",
   fontWeight: 1000,
-};
-
-const heroTitle: React.CSSProperties = {
-  fontSize: 36,
-  lineHeight: 1.02,
-  fontWeight: 1000,
-  letterSpacing: "-0.05em",
-};
-
-const heroSubtitle: React.CSSProperties = {
-  marginTop: 8,
-  fontSize: 15,
-  color: "#64748b",
-  fontWeight: 600,
 };
 
 const heroTitleSmall: React.CSSProperties = {
@@ -2487,22 +2517,6 @@ const heroSubtitleSmall: React.CSSProperties = {
   fontSize: 14,
   color: "#64748b",
   fontWeight: 600,
-};
-
-const accountCard: React.CSSProperties = {
-  background: "rgba(255,255,255,0.92)",
-  border: "1px solid #e5e7eb",
-  borderRadius: 20,
-  padding: "13px 15px",
-  boxShadow: "0 12px 28px rgba(15,23,42,0.04)",
-};
-
-const accountInlineCard: React.CSSProperties = {
-  marginTop: 16,
-  background: "rgba(255,255,255,0.9)",
-  border: "1px solid #e5e7eb",
-  borderRadius: 18,
-  padding: "12px 14px",
 };
 
 const statusCard: React.CSSProperties = {
@@ -2535,62 +2549,6 @@ const sideColumn: React.CSSProperties = {
 const desktopStickyPreview: React.CSSProperties = {
   position: "sticky",
   top: 16,
-};
-
-function modeCard(tone: "warm" | "blue" | "purple" | "neutral"): React.CSSProperties {
-  const palette =
-    tone === "warm"
-      ? { bg: "linear-gradient(135deg, #fff7ed 0%, #ffffff 100%)", border: "#fed7aa" }
-      : tone === "blue"
-      ? { bg: "linear-gradient(135deg, #eff6ff 0%, #ffffff 100%)", border: "#bfdbfe" }
-      : tone === "purple"
-      ? { bg: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%)", border: "#c4b5fd" }
-      : { bg: "linear-gradient(135deg, #f8fafc 0%, #ffffff 100%)", border: "#cbd5e1" };
-
-  return {
-    width: "100%",
-    display: "flex",
-    alignItems: "center",
-    gap: 16,
-    textAlign: "left",
-    padding: 18,
-    borderRadius: 28,
-    border: `1.5px solid ${palette.border}`,
-    background: palette.bg,
-    boxShadow: "0 14px 32px rgba(15,23,42,0.06)",
-    cursor: "pointer",
-  };
-}
-
-const modeIconBox: React.CSSProperties = {
-  width: 68,
-  height: 68,
-  borderRadius: 22,
-  display: "grid",
-  placeItems: "center",
-  fontSize: 30,
-  background: "rgba(255,255,255,0.92)",
-  border: "1px solid rgba(255,255,255,0.95)",
-  flexShrink: 0,
-};
-
-const modeTitle: React.CSSProperties = {
-  fontSize: 25,
-  fontWeight: 1000,
-  lineHeight: 1.08,
-};
-
-const modeDesc: React.CSSProperties = {
-  marginTop: 8,
-  fontSize: 14,
-  color: "#475569",
-  fontWeight: 700,
-};
-
-const modeArrow: React.CSSProperties = {
-  fontSize: 26,
-  color: "#64748b",
-  flexShrink: 0,
 };
 
 function stepperWrap(stepCount: number): React.CSSProperties {
@@ -3105,4 +3063,247 @@ const primaryButton: React.CSSProperties = {
   cursor: "pointer",
   fontWeight: 1000,
   boxShadow: "0 18px 35px rgba(3,19,61,0.22)",
+};
+
+const landingHeroCard: React.CSSProperties = {
+  position: "relative",
+  overflow: "hidden",
+  borderRadius: 32,
+  padding: 24,
+  minHeight: 280,
+  background:
+    "radial-gradient(circle at top left, rgba(99,102,241,0.16) 0%, rgba(99,102,241,0.06) 22%, rgba(255,255,255,0.96) 52%, rgba(255,255,255,0.98) 100%)",
+  border: "1px solid rgba(226,232,240,0.95)",
+  boxShadow: "0 24px 70px rgba(15,23,42,0.08)",
+};
+
+const landingHeroGlow: React.CSSProperties = {
+  position: "absolute",
+  top: -80,
+  right: -40,
+  width: 220,
+  height: 220,
+  borderRadius: "50%",
+  background: "radial-gradient(circle, rgba(59,130,246,0.18) 0%, rgba(59,130,246,0) 72%)",
+  pointerEvents: "none",
+};
+
+const landingHeroContent: React.CSSProperties = {
+  position: "relative",
+  zIndex: 1,
+};
+
+const landingEyebrow: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "8px 12px",
+  borderRadius: 999,
+  background: "rgba(255,255,255,0.72)",
+  border: "1px solid rgba(226,232,240,0.95)",
+  color: "#475569",
+  fontSize: 11,
+  fontWeight: 1000,
+  letterSpacing: "0.14em",
+};
+
+const landingHeroTitle: React.CSSProperties = {
+  marginTop: 18,
+  fontSize: 42,
+  lineHeight: 0.96,
+  letterSpacing: "-0.06em",
+  fontWeight: 1000,
+  color: "#020617",
+};
+
+const landingHeroSubtitle: React.CSSProperties = {
+  marginTop: 14,
+  maxWidth: 640,
+  fontSize: 15,
+  lineHeight: 1.6,
+  color: "#475569",
+  fontWeight: 600,
+};
+
+const landingMiniStats: React.CSSProperties = {
+  marginTop: 22,
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: 12,
+};
+
+const landingStatCard: React.CSSProperties = {
+  background: "rgba(255,255,255,0.74)",
+  border: "1px solid rgba(226,232,240,0.95)",
+  borderRadius: 20,
+  padding: "14px 14px",
+  backdropFilter: "blur(10px)",
+};
+
+const landingStatValue: React.CSSProperties = {
+  fontSize: 16,
+  fontWeight: 1000,
+  color: "#0f172a",
+};
+
+const landingStatLabel: React.CSSProperties = {
+  marginTop: 4,
+  fontSize: 12,
+  color: "#64748b",
+  fontWeight: 800,
+};
+
+const landingSectionHeader: React.CSSProperties = {
+  marginTop: 22,
+};
+
+const landingSectionTitle: React.CSSProperties = {
+  fontSize: 22,
+  lineHeight: 1.08,
+  fontWeight: 1000,
+  letterSpacing: "-0.035em",
+  color: "#020617",
+};
+
+const landingSectionSubtitle: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 14,
+  color: "#64748b",
+  fontWeight: 600,
+};
+
+const landingModesGrid: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+  gap: 14,
+};
+
+function modernModeCard(
+  tone: "warm" | "blue" | "purple" | "neutral"
+): React.CSSProperties {
+  const palette =
+    tone === "warm"
+      ? {
+          border: "rgba(251,146,60,0.22)",
+          shadow: "rgba(251,146,60,0.10)",
+        }
+      : tone === "blue"
+      ? {
+          border: "rgba(96,165,250,0.22)",
+          shadow: "rgba(59,130,246,0.10)",
+        }
+      : tone === "purple"
+      ? {
+          border: "rgba(139,92,246,0.22)",
+          shadow: "rgba(139,92,246,0.10)",
+        }
+      : {
+          border: "rgba(148,163,184,0.20)",
+          shadow: "rgba(15,23,42,0.08)",
+        };
+
+  return {
+    width: "100%",
+    textAlign: "left",
+    padding: 18,
+    borderRadius: 28,
+    border: `1px solid ${palette.border}`,
+    background: "rgba(255,255,255,0.94)",
+    boxShadow: `0 18px 50px ${palette.shadow}`,
+    cursor: "pointer",
+    transition: "transform 160ms ease, box-shadow 160ms ease",
+  };
+}
+
+const modernModeTopRow: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+};
+
+function modernModeIcon(
+  tone: "warm" | "blue" | "purple" | "neutral"
+): React.CSSProperties {
+  const bg =
+    tone === "warm"
+      ? "linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%)"
+      : tone === "blue"
+      ? "linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%)"
+      : tone === "purple"
+      ? "linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%)"
+      : "linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)";
+
+  return {
+    width: 58,
+    height: 58,
+    borderRadius: 18,
+    display: "grid",
+    placeItems: "center",
+    fontSize: 26,
+    background: bg,
+    border: "1px solid rgba(255,255,255,0.9)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.7)",
+    flexShrink: 0,
+  };
+}
+
+function modernModeBadge(
+  tone: "warm" | "blue" | "purple" | "neutral"
+): React.CSSProperties {
+  const colors =
+    tone === "warm"
+      ? { bg: "#fff7ed", color: "#9a3412", border: "#fdba74" }
+      : tone === "blue"
+      ? { bg: "#eff6ff", color: "#1d4ed8", border: "#93c5fd" }
+      : tone === "purple"
+      ? { bg: "#f5f3ff", color: "#6d28d9", border: "#c4b5fd" }
+      : { bg: "#f8fafc", color: "#334155", border: "#cbd5e1" };
+
+  return {
+    padding: "7px 10px",
+    borderRadius: 999,
+    background: colors.bg,
+    color: colors.color,
+    border: `1px solid ${colors.border}`,
+    fontSize: 11,
+    fontWeight: 1000,
+    whiteSpace: "nowrap",
+  };
+}
+
+const modernModeTitle: React.CSSProperties = {
+  marginTop: 16,
+  fontSize: 23,
+  lineHeight: 1.06,
+  fontWeight: 1000,
+  letterSpacing: "-0.04em",
+  color: "#020617",
+};
+
+const modernModeDesc: React.CSSProperties = {
+  marginTop: 9,
+  fontSize: 14,
+  lineHeight: 1.55,
+  color: "#475569",
+  fontWeight: 600,
+};
+
+const modernModeFooter: React.CSSProperties = {
+  marginTop: 18,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+};
+
+const modernModeAction: React.CSSProperties = {
+  fontSize: 13,
+  fontWeight: 1000,
+  color: "#0f172a",
+};
+
+const modernModeArrow: React.CSSProperties = {
+  fontSize: 22,
+  color: "#64748b",
+  fontWeight: 1000,
 };
