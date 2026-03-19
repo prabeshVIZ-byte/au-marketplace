@@ -29,7 +29,7 @@ type FeedRowFromView = {
   owner_role?: OwnerRole;
 };
 
-type ItemMeta = {
+type ItemSourceRow = {
   id: string;
   owner_id: string | null;
   is_claimed: boolean | null;
@@ -292,10 +292,7 @@ function titleCaseWords(v: string) {
 function isServiceRow(item: FeedRow) {
   const category = (item.category ?? "").toLowerCase().trim();
   const requestGroup = (item.request_group ?? "").toLowerCase().trim();
-  return (
-    category.startsWith("service:") ||
-    requestGroup.startsWith("service_offer:")
-  );
+  return category.startsWith("service:") || requestGroup.startsWith("service_offer:");
 }
 
 function isRequestRow(item: FeedRow) {
@@ -330,13 +327,22 @@ function requestCategoryLabel(item: FeedRow) {
   if (category.toLowerCase().startsWith("request:")) {
     return titleCaseWords(category.replace(/^request:/i, "").replace(/_/g, " "));
   }
-
   const group = (item.request_group ?? "").trim();
   return group ? titleCaseWords(group.replace(/_/g, " ")) : "Request";
 }
 
 function itemCategoryLabel(category: string | null | undefined) {
   return category ? titleCaseWords(category) : "Uncategorized";
+}
+
+function getServicePublicId(id: string) {
+  const cleaned = (id ?? "").replace(/-/g, "").toUpperCase();
+  return `SVC-${cleaned.slice(0, 6) || "000000"}`;
+}
+
+function isOwnedByCurrentUser(ownerId: string | null | undefined, authUserId: string | null | undefined) {
+  if (!ownerId || !authUserId) return false;
+  return ownerId === authUserId;
 }
 
 async function getAuthState(): Promise<AuthState> {
@@ -419,8 +425,8 @@ export default function FeedPage() {
     burstTimerRef.current = setTimeout(() => setBurstCardKey(null), 700);
   }
 
-  async function loadOwnerMeta(itemIds: string[]) {
-    if (itemIds.length === 0) return new Map<string, ItemMeta>();
+  async function loadItemSourceMap(itemIds: string[]) {
+    if (itemIds.length === 0) return new Map<string, ItemSourceRow>();
 
     const { data, error } = await supabase
       .from("items")
@@ -429,10 +435,12 @@ export default function FeedPage() {
       )
       .in("id", itemIds);
 
-    if (error) return new Map<string, ItemMeta>();
+    if (error) return new Map<string, ItemSourceRow>();
 
-    const map = new Map<string, ItemMeta>();
-    for (const row of (data as ItemMeta[]) || []) map.set(row.id, row);
+    const map = new Map<string, ItemSourceRow>();
+    for (const row of (data as ItemSourceRow[]) || []) {
+      map.set(row.id, row);
+    }
     return map;
   }
 
@@ -478,7 +486,9 @@ export default function FeedPage() {
     }
 
     const next: Record<string, boolean> = {};
-    for (const row of (data as Array<{ event_id: string }>) || []) next[String(row.event_id)] = true;
+    for (const row of (data as Array<{ event_id: string }>) || []) {
+      next[String(row.event_id)] = true;
+    }
     setMyAttending(next);
   }
 
@@ -527,40 +537,39 @@ export default function FeedPage() {
 
       if (error) throw new Error(error.message || "Error loading feed.");
 
-      const baseRows = ((data as FeedRowFromView[]) || []).map((row) => ({ ...row }));
-      const ids = baseRows.map((row) => row.id);
-      const meta = await loadOwnerMeta(ids);
+      const viewRows = ((data as FeedRowFromView[]) || []).map((row) => ({ ...row }));
+      const ids = viewRows.map((row) => row.id);
+      const sourceMap = await loadItemSourceMap(ids);
 
-      const merged: FeedRow[] = baseRows.map((row) => {
-        const m = meta.get(row.id);
-        return {
-          ...row,
-          owner_id: m?.owner_id ?? null,
-          is_claimed: m?.is_claimed ?? null,
-          post_type: (m?.post_type ?? "give") as PostType,
-          request_group: m?.request_group ?? null,
-          request_timeframe: m?.request_timeframe ?? null,
-          request_location: m?.request_location ?? null,
-          request_willing_to_pay: m?.request_willing_to_pay ?? null,
-          status: m?.status ?? row.status ?? "available",
-          interest_count: row.interest_count ?? 0,
-          hide_interest_count: m?.hide_interest_count ?? null,
-          price: m?.price ?? null,
-          pickup_location: m?.pickup_location ?? null,
-        };
-      });
+      const merged: FeedRow[] = viewRows
+        .map((row) => {
+          const src = sourceMap.get(row.id);
 
-      const visible = merged.filter((item) => {
-        if (isItemClosed(item)) return false;
-        if (isExpired(item.expires_at)) return false;
-        return true;
-      });
+          return {
+            ...row,
+            owner_id: src?.owner_id ?? null,
+            is_claimed: src?.is_claimed ?? null,
+            post_type: (src?.post_type ?? "give") as PostType,
+            request_group: src?.request_group ?? null,
+            request_timeframe: src?.request_timeframe ?? null,
+            request_location: src?.request_location ?? null,
+            request_willing_to_pay: src?.request_willing_to_pay ?? null,
+            status: src?.status ?? row.status ?? "available",
+            interest_count: Number(row.interest_count ?? 0),
+            hide_interest_count: src?.hide_interest_count ?? null,
+            price: src?.price ?? null,
+            pickup_location: src?.pickup_location ?? null,
+          };
+        })
+        .filter((item) => {
+          if (isItemClosed(item)) return false;
+          if (isExpired(item.expires_at)) return false;
+          return true;
+        });
 
-      setItems(visible);
+      setItems(merged);
 
-      const actionableIds = visible
-        .filter((item) => !isRequestRow(item))
-        .map((item) => item.id);
+      const actionableIds = merged.filter((item) => !isRequestRow(item)).map((item) => item.id);
 
       if (nextAuth.isLoggedIn && nextAuth.userId) {
         await loadMyInterestStatuses(nextAuth.userId, actionableIds);
@@ -1135,6 +1144,7 @@ export default function FeedPage() {
           item.request_timeframe ?? "",
           item.request_location ?? "",
           item.pickup_location ?? "",
+          getServicePublicId(item.id),
         ]
           .join(" ")
           .toLowerCase();
@@ -1765,7 +1775,7 @@ export default function FeedPage() {
 
           {!loading && tab !== "events"
             ? filteredItems.map((item) => {
-                const isMine = !!auth.userId && !!item.owner_id && item.owner_id === auth.userId;
+                const isMine = isOwnedByCurrentUser(item.owner_id, auth.userId);
                 const myStatus = myInterestMap[item.id];
                 const mineActive = isActiveInterestStatus(myStatus);
                 const loved = likedItemMap[item.id] === true;
@@ -1863,6 +1873,7 @@ export default function FeedPage() {
                   const publicState = itemPublicStatus(item);
                   const badge =
                     publicState === "in_talks" ? "IN TALKS" : publicState === "closed" ? "CLOSED" : "AVAILABLE";
+                  const publicServiceId = getServicePublicId(item.id);
 
                   return (
                     <article
@@ -1920,6 +1931,7 @@ export default function FeedPage() {
                         <div className="eyebrowRow">
                           <span className="eyebrowTag serviceTag">{serviceCategoryLabel(item)}</span>
                           <span className="eyebrowTag subtle">{serviceDeliveryLabel(item)}</span>
+                          <span className="eyebrowTag subtle">{publicServiceId}</span>
                           {item.owner_role ? <span className="eyebrowTag subtle">{item.owner_role}</span> : null}
                           {isMine ? <span className="eyebrowTag subtle">Yours</span> : null}
                         </div>
